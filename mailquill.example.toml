@@ -1,0 +1,28 @@
+# Mailquill configuration file.
+# Copy to mailquill.toml (project root) and fill in required values.
+#
+# Priority (highest wins): environment variables > this file > built-in defaults.
+# For env var names, use the same key in uppercase, e.g. CREDENTIAL_ENCRYPTION_KEY.
+# For nested keys (none currently), use __ as separator: SECTION__KEY.
+
+# ── Required ─────────────────────────────────────────────────────────────────
+
+# AES-256-GCM key. Generate: openssl rand -hex 32
+credential_encryption_key = "replace_me_64_hex_chars"
+
+# JWT signing secret. Generate: openssl rand -base64 48
+jwt_secret = "replace_me_long_random_string"
+
+# ── Optional — defaults shown ────────────────────────────────────────────────
+
+data_dir    = "./data"
+server_host = "0.0.0.0"
+server_port = 8080
+app_base_url = "http://localhost:8080"
+
+# ── OAuth2 (only needed for Gmail / Outlook OAuth login) ─────────────────────
+
+# google_oauth_client_id     = ""
+# google_oauth_client_secret = ""
+# microsoft_oauth_client_id     = ""
+# microsoft_oauth_client_secret = ""

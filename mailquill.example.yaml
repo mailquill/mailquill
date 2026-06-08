@@ -1,0 +1,19 @@
+# Mailquill configuration file (YAML alternative to mailquill.toml).
+# Copy to mailquill.yaml (project root) and fill in required values.
+# If both mailquill.toml and mailquill.yaml exist, TOML takes precedence.
+
+# Required
+credential_encryption_key: "replace_me_64_hex_chars"
+jwt_secret: "replace_me_long_random_string"
+
+# Optional
+data_dir: "./data"
+server_host: "0.0.0.0"
+server_port: 8080
+app_base_url: "http://localhost:8080"
+
+# OAuth2 (optional)
+# google_oauth_client_id: ""
+# google_oauth_client_secret: ""
+# microsoft_oauth_client_id: ""
+# microsoft_oauth_client_secret: ""

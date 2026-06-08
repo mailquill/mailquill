@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mailquill
+      POSTGRES_USER: mailquill
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mailquill}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailquill"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://mailquill:${POSTGRES_PASSWORD:-mailquill}@db:5432/mailquill
+
+volumes:
+  postgres-data:

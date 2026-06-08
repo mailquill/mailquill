@@ -1,0 +1,38 @@
+replicaCount: 1
+# Warning: replicaCount > 1 is only safe with database.type=postgres.
+# SQLite mode is single-instance only.
+
+image:
+  repository: ghcr.io/mailquill/mailquill
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+database:
+  # sqlite or postgres
+  type: sqlite
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+ingress:
+  enabled: false
+  hostname: ""
+  tls: false
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+env: {}
+
+existingSecret: ""
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false

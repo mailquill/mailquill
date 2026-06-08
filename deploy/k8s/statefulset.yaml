@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mailquill
+  namespace: mailquill
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mailquill
+  serviceName: mailquill
+  template:
+    metadata:
+      labels:
+        app: mailquill
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+      containers:
+        - name: mailquill
+          image: ghcr.io/mailquill/mailquill:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: mailquill-secrets
+          env:
+            - name: DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

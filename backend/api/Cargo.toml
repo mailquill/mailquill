@@ -1,0 +1,37 @@
+[package]
+name = "api"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mailquill"
+path = "src/main.rs"
+
+[dependencies]
+mailquill-core = { path = "../core" }
+db = { path = "../db" }
+imap-sync = { path = "../imap-sync" }
+smtp = { path = "../smtp" }
+axum = { version = "0.8", features = ["macros"] }
+rust-embed = { version = "8", features = ["axum-ex"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "set-header"] }
+jsonwebtoken = "9"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+mime_guess = "2"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "chrono", "uuid"] }
+argon2 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+oauth2 = "4"
+rand = "0.8"
+hex = "0.4"
+thiserror = "2"
+async-trait = "0.1"
+urlencoding = "2"
+figment = { version = "0.10", features = ["toml", "yaml", "env"] }
+web-push = "0.11"

@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "backend/core",
+    "backend/api",
+    "backend/db",
+    "backend/imap-sync",
+    "backend/smtp",
+    "backend/calendar-sync",
+    "backend/contact-sync",
+]
+resolver = "2"
+
+default-members = ["backend/api"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

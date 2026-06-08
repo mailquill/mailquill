@@ -1,0 +1,175 @@
+use axum::{
+    extract::{Extension, Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use serde_json::json;
+
+use crate::{error::AppError, middleware::UserId, state::AppState};
+
+pub async fn get_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+
+    let rows: Vec<(
+        String, String, String, i64, Option<String>, Option<String>, Option<String>,
+        String, String, String, String, String, Option<String>, String, bool, bool,
+    )> = sqlx::query_as(
+        "SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id_header, m.in_reply_to, m.list_id, m.subject, m.from_addr, m.to_addrs, m.snippet, m.internal_date, f.folder_type, f.full_path, m.is_read, m.is_flagged FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0 ORDER BY m.internal_date ASC",
+    )
+    .bind(&thread_id)
+    .fetch_all(&user_db)
+    .await?;
+
+    if rows.is_empty() {
+        return Err(AppError::NotFound);
+    }
+
+    let total = rows.len();
+    let messages: Vec<_> = rows
+        .into_iter()
+        .map(|(id, account_id, folder_id, uid, message_id_header, in_reply_to, list_id, subject, from_addr, to_addrs, snippet, internal_date, folder_type, folder_path, is_read, is_flagged)| {
+            json!({
+                "id": id,
+                "account_id": account_id,
+                "folder_id": folder_id,
+                "uid": uid,
+                "message_id_header": message_id_header,
+                "in_reply_to": in_reply_to,
+                "list_id": list_id,
+                "subject": subject,
+                "from_addr": from_addr,
+                "to_addrs": to_addrs,
+                "snippet": snippet,
+                "internal_date": internal_date,
+                "folder_type": folder_type,
+                "folder_path": folder_path,
+                "is_read": is_read,
+                "is_flagged": is_flagged,
+            })
+        })
+        .collect();
+
+    let thread_unread: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_read = 0 AND is_deleted = 0",
+    )
+    .bind(&thread_id)
+    .fetch_one(&user_db)
+    .await
+    .unwrap_or(0);
+
+    let participants: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT from_addr FROM messages WHERE thread_id = ? AND is_deleted = 0 ORDER BY internal_date ASC LIMIT 3",
+    )
+    .bind(&thread_id)
+    .fetch_all(&user_db)
+    .await
+    .unwrap_or_default();
+
+    Ok(Json(json!({
+        "thread_id": thread_id,
+        "messages": messages,
+        "thread_size": total,
+        "thread_unread": thread_unread,
+        "thread_participants": participants,
+    })))
+}
+
+pub async fn archive_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::Archive).await
+}
+
+pub async fn delete_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::Delete).await
+}
+
+pub async fn mark_thread_read(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(thread_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::MarkRead).await
+}
+
+enum ThreadAction {
+    Archive,
+    Delete,
+    MarkRead,
+}
+
+async fn bulk_thread_action(
+    state: &AppState,
+    user_id: &str,
+    thread_id: &str,
+    action: ThreadAction,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(user_id).await?;
+
+    let messages: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT m.id, m.account_id, m.uid, f.full_path FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0",
+    )
+    .bind(thread_id)
+    .fetch_all(&user_db)
+    .await?;
+
+    if messages.is_empty() {
+        return Err(AppError::NotFound);
+    }
+
+    for (msg_id, account_id, uid, folder_path) in &messages {
+        match action {
+            ThreadAction::Archive => {
+                state.sync_manager.queue_imap_move(
+                    user_id.to_owned(),
+                    account_id.clone(),
+                    *uid as u32,
+                    folder_path.clone(),
+                    "Archive".into(),
+                    false,
+                ).await;
+            }
+            ThreadAction::Delete => {
+                sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&user_db)
+                    .await?;
+                state.sync_manager.queue_imap_move(
+                    user_id.to_owned(),
+                    account_id.clone(),
+                    *uid as u32,
+                    folder_path.clone(),
+                    "Trash".into(),
+                    false,
+                ).await;
+            }
+            ThreadAction::MarkRead => {
+                sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&user_db)
+                    .await?;
+                state.sync_manager.queue_imap_flag(
+                    user_id.to_owned(),
+                    account_id.clone(),
+                    *uid as u32,
+                    folder_path.clone(),
+                    "seen".into(),
+                    true,
+                ).await;
+            }
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}

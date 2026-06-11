@@ -1,6 +1,6 @@
 use db::pool::UserDbPool;
 use mailquill_core::{blob::BlobStore, crypto::CredentialKey, jwt::JwtKey};
-use imap_sync::manager::SyncManager;
+use mail_sync::manager::SyncManager;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use web_push::IsahcWebPushClient;

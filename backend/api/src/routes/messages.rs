@@ -125,6 +125,34 @@ pub async fn get_message(
         }
     };
 
+    // Phishing analysis: messages synced before the analyser existed (or in
+    // lazy mode without an on-demand fetch above) have no verdict yet — fetch
+    // the raw message once to backfill. analyse_and_store sets the verdict, so
+    // this runs at most once per message.
+    let verdict: Option<Option<String>> =
+        sqlx::query_scalar("SELECT phishing_verdict FROM messages WHERE id = ?")
+            .bind(&message_id)
+            .fetch_optional(&user_db)
+            .await?;
+    if verdict.flatten().is_none() {
+        let _ = fetch_body_on_demand(&state, &user.0, &user_db, &message_id, row.account_id.clone(), row.folder_id.clone(), row.uid as u32).await;
+    }
+
+    let phishing: Option<(i32, String, String)> = sqlx::query_as(
+        "SELECT score, verdict, checks_json FROM phishing_analysis WHERE message_id = ?",
+    )
+    .bind(&message_id)
+    .fetch_optional(&user_db)
+    .await?;
+    let (phishing_score, phishing_verdict, phishing_checks) = match phishing {
+        Some((score, verdict, checks_json)) => (
+            Some(score),
+            Some(verdict),
+            serde_json::from_str::<serde_json::Value>(&checks_json).unwrap_or_else(|_| json!([])),
+        ),
+        None => (None, None, json!([])),
+    };
+
     // Thread summary
     let (thread_size, thread_unread) = if let Some(ref tid) = row.thread_id {
         let size: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_deleted = 0")
@@ -168,6 +196,9 @@ pub async fn get_message(
         "body_html": body_html,
         "body_text": body_text,
         "body_available": body_available,
+        "phishing_verdict": phishing_verdict,
+        "phishing_score": phishing_score,
+        "phishing_checks": phishing_checks,
         "thread_size": thread_size,
         "thread_unread": thread_unread,
         "attachments": attachments.into_iter().map(|(id, filename, content_type, size)| json!({
@@ -176,6 +207,41 @@ pub async fn get_message(
             "content_type": content_type,
             "size_bytes": size,
         })).collect::<Vec<_>>(),
+    })))
+}
+
+/// Re-run phishing analysis (e.g. after a brands-list update). Fetches the
+/// raw message via IMAP; analyse_and_store overwrites the previous result.
+pub async fn reanalyse_message(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(message_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT account_id, folder_id, uid FROM messages WHERE id = ?",
+    )
+    .bind(&message_id)
+    .fetch_optional(&user_db)
+    .await?;
+    let (account_id, folder_id, uid) = row.ok_or(AppError::NotFound)?;
+
+    fetch_body_on_demand(&state, &user.0, &user_db, &message_id, account_id, folder_id, uid as u32)
+        .await
+        .map_err(|_| AppError::Internal("reanalysis fetch failed".into()))?;
+
+    let result: Option<(i32, String, String)> = sqlx::query_as(
+        "SELECT score, verdict, checks_json FROM phishing_analysis WHERE message_id = ?",
+    )
+    .bind(&message_id)
+    .fetch_optional(&user_db)
+    .await?;
+    let (score, verdict, checks_json) = result.ok_or(AppError::NotFound)?;
+
+    Ok(Json(json!({
+        "score": score,
+        "verdict": verdict,
+        "checks": serde_json::from_str::<serde_json::Value>(&checks_json).unwrap_or_else(|_| json!([])),
     })))
 }
 
@@ -193,6 +259,7 @@ pub async fn mark_read(
         .bind(&message_id)
         .execute(&user_db)
         .await?;
+    refresh_unread_counts(&user_db).await;
 
     // Queue IMAP flag update
     queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", req.is_read).await;
@@ -276,6 +343,7 @@ pub async fn delete_message(
         .bind(&message_id)
         .execute(&user_db)
         .await?;
+    refresh_unread_counts(&user_db).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -311,6 +379,19 @@ pub async fn move_message(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Recompute every folder's cached unread_count from the messages table.
+/// The cache is otherwise only refreshed by IMAP sync, so any API mutation
+/// that touches is_read or is_deleted must call this or the sidebar badges
+/// go stale. A full recompute is cheap (few folders, messages.folder_id is
+/// indexed) and stays correct for multi-folder mutations like thread actions.
+pub(crate) async fn refresh_unread_counts(db: &sqlx::SqlitePool) {
+    let _ = sqlx::query(
+        "UPDATE folders SET unread_count = (SELECT COUNT(*) FROM messages WHERE folder_id = folders.id AND is_read = 0 AND is_deleted = 0)",
+    )
+    .execute(db)
+    .await;
+}
+
 async fn require_message_exists(db: &sqlx::SqlitePool, message_id: &str) -> Result<(), AppError> {
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM messages WHERE id = ?")
@@ -337,22 +418,23 @@ async fn get_message_location(
 
 async fn fetch_body_on_demand(
     state: &AppState,
-    user_id: &str,
+    _user_id: &str,
     user_db: &sqlx::SqlitePool,
     message_id: &str,
     account_id: String,
     folder_id: String,
     uid: u32,
 ) -> Result<(Option<String>, Option<String>), AppError> {
-    // Get account credentials
-    let row: Option<(Vec<u8>, String, i64, String)> = sqlx::query_as(
-        "SELECT credentials_encrypted, imap_host, imap_port, imap_auth_scheme FROM email_accounts WHERE id = ?",
+    // Get account credentials + backend kind
+    let row: Option<(Vec<u8>, String, i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT credentials_encrypted, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
     )
     .bind(&account_id)
     .fetch_optional(user_db)
     .await?;
 
-    let (creds_enc, host, port, auth_scheme) = row.ok_or(AppError::NotFound)?;
+    let (creds_enc, host, port, auth_scheme, imap_tls_cert, provider_kind) =
+        row.ok_or(AppError::NotFound)?;
     let creds_bytes = state
         .credential_key
         .decrypt(&creds_enc)
@@ -368,24 +450,36 @@ async fn fetch_body_on_demand(
             .await?;
     let folder_path = folder_path.ok_or(AppError::NotFound)?;
 
-    let imap_user = creds["imap_username"].as_str().unwrap_or("").to_owned();
-    let imap_pass = creds["imap_password"].as_str().unwrap_or("").to_owned();
-    let oauth_token = creds["oauth_access_token"].as_str().map(|s| s.to_owned());
+    // Prefer a freshly refreshed OAuth token over the (possibly expired) stored one.
+    let oauth_access_token =
+        match crate::oauth_tokens::fresh_access_token(&state.credential_key, user_db, &account_id)
+            .await
+        {
+            Ok(Some(token)) => Some(token),
+            _ => creds["oauth_access_token"].as_str().map(|s| s.to_owned()),
+        };
 
-    let result = imap_sync::fetch_body_by_uid(
-        &host,
-        port as u16,
-        &imap_user,
-        &imap_pass,
-        oauth_token.as_deref(),
-        &auth_scheme,
+    let config = mail_sync::provider::ProviderConfig {
+        host,
+        port: port as u16,
+        username: creds["imap_username"].as_str().unwrap_or("").to_owned(),
+        password: creds["imap_password"].as_str().unwrap_or("").to_owned(),
+        oauth_access_token,
+        auth_scheme,
+        trusted_cert_der: mail_sync::session::decode_trusted_cert(imap_tls_cert.as_deref()),
+        db: Some(user_db.clone()),
+        account_id: account_id.clone(),
+    };
+
+    let result = mail_sync::fetch_body_by_uid(
+        mail_sync::provider::ProviderKind::parse(&provider_kind),
+        &config,
         &folder_path,
         uid,
         state.blob_store.clone(),
         &account_id,
         &folder_id,
         message_id,
-        user_id,
         user_db,
     )
     .await

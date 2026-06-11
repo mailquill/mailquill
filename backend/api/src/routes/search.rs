@@ -14,12 +14,14 @@ pub struct SearchQuery {
     from: Option<String>,
     to: Option<String>,
     subject: Option<String>,
+    not: Option<String>,
     after: Option<String>,
     before: Option<String>,
     folder: Option<String>,
     account_id: Option<String>,
     is_read: Option<bool>,
     is_flagged: Option<bool>,
+    has_attachment: Option<bool>,
     cursor: Option<String>,
     limit: Option<i64>,
 }
@@ -75,6 +77,18 @@ pub async fn search(
         conditions.push("m.subject LIKE ?".to_string());
         binds.push(format!("%{subject}%"));
     }
+    // Exclude messages whose subject/sender/snippet contain these words.
+    if let Some(ref not) = q.not {
+        if !not.trim().is_empty() {
+            conditions.push(
+                "(m.subject NOT LIKE ? AND m.from_addr NOT LIKE ? AND m.snippet NOT LIKE ?)".to_string(),
+            );
+            let pat = format!("%{not}%");
+            binds.push(pat.clone());
+            binds.push(pat.clone());
+            binds.push(pat);
+        }
+    }
     if let Some(ref after) = q.after {
         conditions.push("m.internal_date >= ?".to_string());
         binds.push(after.clone());
@@ -98,6 +112,9 @@ pub async fn search(
     if let Some(is_flagged) = q.is_flagged {
         conditions.push("m.is_flagged = ?".to_string());
         binds.push(if is_flagged { "1".to_string() } else { "0".to_string() });
+    }
+    if q.has_attachment == Some(true) {
+        conditions.push("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)".to_string());
     }
 
     // Cursor-based pagination

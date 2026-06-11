@@ -1,9 +1,14 @@
 pub mod accounts;
 pub mod auth;
+pub mod calendar;
+pub mod contacts;
+pub mod dav;
+pub mod discover;
 pub mod mailbox;
 pub mod messages;
 pub mod oauth;
 pub mod push_subscriptions;
+pub mod rules;
 pub mod search;
 pub mod send;
 pub mod settings;

@@ -10,8 +10,11 @@ path = "src/main.rs"
 [dependencies]
 mailquill-core = { path = "../core" }
 db = { path = "../db" }
-imap-sync = { path = "../imap-sync" }
+mail-sync = { path = "../mail-sync" }
+phishing = { path = "../phishing" }
 smtp = { path = "../smtp" }
+contact-sync = { path = "../contact-sync" }
+calendar-sync = { path = "../calendar-sync" }
 axum = { version = "0.8", features = ["macros"] }
 rust-embed = { version = "8", features = ["axum-ex"] }
 serde = { version = "1", features = ["derive"] }
@@ -35,3 +38,10 @@ async-trait = "0.1"
 urlencoding = "2"
 figment = { version = "0.10", features = ["toml", "yaml", "env"] }
 web-push = "0.11"
+tokio-native-tls = "0.3"
+native-tls = "0.2"
+base64 = "0.22"
+hickory-resolver = "0.24"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+quick-xml = "0.37"
+sha2 = "0.10"

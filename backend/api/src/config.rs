@@ -26,12 +26,20 @@ pub struct Settings {
     pub google_oauth_client_secret: Option<String>,
     pub microsoft_oauth_client_id: Option<String>,
     pub microsoft_oauth_client_secret: Option<String>,
+    /// Periodically download the OpenPhish community feed for link-reputation
+    /// checks (outbound GET only; no user data leaves the server).
+    #[serde(default = "default_true")]
+    pub openphish_enabled: bool,
+    #[serde(default = "default_openphish_feed_url")]
+    pub openphish_feed_url: String,
 }
 
 fn default_data_dir() -> String { "./data".into() }
 fn default_host() -> String { "0.0.0.0".into() }
 fn default_port() -> u16 { 8080 }
 fn default_base_url() -> String { "http://localhost:8080".into() }
+fn default_true() -> bool { true }
+fn default_openphish_feed_url() -> String { "https://openphish.com/feed.txt".into() }
 
 impl Settings {
     /// Load configuration (later sources win):

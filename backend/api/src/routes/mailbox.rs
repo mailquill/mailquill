@@ -16,6 +16,22 @@ pub struct PaginationQuery {
     limit: Option<i64>,
     #[serde(rename = "folder")]
     _folder: Option<String>,
+    /// Cross-account view: inbox (default), starred, sent, drafts, archive,
+    /// spam, trash.
+    view: Option<String>,
+}
+
+/// SQL predicate selecting the messages for a unified view.
+fn view_filter(view: Option<&str>) -> &'static str {
+    match view.unwrap_or("inbox") {
+        "starred" => "m.is_flagged = 1",
+        "sent" => "f.folder_type = 'SENT'",
+        "drafts" => "f.folder_type = 'DRAFTS'",
+        "archive" => "f.folder_type = 'ARCHIVE'",
+        "spam" => "f.folder_type = 'SPAM'",
+        "trash" => "f.folder_type = 'TRASH'",
+        _ => "f.folder_type = 'INBOX'",
+    }
 }
 
 pub async fn unified_inbox(
@@ -33,12 +49,13 @@ pub async fn unified_inbox(
         String::new()
     };
 
-    // Get INBOX folders across all accounts
+    // Select the chosen view's messages across all accounts.
+    let filter = view_filter(q.view.as_deref());
     let sql = format!(
-        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id FROM messages m JOIN folders f ON f.id = m.folder_id WHERE f.folder_type = 'INBOX' AND m.is_deleted = 0 {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
+        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0 {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
     );
 
-    let rows: Vec<(String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>)> = sqlx::query_as(&sql)
+    let rows: Vec<MessageListRow> = sqlx::query_as(&sql)
         .bind(limit)
         .fetch_all(&user_db)
         .await?;
@@ -46,11 +63,51 @@ pub async fn unified_inbox(
     let next_cursor = rows.last().map(|r| r.5.clone());
     let has_more = rows.len() as i64 == limit;
 
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0",
+    ))
+    .fetch_one(&user_db)
+    .await
+    .unwrap_or(0);
+
     let items = build_thread_rows(&user_db, rows).await;
 
     Ok(Json(json!({
         "items": items,
+        "total": total,
         "next_cursor": if has_more { next_cursor } else { None::<String> },
+    })))
+}
+
+/// Unread/flagged counts per cross-account view, for the unified sidebar badges.
+pub async fn unified_counts(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+
+    // Unread totals grouped by folder type across all accounts.
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT folder_type, COALESCE(SUM(unread_count), 0) FROM folders GROUP BY folder_type",
+    )
+    .fetch_all(&user_db)
+    .await?;
+    let unread = |t: &str| rows.iter().find(|(ft, _)| ft == t).map(|(_, c)| *c).unwrap_or(0);
+
+    let starred: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE is_flagged = 1 AND is_deleted = 0")
+            .fetch_one(&user_db)
+            .await
+            .unwrap_or(0);
+
+    Ok(Json(json!({
+        "inbox": unread("INBOX"),
+        "starred": starred,
+        "sent": unread("SENT"),
+        "drafts": unread("DRAFTS"),
+        "archive": unread("ARCHIVE"),
+        "spam": unread("SPAM"),
+        "trash": unread("TRASH"),
     })))
 }
 
@@ -125,10 +182,10 @@ pub async fn list_folder_messages(
     };
 
     let sql = format!(
-        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id FROM messages m WHERE m.folder_id = ? AND m.is_deleted = 0 {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
+        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id = ? AND m.is_deleted = 0 {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
     );
 
-    let rows: Vec<(String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>)> = sqlx::query_as(&sql)
+    let rows: Vec<MessageListRow> = sqlx::query_as(&sql)
         .bind(&folder_id)
         .bind(limit)
         .fetch_all(&user_db)
@@ -137,25 +194,37 @@ pub async fn list_folder_messages(
     let next_cursor = rows.last().map(|r| r.5.clone());
     let has_more = rows.len() as i64 == limit;
 
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_deleted = 0")
+            .bind(&folder_id)
+            .fetch_one(&user_db)
+            .await
+            .unwrap_or(0);
+
     let items = build_thread_rows(&user_db, rows).await;
 
     Ok(Json(json!({
         "account_id": account_id,
         "folder_path": folder_path,
         "items": items,
+        "total": total,
         "next_cursor": if has_more { next_cursor } else { None::<String> },
     })))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// (id, thread_id, subject, from_addr, snippet, internal_date, is_read,
+///  is_flagged, account_id, folder_id, list_id, phishing_verdict, folder_path)
+type MessageListRow = (String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>, Option<String>, String);
+
 async fn build_thread_rows(
     db: &sqlx::SqlitePool,
-    rows: Vec<(String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>)>,
+    rows: Vec<MessageListRow>,
 ) -> Vec<serde_json::Value> {
     let mut result = Vec::with_capacity(rows.len());
 
-    for (msg_id, thread_id, subject, from_addr, snippet, internal_date, is_read, is_flagged, account_id, folder_id, list_id) in rows {
+    for (msg_id, thread_id, subject, from_addr, snippet, internal_date, is_read, is_flagged, account_id, folder_id, list_id, phishing_verdict, folder_path) in rows {
         let (thread_size, thread_unread, participants) = if let Some(ref tid) = thread_id {
             let size: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_deleted = 0")
                 .bind(tid).fetch_one(db).await.unwrap_or(1);
@@ -179,7 +248,9 @@ async fn build_thread_rows(
             "is_flagged": is_flagged,
             "account_id": account_id,
             "folder_id": folder_id,
+            "folder_path": folder_path,
             "list_id": list_id,
+            "phishing_verdict": phishing_verdict,
             "thread_size": thread_size,
             "thread_unread": thread_unread,
             "thread_participants": participants,

@@ -4,9 +4,15 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use serde::Deserialize;
 use serde_json::json;
 
-use crate::{error::AppError, middleware::UserId, state::AppState};
+use crate::{error::AppError, middleware::UserId, routes::messages::refresh_unread_counts, state::AppState};
+
+#[derive(Deserialize)]
+pub struct ThreadReadRequest {
+    is_read: bool,
+}
 
 pub async fn get_thread(
     State(state): State<AppState>,
@@ -99,14 +105,15 @@ pub async fn mark_thread_read(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
     Path(thread_id): Path<String>,
+    Json(req): Json<ThreadReadRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::MarkRead).await
+    bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::MarkRead(req.is_read)).await
 }
 
 enum ThreadAction {
     Archive,
     Delete,
-    MarkRead,
+    MarkRead(bool),
 }
 
 async fn bulk_thread_action(
@@ -154,8 +161,9 @@ async fn bulk_thread_action(
                     false,
                 ).await;
             }
-            ThreadAction::MarkRead => {
-                sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
+            ThreadAction::MarkRead(is_read) => {
+                sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
+                    .bind(is_read)
                     .bind(msg_id)
                     .execute(&user_db)
                     .await?;
@@ -165,10 +173,14 @@ async fn bulk_thread_action(
                     *uid as u32,
                     folder_path.clone(),
                     "seen".into(),
-                    true,
+                    is_read,
                 ).await;
             }
         }
+    }
+
+    if matches!(action, ThreadAction::Delete | ThreadAction::MarkRead(_)) {
+        refresh_unread_counts(&user_db).await;
     }
 
     Ok(StatusCode::NO_CONTENT)

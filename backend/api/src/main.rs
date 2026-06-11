@@ -1,27 +1,22 @@
-mod config;
-mod error;
-mod middleware;
-mod routes;
-mod state;
-mod sync_impl;
+use api::{config, middleware, routes};
 
 use axum::{
     http::{header, HeaderValue, StatusCode},
     middleware as axum_middleware,
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Extension, Router,
 };
 use mailquill_core::{blob::create_blob_store, crypto::CredentialKey, jwt::JwtKey, pii::init_pii_mode};
 use db::pool::UserDbPool;
-use imap_sync::manager::SyncManager;
+use mail_sync::manager::SyncManager;
 use rust_embed::RustEmbed;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::sync::Arc;
 use tower_http::{set_header::SetResponseHeaderLayer, trace::TraceLayer};
 use web_push::IsahcWebPushClient;
 
-use state::{AppState, VapidConfig};
+use api::state::{AppState, VapidConfig};
 
 #[derive(RustEmbed)]
 #[folder = "../../frontend/dist/"]
@@ -34,9 +29,16 @@ const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; font
 async fn main() {
     let settings = config::Settings::load();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // Sensible default when RUST_LOG is unset: our crates at debug, noisy
+    // dependency wire logs (IMAP/TLS/HTTP) capped at warn. RUST_LOG overrides.
+    let log_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "info,api=debug,mail_sync=debug,smtp=debug,async_imap=warn,imap_proto=warn,\
+             async_native_tls=warn,rustls=warn,hyper=warn,hyper_util=warn,h2=warn,sqlx=warn,\
+             tower_http=info,mio=warn,want=warn",
+        )
+    });
+    tracing_subscriber::fmt().with_env_filter(log_filter).init();
 
     init_pii_mode();
 
@@ -44,6 +46,11 @@ async fn main() {
     let jwt_key = Arc::new(JwtKey::from_secret(settings.jwt_secret.as_bytes()));
 
     let data_dir = settings.data_dir.clone();
+    phishing::init(
+        &data_dir,
+        settings.openphish_enabled.then(|| settings.openphish_feed_url.clone()),
+    )
+    .await;
     let app_db = open_app_db(&data_dir).await;
     let blob_store = create_blob_store();
     let user_db_pool = UserDbPool::new(&data_dir);
@@ -60,9 +67,6 @@ async fn main() {
             }
         });
 
-    // Re-start sync tasks for existing accounts
-    restart_existing_accounts(&sync_manager, &user_db_pool, &data_dir).await;
-
     let pkce_store = Arc::new(routes::oauth::new_pkce_store());
 
     let state = AppState {
@@ -76,12 +80,19 @@ async fn main() {
         web_push_client,
     };
 
+    // Re-start sync tasks for existing accounts (needs the assembled AppState as
+    // the SyncAppState the sync tasks run against).
+    restart_existing_accounts(&state, &data_dir).await;
+
     let auth_routes = Router::new()
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/refresh", post(routes::auth::refresh))
         .route("/auth/logout", post(routes::auth::logout))
-        .route("/auth/oauth/{provider}/start", get(routes::oauth::oauth_start).layer(axum_middleware::from_fn_with_state(state.clone(), middleware::require_auth)))
+        // `oauth_start` is a top-level browser redirect, so it cannot carry an
+        // Authorization header — it authenticates from a short-lived `token`
+        // query parameter validated inside the handler instead.
+        .route("/auth/oauth/{provider}/start", get(routes::oauth::oauth_start))
         .route("/auth/oauth/{provider}/callback", get(routes::oauth::oauth_callback))
         .route("/auth/me", get(routes::auth::me).layer(axum_middleware::from_fn_with_state(state.clone(), middleware::require_auth)));
 
@@ -93,10 +104,12 @@ async fn main() {
         .route("/accounts/{id}/sync-status", get(routes::accounts::sync_status))
         .route("/accounts/{id}/aliases", post(routes::accounts::add_alias).get(routes::accounts::list_aliases))
         .route("/accounts/{id}/aliases/{alias_id}", patch(routes::accounts::update_alias).delete(routes::accounts::delete_alias))
+        .route("/accounts/{id}/sync-dav", post(routes::dav::sync_dav))
         .route("/accounts/{id}/folders", get(routes::mailbox::list_folders))
         .route("/accounts/{id}/folders/{folder}/messages", get(routes::mailbox::list_folder_messages))
         // Mailbox
         .route("/mailbox/unified", get(routes::mailbox::unified_inbox))
+        .route("/mailbox/unified/counts", get(routes::mailbox::unified_counts))
         // Messages
         .route("/messages/{id}", get(routes::messages::get_message))
         .route("/messages/{id}/read", patch(routes::messages::mark_read))
@@ -104,6 +117,7 @@ async fn main() {
         .route("/messages/{id}/archive", post(routes::messages::archive_message))
         .route("/messages/{id}", delete(routes::messages::delete_message))
         .route("/messages/{id}/move", post(routes::messages::move_message))
+        .route("/messages/{id}/reanalyse", post(routes::messages::reanalyse_message))
         // Threads
         .route("/threads/{thread_id}", get(routes::threads::get_thread))
         .route("/threads/{thread_id}/archive", post(routes::threads::archive_thread))
@@ -113,8 +127,24 @@ async fn main() {
         .route("/send", post(routes::send::send_email))
         // Search
         .route("/search", get(routes::search::search))
+        // Server autodiscovery for the account wizard
+        .route("/discover", get(routes::discover::discover))
+        // Contacts
+        .route("/contacts", get(routes::contacts::list_contacts).post(routes::contacts::create_contact))
+        .route("/contacts/{id}", delete(routes::contacts::delete_contact))
+        // Calendar
+        .route("/calendars", get(routes::calendar::list_calendars).post(routes::calendar::create_calendar))
+        .route("/calendar/events", get(routes::calendar::list_events).post(routes::calendar::create_event))
+        .route("/calendar/events/{id}", delete(routes::calendar::delete_event))
+        // Rules
+        .route("/rules", get(routes::rules::list_rules).post(routes::rules::create_rule))
+        .route("/rules/{id}", put(routes::rules::update_rule).delete(routes::rules::delete_rule))
+        .route("/accounts/{id}/apply-sieve", post(routes::rules::apply_sieve))
         // Settings
         .route("/settings", get(routes::settings::get_settings).patch(routes::settings::patch_settings))
+        .route("/settings/image-allowlist", get(routes::settings::list_image_allowlist).post(routes::settings::add_image_allowlist))
+        .route("/settings/image-allowlist/{sender}", delete(routes::settings::remove_image_allowlist))
+        .route("/settings/phishing/reset", post(routes::settings::reset_phishing_analysis))
         // Push subscriptions
         .route("/push-subscriptions/vapid-public-key", get(routes::push_subscriptions::vapid_public_key))
         .route("/push-subscriptions", post(routes::push_subscriptions::create_subscription))
@@ -180,11 +210,11 @@ async fn open_app_db(data_dir: &str) -> SqlitePool {
 }
 
 /// Re-start sync tasks for all existing user accounts on server restart.
-async fn restart_existing_accounts(
-    sync_manager: &Arc<SyncManager>,
-    user_db_pool: &Arc<UserDbPool>,
-    data_dir: &str,
-) {
+///
+/// Spawns a real sync task per account so background polling resumes after a
+/// restart — without this, accounts sit in `pending` and never sync until a
+/// manual refresh.
+async fn restart_existing_accounts(state: &AppState, data_dir: &str) {
     use std::path::Path;
     let users_dir = Path::new(data_dir).join("users");
     if !users_dir.exists() {
@@ -196,7 +226,7 @@ async fn restart_existing_accounts(
     };
     while let Ok(Some(entry)) = dir.next_entry().await {
         let user_id = entry.file_name().to_string_lossy().into_owned();
-        let db = match user_db_pool.get(&user_id).await {
+        let db = match state.user_db_pool.get(&user_id).await {
             Ok(db) => db,
             Err(_) => continue,
         };
@@ -206,7 +236,10 @@ async fn restart_existing_accounts(
                 .await
                 .unwrap_or_default();
         for account_id in account_ids {
-            sync_manager.start_account_minimal(account_id, user_id.clone()).await;
+            state
+                .sync_manager
+                .start_account(account_id, user_id.clone(), Arc::new(state.clone()))
+                .await;
         }
     }
 }

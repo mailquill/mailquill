@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use imap_sync::manager::{NewMessageNotification, SyncAppState, SyncManager};
+use mail_sync::manager::{NewMessageNotification, SyncAppState, SyncManager};
 use mailquill_core::{blob::BlobStore, crypto::CredentialKey};
 use web_push::{
     ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushClient,
@@ -25,6 +25,14 @@ impl SyncAppState for AppState {
 
     fn sync_manager(&self) -> Arc<SyncManager> {
         self.sync_manager.clone()
+    }
+
+    async fn fresh_oauth_token(&self, user_id: &str, account_id: &str) -> Option<String> {
+        let user_db = self.user_db_pool.get(user_id).await.ok()?;
+        crate::oauth_tokens::fresh_access_token(&self.credential_key, &user_db, account_id)
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn notify_new_message(

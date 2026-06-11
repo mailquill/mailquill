@@ -71,10 +71,18 @@ export async function apiFetch(
   return res
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await apiFetch(path)
+// Endpoints that respond 204 No Content (thread actions, allowlist writes, …)
+// have no body to parse; res.json() would throw and turn a successful call
+// into a mutation error.
+async function parseResponse<T>(res: Response): Promise<T> {
   if (!res.ok) throw new ApiError(res.status, await res.text())
-  return res.json()
+  if (res.status === 204) return undefined as T
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
+}
+
+export async function apiGet<T>(path: string): Promise<T> {
+  return parseResponse(await apiFetch(path))
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
@@ -82,8 +90,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
     method: 'POST',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (!res.ok) throw new ApiError(res.status, await res.text())
-  return res.json()
+  return parseResponse(res)
 }
 
 export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
@@ -91,8 +98,7 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
     method: 'PATCH',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (!res.ok) throw new ApiError(res.status, await res.text())
-  return res.json()
+  return parseResponse(res)
 }
 
 export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
@@ -100,8 +106,7 @@ export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
     method: 'PUT',
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (!res.ok) throw new ApiError(res.status, await res.text())
-  return res.json()
+  return parseResponse(res)
 }
 
 export async function apiDelete(path: string): Promise<void> {
@@ -115,5 +120,21 @@ export class ApiError extends Error {
   constructor(status: number, message: string) {
     super(message)
     this.status = status
+  }
+
+  /** The server's `{"error": "..."}` detail, when the body carries one. */
+  get detail(): string | null {
+    const error = this.json?.error
+    return typeof error === 'string' ? error : null
+  }
+
+  /** The full parsed JSON body, for errors carrying structured payloads. */
+  get json(): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(this.message)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch {
+      return null
+    }
   }
 }

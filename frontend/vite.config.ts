@@ -4,7 +4,17 @@ import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
 
+// In dev the Vite server (default :5173) must forward API calls to the Rust
+// backend (default :8080); the production build is self-served by the backend,
+// so no proxy is needed there. Override the target with VITE_API_TARGET.
+const API_TARGET = process.env.VITE_API_TARGET ?? 'http://127.0.0.1:8080'
+
 export default defineConfig({
+  server: {
+    proxy: {
+      '/api': { target: API_TARGET, changeOrigin: true },
+    },
+  },
   plugins: [
     react(),
     tailwindcss(),

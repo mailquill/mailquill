@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { Outlet } from 'react-router-dom'
-import { AddAccountDialog } from '@/features/accounts'
+import { Outlet, useNavigate } from 'react-router-dom'
 import { ComposeDialog } from '@/features/compose'
 import type { ComposeInitialState } from '@/features/compose'
-import { SettingsDialog } from '@/features/settings'
 import { useOnlineStatus } from '@/shared/hooks/useOnlineStatus'
-import { SearchBar } from '@/widgets/SearchBar'
+import { useSyncActivity } from '@/shared/hooks/useAccounts'
+import { SIDEBAR_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
+import { PaneResizer } from '@/shared/components/PaneResizer'
+import { TopBar } from '@/widgets/TopBar'
 import { Sidebar } from '@/widgets/Sidebar'
 
 export interface MailOutletContext {
@@ -14,8 +15,11 @@ export interface MailOutletContext {
 
 export function MailLayout() {
   const isOnline = useOnlineStatus()
-  const [isAddAccountOpen, setIsAddAccountOpen] = useState(false)
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const navigate = useNavigate()
+  // Watch background syncs app-wide: auto-refresh folders/messages on completion.
+  useSyncActivity({ watch: true })
+  const sidebarWidth = useUiPrefs((s) => s.sidebarWidth)
+  const setSidebarWidth = useUiPrefs((s) => s.setSidebarWidth)
   const [isComposeOpen, setIsComposeOpen] = useState(false)
   const [composeState, setComposeState] = useState<ComposeInitialState>({ mode: 'new' })
   const [composeKey, setComposeKey] = useState(0)
@@ -28,10 +32,13 @@ export function MailLayout() {
 
   return (
     <div className="flex h-screen min-h-0 bg-background text-foreground">
-      <Sidebar
-        onCompose={() => openCompose()}
-        onAddAccount={() => setIsAddAccountOpen(true)}
-        onSettings={() => setIsSettingsOpen(true)}
+      <Sidebar onCompose={() => openCompose()} />
+      <PaneResizer
+        width={sidebarWidth}
+        min={SIDEBAR_WIDTH.min}
+        max={SIDEBAR_WIDTH.max}
+        onChange={setSidebarWidth}
+        label="Resize sidebar"
       />
       <main className="flex min-w-0 flex-1 flex-col">
         {!isOnline ? (
@@ -39,15 +46,11 @@ export function MailLayout() {
             Offline
           </div>
         ) : null}
-        <header className="flex h-14 shrink-0 items-center border-b border-border bg-background px-4">
-          <SearchBar />
-        </header>
+        <TopBar onSettings={() => navigate('/mail/settings')} />
         <div className="min-h-0 flex-1">
           <Outlet context={{ openCompose } satisfies MailOutletContext} />
         </div>
       </main>
-      <AddAccountDialog open={isAddAccountOpen} onClose={() => setIsAddAccountOpen(false)} />
-      <SettingsDialog open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
       <ComposeDialog
         key={composeKey}
         open={isComposeOpen}

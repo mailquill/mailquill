@@ -44,80 +44,96 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/* ── Code-Works / Mailquill design tokens ──────────────────────────────────
+   Surfaces and type follow the design system's slate palette; the signature
+   accent is orange (#EA580C). The sidebar stays navy in both themes for a
+   constant brand/identity surface. */
 :root {
-  --radius: 0.625rem;
+  --radius: 0.5rem;
 
-  --background: oklch(0.988 0.006 86);
-  --foreground: oklch(0.155 0.01 72);
-  --card: oklch(0.995 0.003 86);
-  --card-foreground: oklch(0.155 0.01 72);
-  --popover: oklch(0.995 0.003 86);
-  --popover-foreground: oklch(0.155 0.01 72);
-  --primary: oklch(0.22 0.014 72);
-  --primary-foreground: oklch(0.99 0.004 86);
-  --secondary: oklch(0.966 0.007 84);
-  --secondary-foreground: oklch(0.22 0.014 72);
-  --muted: oklch(0.959 0.008 84);
-  --muted-foreground: oklch(0.45 0.014 72);
-  --accent: oklch(0.955 0.01 84);
-  --accent-foreground: oklch(0.22 0.014 72);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.99 0.004 86);
-  --border: oklch(0.882 0.008 82);
-  --input: oklch(0.86 0.01 82);
-  --ring: oklch(0.58 0.018 72);
+  --background: #f8fafc; /* mq-bg */
+  --foreground: #0f172a; /* mq-text */
+  --card: #ffffff; /* mq-surface */
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #ea580c; /* signature orange accent */
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5f9; /* mq-surface-2 */
+  --secondary-foreground: #334155; /* mq-text-2 */
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --accent: #f1f5f9;
+  --accent-foreground: #334155;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e2e8f0; /* mq-border */
+  --input: #cbd5e1; /* mq-text-4 */
+  --ring: #3b82f6;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.982 0.006 86);
-  --sidebar-foreground: oklch(0.155 0.01 72);
-  --sidebar-primary: oklch(0.22 0.014 72);
-  --sidebar-primary-foreground: oklch(0.99 0.004 86);
-  --sidebar-accent: oklch(0.955 0.01 84);
-  --sidebar-accent-foreground: oklch(0.22 0.014 72);
-  --sidebar-border: oklch(0.882 0.008 82);
-  --sidebar-ring: oklch(0.58 0.018 72);
+
+  /* Navy sidebar surface (constant across themes) */
+  --sidebar: #0f172a;
+  --sidebar-foreground: #cbd5e1;
+  --sidebar-primary: #ea580c;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1e293b;
+  --sidebar-accent-foreground: #f8fafc;
+  --sidebar-border: #1e293b;
+  --sidebar-ring: #3b82f6;
   --master-data-active: oklch(0.91 0.055 78);
   --master-data-badge: oklch(0.68 0.19 45);
+
+  /* Extra Mailquill surfaces used directly via var() */
+  --mq-row-open: #eff4ff; /* selected / open conversation */
+  --mq-bulk: #f0f7ff; /* bulk-select bar */
+  --mq-text-3: #94a3b8;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --background: #0b1220; /* mq-bg */
+  --foreground: #eaf0f8; /* mq-text */
+  --card: #141c2b; /* mq-surface */
+  --card-foreground: #eaf0f8;
+  --popover: #141c2b;
+  --popover-foreground: #eaf0f8;
+  --primary: #ea580c;
+  --primary-foreground: #ffffff;
+  --secondary: #1f2a3e; /* mq-surface-2 */
+  --secondary-foreground: #aebbd0; /* mq-text-2 */
+  --muted: #1f2a3e;
+  --muted-foreground: #7e8ca6;
+  --accent: #1f2a3e;
+  --accent-foreground: #aebbd0;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #2a3650; /* mq-border */
+  --input: #2a3650;
+  --ring: #3b82f6;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+
+  --sidebar: #0f172a;
+  --sidebar-foreground: #cbd5e1;
+  --sidebar-primary: #ea580c;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1e293b;
+  --sidebar-accent-foreground: #f8fafc;
+  --sidebar-border: #1e293b;
+  --sidebar-ring: #3b82f6;
   --master-data-active: oklch(0.28 0.08 62);
   --master-data-badge: oklch(0.68 0.19 45);
+
+  --mq-row-open: #1b2740;
+  --mq-bulk: #172238;
+  --mq-text-3: #7e8ca6;
 }
 
 * {
@@ -129,4 +145,40 @@ body {
   color: var(--color-foreground);
   font-family: "Noto Sans", system-ui, sans-serif;
   margin: 0;
+}
+
+/* Slim, theme-aware scrollbars (transparent track, rounded thumb). */
+:root {
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-thumb-hover: #94a3b8;
+}
+.dark {
+  --scrollbar-thumb: #334155;
+  --scrollbar-thumb-hover: #475569;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  border-radius: 9999px;
+  /* Transparent border + padding-box clip gives the thumb breathing room. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }

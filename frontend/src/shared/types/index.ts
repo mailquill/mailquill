@@ -11,6 +11,8 @@ export interface Account {
   body_sync_mode: string
   sync_interval_secs: number
   created_at: string
+  carddav_url?: string | null
+  caldav_url?: string | null
 }
 
 export interface AccountAlias {
@@ -57,6 +59,15 @@ export interface Message {
   thread_participants?: string[]
   folder_type?: string | null
   folder_path?: string | null
+  phishing_verdict?: 'clean' | 'suspicious' | 'phishing' | null
+  phishing_score?: number | null
+  phishing_checks?: PhishingCheck[]
+}
+
+export interface PhishingCheck {
+  id: string
+  points: number
+  detail: string
 }
 
 export interface Thread {
@@ -75,17 +86,108 @@ export interface SyncStatus {
   state: string
   last_synced_at: string | null
   error: string | null
+  synced: number
+  total: number
 }
 
 export interface Settings {
   pgp_discovery_wkd_enabled: boolean
   pgp_discovery_keyserver_enabled: boolean
+  load_external_images: boolean
+}
+
+export interface AllowedImageSender {
+  sender: string
+  created_at: string
 }
 
 export interface User {
   user_id: string
   email: string
 }
+
+export interface Contact {
+  id: string
+  account_id: string | null
+  display_name: string
+  email: string | null
+  phone: string | null
+  company: string | null
+  job_title: string | null
+  notes: string | null
+  favorite: boolean
+  group_name: string | null
+}
+
+export interface NewContact {
+  account_id?: string | null
+  display_name: string
+  email?: string | null
+  phone?: string | null
+  company?: string | null
+  job_title?: string | null
+  notes?: string | null
+  favorite?: boolean
+  group_name?: string | null
+}
+
+export interface Calendar {
+  id: string
+  account_id: string | null
+  name: string
+  color: string
+}
+
+export interface CalendarEvent {
+  id: string
+  calendar_id: string
+  title: string
+  description: string | null
+  location: string | null
+  starts_at: string
+  ends_at: string
+  all_day: boolean
+  color: string
+}
+
+export interface NewCalendarEvent {
+  calendar_id: string
+  title: string
+  description?: string | null
+  location?: string | null
+  starts_at: string
+  ends_at: string
+  all_day?: boolean
+}
+
+export type RuleField = 'from' | 'to' | 'subject' | 'body'
+export type RuleOp = 'contains' | 'notContains' | 'is'
+export type RuleActionType = 'move' | 'markRead' | 'star' | 'delete' | 'forward'
+export type RuleEngine = 'sieve' | 'exchange'
+
+export interface RuleCondition {
+  field: RuleField
+  op: RuleOp
+  value: string
+}
+
+export interface RuleAction {
+  type: RuleActionType
+  value?: string
+}
+
+export interface Rule {
+  id: string
+  account_id: string | null
+  name: string
+  enabled: boolean
+  engine: RuleEngine
+  match_all: boolean
+  conditions: RuleCondition[]
+  actions: RuleAction[]
+}
+
+export type RuleInput = Omit<Rule, 'id'>
 
 export interface AttachmentInput {
   filename: string

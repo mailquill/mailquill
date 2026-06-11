@@ -1,80 +1,76 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { MailOpen } from 'lucide-react'
-import { MessageList } from '@/widgets/MessageList'
-import { Button } from '@/shared/components/ui/button'
-import { useAccounts, useTriggerSync } from '@/shared/hooks/useAccounts'
+import { useParams } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
+import { MessageList, SelectModeToggle } from '@/widgets/MessageList'
+import { ReadingPaneEmpty, ThreadDetail } from '@/widgets/ReadingPane'
 import { useUnifiedInbox } from '@/shared/hooks/useMessages'
+import { LIST_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
+import { PaneResizer } from '@/shared/components/PaneResizer'
+import { UNIFIED_LABEL_KEY, isUnifiedView } from '@/shared/lib/unifiedViews'
 import type { Message } from '@/shared/types'
 
 export function UnifiedMailboxPage() {
-  const navigate = useNavigate()
+  const { t } = useTranslation()
+  const { view: viewParam } = useParams()
+  const view = isUnifiedView(viewParam) ? viewParam : 'inbox'
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
-  const { data, isLoading, refetch, isFetching } = useUnifiedInbox()
-  const { data: accounts = [] } = useAccounts()
-  const triggerSync = useTriggerSync()
+  const [selectMode, setSelectMode] = useState(false)
+  // Clear the open thread when switching unified views (adjust state on change).
+  const [prevView, setPrevView] = useState(view)
+  if (view !== prevView) {
+    setPrevView(view)
+    setSelectedMessage(null)
+  }
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useUnifiedInbox(view)
   const messages = data?.messages ?? []
+  const listWidth = useUiPrefs((s) => s.listWidth)
+  const setListWidth = useUiPrefs((s) => s.setListWidth)
 
+  // Open the thread inline in the reading pane; keep the unified list and the
+  // clicked row highlighted rather than navigating to a folder route.
   function handleSelect(message: Message) {
     setSelectedMessage(message)
-    if (message.thread_id) {
-      navigate(`/mail/${message.account_id}/${encodeURIComponent(message.folder_id)}/${message.thread_id}`)
-    }
   }
 
-  function handleRefresh() {
-    if (!accounts.length) {
-      refetch()
-      return
-    }
-
-    accounts.forEach((account) => {
-      triggerSync.mutate(account.id, {
-        onSettled: () => {
-          refetch()
-        },
-      })
-    })
-  }
+  const selectedThreadId = selectedMessage?.thread_id ?? selectedMessage?.id ?? ''
 
   return (
-    <section className="grid h-full min-h-0 grid-cols-[minmax(320px,420px)_1fr]">
-      <div className="flex min-h-0 flex-col border-r border-border bg-card">
+    <section className="flex h-full min-h-0">
+      <div className="flex min-h-0 shrink-0 flex-col border-r border-border bg-card" style={{ width: listWidth }}>
         <header className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
-            <h1 className="text-lg font-semibold">Unified inbox</h1>
-            <p className="text-xs text-muted-foreground">{messages.length} conversations</p>
+            <h1 className="text-lg font-semibold">{t(UNIFIED_LABEL_KEY[view])}</h1>
+            <p className="text-xs text-muted-foreground">
+              {t('mail.conversations', { count: data?.total ?? messages.length })}
+            </p>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleRefresh}
-            disabled={isFetching || triggerSync.isPending}
-          >
-            Refresh
-          </Button>
+          <SelectModeToggle active={selectMode} onToggle={() => setSelectMode((m) => !m)} />
         </header>
         <MessageList
           messages={messages}
           activeId={selectedMessage?.id}
           onSelect={handleSelect}
           loading={isLoading}
+          selectMode={selectMode}
+          onLoadMore={fetchNextPage}
+          hasMore={hasNextPage}
+          loadingMore={isFetchingNextPage}
         />
       </div>
-      <EmptyDetail />
-    </section>
-  )
-}
-
-function EmptyDetail() {
-  return (
-    <div className="flex h-full items-center justify-center bg-background p-8 text-center">
-      <div className="flex max-w-sm flex-col items-center gap-3 text-muted-foreground">
-        <MailOpen className="size-10" aria-hidden="true" />
-        <h2 className="text-base font-medium text-foreground">Select a conversation</h2>
-        <p className="text-sm">Open a message from the list to read the thread.</p>
+      <PaneResizer
+        width={listWidth}
+        min={LIST_WIDTH.min}
+        max={LIST_WIDTH.max}
+        onChange={setListWidth}
+        label="Resize message list"
+      />
+      <div className="min-w-0 flex-1">
+        {selectedThreadId ? (
+          <ThreadDetail threadId={selectedThreadId} onThreadGone={() => setSelectedMessage(null)} />
+        ) : (
+          <ReadingPaneEmpty />
+        )}
       </div>
-    </div>
+    </section>
   )
 }

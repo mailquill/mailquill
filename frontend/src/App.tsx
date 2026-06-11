@@ -4,6 +4,9 @@ import { RegisterPage } from '@/pages/RegisterPage'
 import { MailLayout } from '@/pages/MailLayout'
 import { MailFolderPage } from '@/pages/MailFolderPage'
 import { SearchPage } from '@/pages/SearchPage'
+import { SettingsPage } from '@/pages/SettingsPage'
+import { ContactsPage } from '@/pages/ContactsPage'
+import { CalendarPage } from '@/pages/CalendarPage'
 import { UnifiedMailboxPage } from '@/pages/UnifiedMailboxPage'
 import { ProtectedRoute } from '@/app/ProtectedRoute'
 import { useAuthStore } from '@/app/store'
@@ -30,6 +33,11 @@ export default function App() {
       >
         <Route index element={<Navigate to="/mail/unified" replace />} />
         <Route path="unified" element={<UnifiedMailboxPage />} />
+        <Route path="unified/:view" element={<UnifiedMailboxPage />} />
+        <Route path="contacts" element={<ContactsPage />} />
+        <Route path="calendar" element={<CalendarPage />} />
+        <Route path="settings" element={<SettingsPage />} />
+        <Route path="accounts" element={<SettingsPage />} />
         <Route path="search" element={<SearchPage />} />
         <Route path=":accountId/:folder" element={<MailFolderPage />} />
         <Route path=":accountId/:folder/:threadId" element={<MailFolderPage />} />

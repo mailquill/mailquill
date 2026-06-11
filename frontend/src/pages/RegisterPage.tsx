@@ -2,6 +2,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useNavigate, Link } from 'react-router-dom'
+import { useTranslation } from 'react-i18next'
 import { useMutation } from '@tanstack/react-query'
 import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
@@ -11,16 +12,17 @@ import { apiPost } from '@/shared/api'
 
 const schema = z.object({
   email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: z.string().min(8, 'auth.passwordMin'),
   confirmPassword: z.string(),
 }).refine((d) => d.password === d.confirmPassword, {
-  message: 'Passwords do not match',
+  message: 'auth.passwordsNoMatch',
   path: ['confirmPassword'],
 })
 type FormData = z.infer<typeof schema>
 
 export function RegisterPage() {
   const navigate = useNavigate()
+  const { t } = useTranslation()
   const setAuth = useAuthStore((s) => s.setAuth)
 
   const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
@@ -44,41 +46,41 @@ export function RegisterPage() {
       <div className="w-full max-w-sm space-y-6 rounded-xl border border-border bg-card p-8 shadow-sm">
         <div className="space-y-1 text-center">
           <h1 className="text-2xl font-bold">Mailquill</h1>
-          <p className="text-sm text-muted-foreground">Create your account</p>
+          <p className="text-sm text-muted-foreground">{t('auth.createTitle')}</p>
         </div>
 
         <form onSubmit={handleSubmit((d) => registerMutation.mutate(d))} className="space-y-4">
           <div className="space-y-1">
-            <Label htmlFor="email">Email</Label>
+            <Label htmlFor="email">{t('auth.email')}</Label>
             <Input id="email" type="email" autoComplete="email" {...register('email')} />
-            {errors.email && <p className="text-xs text-destructive">{errors.email.message}</p>}
+            {errors.email && <p className="text-xs text-destructive">{t(errors.email.message ?? '')}</p>}
           </div>
 
           <div className="space-y-1">
-            <Label htmlFor="password">Password</Label>
+            <Label htmlFor="password">{t('auth.password')}</Label>
             <Input id="password" type="password" autoComplete="new-password" {...register('password')} />
-            {errors.password && <p className="text-xs text-destructive">{errors.password.message}</p>}
+            {errors.password && <p className="text-xs text-destructive">{t(errors.password.message ?? '')}</p>}
           </div>
 
           <div className="space-y-1">
-            <Label htmlFor="confirmPassword">Confirm password</Label>
+            <Label htmlFor="confirmPassword">{t('auth.confirmPassword')}</Label>
             <Input id="confirmPassword" type="password" autoComplete="new-password" {...register('confirmPassword')} />
-            {errors.confirmPassword && <p className="text-xs text-destructive">{errors.confirmPassword.message}</p>}
+            {errors.confirmPassword && <p className="text-xs text-destructive">{t(errors.confirmPassword.message ?? '')}</p>}
           </div>
 
           {registerMutation.error && (
-            <p className="text-xs text-destructive">Registration failed. Email may already be in use.</p>
+            <p className="text-xs text-destructive">{t('auth.registerFailed')}</p>
           )}
 
           <Button type="submit" className="w-full" disabled={registerMutation.isPending}>
-            {registerMutation.isPending ? 'Creating account…' : 'Create account'}
+            {registerMutation.isPending ? t('auth.creatingAccount') : t('auth.createAccount')}
           </Button>
         </form>
 
         <p className="text-center text-sm text-muted-foreground">
-          Already have an account?{' '}
+          {t('auth.haveAccount')}{' '}
           <Link to="/login" className="text-primary underline underline-offset-4">
-            Sign in
+            {t('auth.signIn')}
           </Link>
         </p>
       </div>

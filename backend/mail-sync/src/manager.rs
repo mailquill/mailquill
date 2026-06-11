@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio::{
     sync::{mpsc, Mutex},
     task::JoinHandle,
@@ -13,6 +10,10 @@ pub struct SyncStatus {
     pub state: String,
     pub last_synced_at: Option<String>,
     pub error: Option<String>,
+    /// Messages persisted so far in the current/last sync run.
+    pub synced: i64,
+    /// Total messages reported by the server across all folders.
+    pub total: i64,
 }
 
 impl Default for SyncStatus {
@@ -21,6 +22,8 @@ impl Default for SyncStatus {
             state: "idle".into(),
             last_synced_at: None,
             error: None,
+            synced: 0,
+            total: 0,
         }
     }
 }
@@ -80,13 +83,7 @@ impl SyncManager {
         let user_id_clone = user_id.clone();
 
         let handle = tokio::spawn(async move {
-            crate::sync::run_sync_task(
-                account_id_clone,
-                user_id_clone,
-                rx,
-                app_state,
-            )
-            .await;
+            crate::sync::run_sync_task(account_id_clone, user_id_clone, rx, app_state).await;
         });
 
         let mut tasks = self.tasks.lock().await;
@@ -141,6 +138,30 @@ impl SyncManager {
             .insert(account_id.to_owned(), status);
     }
 
+    /// Update lifecycle fields (state/last_synced_at/error) while preserving the
+    /// current progress counters.
+    pub async fn set_state(
+        &self,
+        account_id: &str,
+        state: &str,
+        last_synced_at: Option<String>,
+        error: Option<String>,
+    ) {
+        let mut statuses = self.statuses.lock().await;
+        let st = statuses.entry(account_id.to_owned()).or_default();
+        st.state = state.to_owned();
+        st.last_synced_at = last_synced_at;
+        st.error = error;
+    }
+
+    /// Update progress counters while preserving lifecycle fields.
+    pub async fn set_progress(&self, account_id: &str, synced: i64, total: i64) {
+        let mut statuses = self.statuses.lock().await;
+        let st = statuses.entry(account_id.to_owned()).or_default();
+        st.synced = synced;
+        st.total = total;
+    }
+
     /// Queue an immediate sync poll for an account.
     pub async fn force_poll(&self, account_id: &str) -> bool {
         let tasks = self.tasks.lock().await;
@@ -163,13 +184,16 @@ impl SyncManager {
     ) {
         let tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get(&account_id) {
-            let _ = task.tx.send(SyncCommand::IMapMove {
-                user_id,
-                uid,
-                src_folder,
-                dest_folder,
-                expunge,
-            }).await;
+            let _ = task
+                .tx
+                .send(SyncCommand::IMapMove {
+                    user_id,
+                    uid,
+                    src_folder,
+                    dest_folder,
+                    expunge,
+                })
+                .await;
         }
     }
 
@@ -185,13 +209,16 @@ impl SyncManager {
     ) {
         let tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get(&account_id) {
-            let _ = task.tx.send(SyncCommand::IMapFlag {
-                user_id,
-                uid,
-                folder,
-                flag,
-                set,
-            }).await;
+            let _ = task
+                .tx
+                .send(SyncCommand::IMapFlag {
+                    user_id,
+                    uid,
+                    folder,
+                    flag,
+                    set,
+                })
+                .await;
         }
     }
 
@@ -205,11 +232,14 @@ impl SyncManager {
     ) {
         let tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get(&account_id) {
-            let _ = task.tx.send(SyncCommand::IMapExpunge {
-                user_id,
-                uid,
-                folder,
-            }).await;
+            let _ = task
+                .tx
+                .send(SyncCommand::IMapExpunge {
+                    user_id,
+                    uid,
+                    folder,
+                })
+                .await;
         }
     }
 }
@@ -223,7 +253,7 @@ pub struct NewMessageNotification {
     pub subject: String,
 }
 
-/// Trait implemented by AppState so imap-sync doesn't depend on api types.
+/// Trait implemented by AppState so mail-sync doesn't depend on api types.
 #[async_trait::async_trait]
 pub trait SyncAppState: Send + Sync + 'static {
     async fn user_db(&self, user_id: &str) -> Result<sqlx::SqlitePool, String>;
@@ -236,5 +266,12 @@ pub trait SyncAppState: Send + Sync + 'static {
         _message: NewMessageNotification,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    /// A currently valid OAuth access token for the account, refreshed if
+    /// necessary. `None` for accounts without OAuth credentials. The api
+    /// crate implements the actual refresh (it owns the client secrets).
+    async fn fresh_oauth_token(&self, _user_id: &str, _account_id: &str) -> Option<String> {
+        None
     }
 }

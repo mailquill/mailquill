@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 /// Normalize subject by stripping reply/forward prefixes (task 5.4).
 pub fn normalize_subject(subject: &str) -> String {
     let prefixes = [
-        "re:", "fwd:", "aw:", "fwd:", "sv:", "sv:", "vs:",
-        "RE:", "FWD:", "AW:", "FWD:", "SV:", "Sv:", "Vs:",
+        "re:", "fwd:", "aw:", "fwd:", "sv:", "sv:", "vs:", "RE:", "FWD:", "AW:", "FWD:", "SV:",
+        "Sv:", "Vs:",
     ];
     let mut s = subject.trim().to_owned();
     loop {

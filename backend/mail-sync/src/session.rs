@@ -64,7 +64,21 @@ impl Authenticator for XOAuth2Authenticator {
     }
 }
 
+/// Decode a stored trust-exception certificate (base64 DER, as kept in
+/// `email_accounts.imap_tls_cert`/`smtp_tls_cert`). Invalid values are treated
+/// as absent so a corrupt row degrades to strict verification, never weaker.
+pub fn decode_trusted_cert(b64: Option<&str>) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(b64?.trim())
+        .ok()
+}
+
 /// Open TLS IMAP session.
+///
+/// `trusted_cert_der` is a user-approved trust exception (DER certificate
+/// accepted in the account wizard): it is added as a trust anchor and
+/// hostname verification is skipped, mirroring Thunderbird's security
+/// exceptions. `None` keeps strict WebPKI verification.
 pub async fn connect_imap(
     host: &str,
     port: u16,
@@ -72,9 +86,17 @@ pub async fn connect_imap(
     password: &str,
     oauth_token: Option<&str>,
     auth_scheme: &str,
+    trusted_cert_der: Option<&[u8]>,
 ) -> Result<ImapSession, SessionError> {
-    let tls = TlsConnector::builder()
-        .danger_accept_invalid_certs(false)
+    let mut builder = TlsConnector::builder();
+    if let Some(der) = trusted_cert_der {
+        let cert = native_tls::Certificate::from_der(der)
+            .map_err(|e| SessionError::Tls(format!("trusted certificate invalid: {e}")))?;
+        builder
+            .add_root_certificate(cert)
+            .danger_accept_invalid_hostnames(true);
+    }
+    let tls = builder
         .build()
         .map_err(|e| SessionError::Tls(e.to_string()))?;
     let tls = tokio_native_tls::TlsConnector::from(tls);
@@ -167,13 +189,57 @@ pub async fn check_thread_capability(session: &mut ImapSession) -> bool {
     }
 }
 
+/// Highest UID in the currently selected mailbox, or `None` if it is empty.
+///
+/// `UID FETCH * (UID)` targets the message with the highest sequence number;
+/// because UIDs increase monotonically with sequence, its UID is the largest.
+/// Used to bound chunked backfill instead of fetching an open-ended `n:*` range.
+pub async fn highest_uid(session: &mut ImapSession) -> Result<Option<u32>, SessionError> {
+    let msgs: Vec<_> = session.uid_fetch("*", "(UID)").await?.try_collect().await?;
+    Ok(msgs.iter().filter_map(|m| m.uid).max())
+}
+
+/// Fetch only FLAGS for a UID range, returning `(uid, is_seen, is_flagged)`.
+/// Used to reconcile read/flagged state of already-synced messages with the
+/// server, since header backfill only covers new UIDs.
+pub async fn fetch_flags(
+    session: &mut ImapSession,
+    uid_set: &str,
+) -> Result<Vec<(u32, bool, bool)>, SessionError> {
+    let msgs: Vec<_> = session
+        .uid_fetch(uid_set, "(UID FLAGS)")
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut out = Vec::new();
+    for m in &msgs {
+        if let Some(uid) = m.uid {
+            let seen = m
+                .flags()
+                .any(|f| matches!(f, async_imap::types::Flag::Seen));
+            let flagged = m
+                .flags()
+                .any(|f| matches!(f, async_imap::types::Flag::Flagged));
+            out.push((uid, seen, flagged));
+        }
+    }
+    Ok(out)
+}
+
 /// Fetch headers only (lazy sync).
 pub async fn fetch_headers(
     session: &mut ImapSession,
     uid_set: &str,
 ) -> Result<Vec<FetchedMessage>, SessionError> {
+    // Items MUST be parenthesised: async-imap forwards the query verbatim, and a
+    // bare multi-item list (`UID FLAGS …`) is invalid IMAP, so the server returns
+    // nothing. `UID` is included so `Fetch::uid` is populated for `parse_fetch`.
     let msgs: Vec<_> = session
-        .uid_fetch(uid_set, "FLAGS ENVELOPE INTERNALDATE BODY.PEEK[HEADER]")
+        .uid_fetch(
+            uid_set,
+            "(UID FLAGS ENVELOPE INTERNALDATE BODY.PEEK[HEADER])",
+        )
         .await?
         .try_collect()
         .await?;
@@ -192,8 +258,10 @@ pub async fn fetch_full(
     session: &mut ImapSession,
     uid_set: &str,
 ) -> Result<Vec<FetchedMessage>, SessionError> {
+    // See `fetch_headers`: items must be parenthesised, and UID requested so
+    // `Fetch::uid` is populated.
     let msgs: Vec<_> = session
-        .uid_fetch(uid_set, "FLAGS INTERNALDATE RFC822")
+        .uid_fetch(uid_set, "(UID FLAGS INTERNALDATE RFC822)")
         .await?
         .try_collect()
         .await?;
@@ -207,10 +275,7 @@ pub async fn fetch_full(
     Ok(messages)
 }
 
-fn parse_fetch(
-    msg: &async_imap::types::Fetch,
-    include_body: bool,
-) -> Option<FetchedMessage> {
+fn parse_fetch(msg: &async_imap::types::Fetch, include_body: bool) -> Option<FetchedMessage> {
     let uid = msg.uid?;
 
     let internal_date = msg
@@ -235,7 +300,7 @@ fn parse_fetch(
 
     if let Some(env) = msg.envelope() {
         if let Some(subject) = env.subject.as_ref() {
-            fetched.subject = bytes_to_string(subject);
+            fetched.subject = decode_words(&bytes_to_string(subject));
         }
         if let Some(from) = env.from.as_ref().and_then(|v| v.first()) {
             fetched.from_addr = format_address(from);
@@ -277,6 +342,12 @@ fn parse_fetch(
 
     if include_body {
         fetched.body = msg.body().map(|b| b.to_vec());
+    } else {
+        // Header-only fetch (lazy sync): keep the raw header block so
+        // sync-time phishing analysis can inspect Authentication-Results,
+        // Reply-To, and Return-Path. parse_mime on it yields no body parts,
+        // so snippet/blob handling is unaffected.
+        fetched.body = msg.header().map(|b| b.to_vec());
     }
 
     Some(fetched)
@@ -296,13 +367,26 @@ fn format_address(addr: &async_imap::imap_proto::types::Address) -> String {
     let name = addr
         .name
         .as_ref()
-        .map(|b| bytes_to_string(b))
+        .map(|b| decode_words(&bytes_to_string(b)))
         .unwrap_or_default();
 
     if name.is_empty() {
         format!("{mailbox}@{host}")
     } else {
         format!("{name} <{mailbox}@{host}>")
+    }
+}
+
+/// Decode RFC 2047 encoded-words (e.g. `=?UTF-8?B?...?=`) in a header value.
+/// IMAP ENVELOPE returns raw header text, so subjects and display names arrive
+/// still encoded; mailparse decodes encoded-words via `get_value`.
+fn decode_words(value: &str) -> String {
+    if !value.contains("=?") {
+        return value.to_owned();
+    }
+    match mailparse::parse_header(format!("X: {value}").as_bytes()) {
+        Ok((h, _)) => h.get_value(),
+        Err(_) => value.to_owned(),
     }
 }
 
@@ -348,7 +432,11 @@ pub async fn set_flag(
         "deleted" => "\\Deleted",
         other => other,
     };
-    let op = if set { "+FLAGS.SILENT" } else { "-FLAGS.SILENT" };
+    let op = if set {
+        "+FLAGS.SILENT"
+    } else {
+        "-FLAGS.SILENT"
+    };
     session
         .uid_store(&uid.to_string(), &format!("{op} ({imap_flag})"))
         .await?
@@ -370,10 +458,7 @@ pub async fn expunge_uid(session: &mut ImapSession, uid: u32) -> Result<(), Sess
 }
 
 /// Fetch a single message body by UID.
-pub async fn fetch_body_uid(
-    session: &mut ImapSession,
-    uid: u32,
-) -> Result<Vec<u8>, SessionError> {
+pub async fn fetch_body_uid(session: &mut ImapSession, uid: u32) -> Result<Vec<u8>, SessionError> {
     let msgs: Vec<_> = session
         .uid_fetch(&uid.to_string(), "BODY[]")
         .await?

@@ -1,11 +1,12 @@
 pub mod manager;
 pub mod mime;
+pub mod provider;
 pub mod session;
 pub mod sync;
 pub mod threading;
 
-use std::sync::Arc;
 use mailquill_core::blob::BlobStore;
+use std::sync::Arc;
 
 pub use session::SessionError;
 
@@ -16,41 +17,44 @@ pub async fn test_imap_connection(
     username: &str,
     password: &str,
     auth_scheme: &str,
+    trusted_cert_der: Option<&[u8]>,
 ) -> Result<(), SessionError> {
-    let mut sess = session::connect_imap(host, port, username, password, None, auth_scheme).await?;
+    let mut sess = session::connect_imap(
+        host,
+        port,
+        username,
+        password,
+        None,
+        auth_scheme,
+        trusted_cert_der,
+    )
+    .await?;
     let _ = sess.logout().await;
     Ok(())
 }
 
-/// On-demand body fetch for a specific message (task 4.10).
-/// Returns (html_body, text_body).
+/// On-demand body fetch for a specific message (task 4.10), via the account's
+/// configured backend. Returns (html_body, text_body).
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_body_by_uid(
-    host: &str,
-    port: u16,
-    username: &str,
-    password: &str,
-    oauth_token: Option<&str>,
-    auth_scheme: &str,
+    kind: provider::ProviderKind,
+    config: &provider::ProviderConfig,
     folder_path: &str,
     uid: u32,
     blob_store: Arc<dyn BlobStore>,
     account_id: &str,
     folder_id: &str,
     message_id: &str,
-    _user_id: &str,
     user_db: &sqlx::SqlitePool,
 ) -> Result<(Option<String>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
-    let mut sess = session::connect_imap(host, port, username, password, oauth_token, auth_scheme)
+    let mut prov = provider::connect(kind, config)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-    session::select_folder(&mut sess, folder_path)
+    let raw = prov
+        .fetch_raw(folder_path, uid)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-    let raw = session::fetch_body_uid(&mut sess, uid)
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-    let _ = sess.logout().await;
+    let _ = prov.close().await;
 
     let parsed = mime::parse_mime(&raw).map_err(|e| e.to_string())?;
 
@@ -66,7 +70,10 @@ pub async fn fetch_body_by_uid(
     let blob_key = mailquill_core::blob::blob_key_body(account_id, folder_id, uid, internal_date);
 
     let blob = bytes::Bytes::from(compressed.clone());
-    blob_store.put(&blob_key, blob).await.map_err(|e| e.to_string())?;
+    blob_store
+        .put(&blob_key, blob)
+        .await
+        .map_err(|e| e.to_string())?;
 
     sqlx::query(
         "INSERT OR IGNORE INTO message_bodies (message_id, blob_key, size_bytes, size_bytes_uncompressed) VALUES (?, ?, ?, ?)",
@@ -93,6 +100,10 @@ pub async fn fetch_body_by_uid(
         .await;
     }
 
+    // Phishing analysis needs the raw message (headers + body) — this is the
+    // only place lazy-synced messages have it.
+    phishing::analyse_and_store(user_db, message_id, &raw).await;
+
     Ok((parsed.html, parsed.text))
 }
 
@@ -104,9 +115,19 @@ pub async fn append_to_sent(
     password: &str,
     oauth_token: Option<&str>,
     auth_scheme: &str,
+    trusted_cert_der: Option<&[u8]>,
     raw_message: &[u8],
 ) -> Result<(), SessionError> {
-    let mut sess = session::connect_imap(host, port, username, password, oauth_token, auth_scheme).await?;
+    let mut sess = session::connect_imap(
+        host,
+        port,
+        username,
+        password,
+        oauth_token,
+        auth_scheme,
+        trusted_cert_der,
+    )
+    .await?;
     session::append_to_sent(&mut sess, raw_message).await?;
     let _ = sess.logout().await;
     Ok(())

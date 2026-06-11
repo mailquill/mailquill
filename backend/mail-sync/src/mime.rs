@@ -1,6 +1,5 @@
 /// MIME parsing utilities (task 4.8).
 /// Extracts text/plain, text/html, and attachments from RFC 2822 messages.
-
 use mailparse::{MailHeaderMap, ParsedMail};
 
 #[derive(Debug, Default)]
@@ -27,10 +26,7 @@ pub fn parse_mime(raw: &[u8]) -> Result<ParsedBody, String> {
 }
 
 fn walk_parts(part: &ParsedMail, body: &mut ParsedBody) {
-    let ct = part
-        .ctype
-        .mimetype
-        .to_lowercase();
+    let ct = part.ctype.mimetype.to_lowercase();
 
     if ct.starts_with("multipart/") {
         for sub in &part.subparts {
@@ -53,25 +49,22 @@ fn walk_parts(part: &ParsedMail, body: &mut ParsedBody) {
             .get_headers()
             .get_first_value("Content-Disposition")
             .and_then(|d| {
-                d.split(';')
-                    .find_map(|p| {
-                        let p = p.trim();
-                        if p.starts_with("filename=") || p.starts_with("filename*=") {
-                            Some(
-                                p.splitn(2, '=')
-                                    .nth(1)
-                                    .unwrap_or("")
-                                    .trim_matches('"')
-                                    .to_owned(),
-                            )
-                        } else {
-                            None
-                        }
-                    })
+                d.split(';').find_map(|p| {
+                    let p = p.trim();
+                    if p.starts_with("filename=") || p.starts_with("filename*=") {
+                        Some(
+                            p.splitn(2, '=')
+                                .nth(1)
+                                .unwrap_or("")
+                                .trim_matches('"')
+                                .to_owned(),
+                        )
+                    } else {
+                        None
+                    }
+                })
             })
-            .or_else(|| {
-                part.ctype.params.get("name").cloned()
-            });
+            .or_else(|| part.ctype.params.get("name").cloned());
 
         let data = part.get_body_raw().unwrap_or_default();
         body.attachments.push(Attachment {

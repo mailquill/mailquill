@@ -41,6 +41,10 @@ pub struct SendRequest {
     pub smtp_pass: String,
     pub oauth_token: Option<String>,
     pub auth_scheme: String,
+    /// User-approved TLS trust exception (DER certificate). Added as a trust
+    /// anchor with hostname verification disabled; `None` keeps strict WebPKI
+    /// verification.
+    pub trusted_cert_der: Option<Vec<u8>>,
 }
 
 /// Send an email and return (Message-ID, raw bytes for IMAP APPEND).
@@ -67,6 +71,20 @@ pub async fn send(req: SendRequest) -> Result<(String, Vec<u8>), SmtpError> {
 /// Build raw RFC 2822 bytes without sending — used for IMAP APPEND.
 pub fn build_raw_message(req: &SendRequest) -> Result<Vec<u8>, SmtpError> {
     Ok(build_message(req)?.formatted())
+}
+
+/// Build the message without sending and return (Message-ID, raw bytes) —
+/// used when delivery happens through a provider API instead of SMTP.
+pub fn build_raw_with_id(req: &SendRequest) -> Result<(String, Vec<u8>), SmtpError> {
+    let message = build_message(req)?;
+    let raw = message.formatted();
+    let message_id = message
+        .headers()
+        .get_raw("Message-ID")
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    Ok((message_id, raw))
 }
 
 fn build_message(req: &SendRequest) -> Result<Message, SmtpError> {
@@ -154,7 +172,15 @@ fn build_message(req: &SendRequest) -> Result<Message, SmtpError> {
 }
 
 fn build_transport(req: &SendRequest) -> Result<AsyncSmtpTransport<Tokio1Executor>, SmtpError> {
-    let tls_params = TlsParameters::builder(req.smtp_host.clone())
+    let mut tls_builder = TlsParameters::builder(req.smtp_host.clone());
+    if let Some(der) = &req.trusted_cert_der {
+        let cert = lettre::transport::smtp::client::Certificate::from_der(der.clone())
+            .map_err(|e| SmtpError::Build(format!("trusted certificate invalid: {e}")))?;
+        tls_builder = tls_builder
+            .add_root_certificate(cert)
+            .dangerous_accept_invalid_hostnames(true);
+    }
+    let tls_params = tls_builder
         .build_native()
         .map_err(|e| SmtpError::Build(e.to_string()))?;
 

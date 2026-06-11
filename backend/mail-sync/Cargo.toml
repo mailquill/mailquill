@@ -1,5 +1,5 @@
 [package]
-name = "imap-sync"
+name = "mail-sync"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,6 +12,9 @@ async-imap = { version = "0.10", default-features = false, features = ["runtime-
 tokio-native-tls = "0.3"
 native-tls = "0.2"
 mailparse = "0.15"
+phishing = { path = "../phishing" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+urlencoding = "2"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "chrono", "uuid"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

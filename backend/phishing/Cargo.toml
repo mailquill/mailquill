@@ -1,0 +1,15 @@
+[package]
+name = "phishing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mailparse = "0.15"
+strsim = "0.11"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "chrono", "uuid"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

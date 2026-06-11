@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS messages (
     message_id_header TEXT,
     thread_id         TEXT,
     in_reply_to       TEXT,
-    references        TEXT,
+    "references"      TEXT,
     list_id           TEXT,
     subject           TEXT    NOT NULL DEFAULT '',
     subject_normalized TEXT   NOT NULL DEFAULT '',

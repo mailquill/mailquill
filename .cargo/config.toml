@@ -1,9 +1,15 @@
 # Project-root Cargo config — applies to all crates in this repository.
-# The runner wraps every `cargo run` / `cargo test` binary execution:
+# On Unix the runner wraps every `cargo run` / `cargo test` binary execution:
 # it walks up from the scripts/ directory to find .env and loads it
 # before launching the binary. Env vars already set in the shell take
 # precedence (the script uses `set -a; . .env; set +a` without -o errexit
 # on the source, so missing vars are silently skipped).
+# On Windows there is no runner; use `cargo dev` / `cargo xtask`, which load
+# .env themselves before spawning the binary.
 
-[target.'cfg(all())']
+[target.'cfg(unix)']
 runner = "scripts/dev-runner.sh"
+
+[alias]
+xtask = "run -p xtask --"
+dev = "run -p xtask -- dev"

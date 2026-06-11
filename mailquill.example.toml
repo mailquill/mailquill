@@ -20,6 +20,16 @@ server_host = "0.0.0.0"
 server_port = 8080
 app_base_url = "http://localhost:8080"
 
+# ── Phishing detection ───────────────────────────────────────────────────────
+
+# Brand list for spoofing/lookalike checks is read from <data_dir>/brands.json
+# (seeded with defaults on first start — edit or replace it there).
+
+# OpenPhish community feed for link-reputation checks. Download only (no user
+# data leaves the server); refreshed every 12 hours, cached in <data_dir>.
+# openphish_enabled  = true
+# openphish_feed_url = "https://openphish.com/feed.txt"
+
 # ── OAuth2 (only needed for Gmail / Outlook OAuth login) ─────────────────────
 
 # google_oauth_client_id     = ""

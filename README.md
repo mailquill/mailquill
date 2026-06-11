@@ -12,18 +12,21 @@ Mailquill is a self-hosted web mail client with local user accounts, encrypted I
 ## Run
 
 Single command — builds the frontend and starts the release server with the UI
-embedded into the binary via rust-embed:
+embedded into the binary via rust-embed. Cross-platform (Linux, macOS, Windows):
 
 ```bash
-./scripts/start.sh
+cargo dev
 ```
 
 Configuration (`CREDENTIAL_ENCRYPTION_KEY`, `JWT_SECRET`, …) is read from `.env`
 in the repository root. The backend serves the embedded frontend and API on
 `http://localhost:8080`.
 
-`make run` is equivalent. To reuse an already-built `frontend/dist` and skip the
-frontend build, run `SKIP_FRONTEND=1 ./scripts/start.sh`.
+`make run` and `./scripts/start.sh` are Unix-only equivalents. To reuse an
+already-built `frontend/dist` and skip the frontend build, run
+`SKIP_FRONTEND=1 cargo dev`. Extra flags are forwarded to the server binary via
+`cargo xtask dev -- --some-flag`. Related tasks: `cargo xtask build`,
+`cargo xtask clean`.
 
 ### Manual / development
 

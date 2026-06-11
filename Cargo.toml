@@ -3,10 +3,12 @@ members = [
     "backend/core",
     "backend/api",
     "backend/db",
-    "backend/imap-sync",
+    "backend/mail-sync",
+    "backend/phishing",
     "backend/smtp",
     "backend/calendar-sync",
     "backend/contact-sync",
+    "xtask",
 ]
 resolver = "2"
 

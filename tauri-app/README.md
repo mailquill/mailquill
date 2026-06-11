@@ -10,7 +10,7 @@ Add the backend crates as path dependencies from the Tauri Rust workspace:
 [dependencies]
 mailquill-core = { path = "../backend/core" }
 db = { path = "../backend/db" }
-imap-sync = { path = "../backend/imap-sync" }
+mail-sync = { path = "../backend/mail-sync" }
 smtp = { path = "../backend/smtp" }
 ```
 

@@ -1,18 +1,15 @@
-.PHONY: build build-frontend build-backend run clean
+# Thin compatibility wrapper — the actual task logic lives in the
+# cross-platform cargo xtask (see xtask/src/main.rs). Prefer `cargo dev`,
+# `cargo xtask build`, and `cargo xtask clean` directly.
+.PHONY: build run clean
 
-build: build-frontend build-backend
+build:
+	cargo xtask build
 
 # Single-command startup: build the UI, then run the release server with the
 # frontend embedded via rust-embed.
 run:
-	./scripts/start.sh
-
-build-frontend:
-	cd frontend && pnpm run build
-
-build-backend: build-frontend
-	cd backend && cargo build --release
+	cargo dev
 
 clean:
-	cd frontend && rm -rf dist
-	cd backend && cargo clean
+	cargo xtask clean

@@ -19,10 +19,21 @@ export function useVapidPublicKey() {
   })
 }
 
+/** serviceWorker.ready never rejects; cap the wait so a missing/failed SW
+ *  surfaces as an error instead of a silently hanging toggle. */
+async function serviceWorkerReady(): Promise<ServiceWorkerRegistration> {
+  return Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('service worker not ready')), 5000),
+    ),
+  ])
+}
+
 export function useEnablePushNotifications() {
   return useMutation({
     mutationFn: async (publicKey: string) => {
-      const registration = await navigator.serviceWorker.ready
+      const registration = await serviceWorkerReady()
       const existing = await registration.pushManager.getSubscription()
       const subscription =
         existing ??
@@ -42,7 +53,7 @@ export function useEnablePushNotifications() {
 export function useDisablePushNotifications() {
   return useMutation({
     mutationFn: async () => {
-      const registration = await navigator.serviceWorker.ready
+      const registration = await serviceWorkerReady()
       const subscription = await registration.pushManager.getSubscription()
       await subscription?.unsubscribe()
 

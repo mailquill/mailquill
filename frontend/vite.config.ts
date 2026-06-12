@@ -63,6 +63,12 @@ export default defineConfig({
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
       },
+      // Register the service worker in dev too, otherwise
+      // navigator.serviceWorker.ready never resolves and push can't be enabled.
+      devOptions: {
+        enabled: true,
+        type: 'module',
+      },
     }),
   ],
   resolve: {

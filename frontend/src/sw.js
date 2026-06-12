@@ -9,20 +9,26 @@ self.skipWaiting()
 
 precacheAndRoute(self.__WB_MANIFEST)
 
-registerRoute(
-  ({ request }) => ['script', 'style', 'font', 'image'].includes(request.destination),
-  new CacheFirst({
-    cacheName: 'mailquill-static',
-  }),
-)
+// Runtime caching only in production. In dev these routes would intercept the
+// Vite HMR modules (script/style requests) and serve them CacheFirst, breaking
+// hot reload and shipping stale code. The push handler below runs in both, so
+// notifications still work in dev (devOptions registers the SW there).
+if (import.meta.env.PROD) {
+  registerRoute(
+    ({ request }) => ['script', 'style', 'font', 'image'].includes(request.destination),
+    new CacheFirst({
+      cacheName: 'mailquill-static',
+    }),
+  )
 
-registerRoute(
-  ({ url }) => url.pathname.startsWith('/api/'),
-  new NetworkFirst({
-    cacheName: 'mailquill-api',
-    networkTimeoutSeconds: 3,
-  }),
-)
+  registerRoute(
+    ({ url }) => url.pathname.startsWith('/api/'),
+    new NetworkFirst({
+      cacheName: 'mailquill-api',
+      networkTimeoutSeconds: 3,
+    }),
+  )
+}
 
 self.addEventListener('push', (event) => {
   const data = readPushPayload(event)

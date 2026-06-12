@@ -126,9 +126,9 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   const lastMessage = messages.at(-1)!
 
   return (
-    <article className="flex h-full min-h-0 flex-col bg-background">
-      {/* toolbar */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card px-5 py-3">
+    <article className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
+      {/* toolbar — sticky so the actions stay reachable while the thread scrolls */}
+      <div className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b border-border bg-card px-5 py-3">
         <ToolButton
           label={t('action.archive')}
           onClick={() => archiveThread.mutate(threadId, { onSuccess: () => onThreadGone?.() })}
@@ -180,7 +180,7 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
       </div>
 
       {/* messages */}
-      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-6 pb-6 pt-2">
+      <div className="flex flex-col gap-2.5 px-6 pb-6 pt-2">
         {messages.map((message) => (
           <MessageCard
             key={message.id}
@@ -454,7 +454,7 @@ function MessageCard({
             ) : view === 'html' ? (
               <HtmlBody html={htmlContent.html} title={message.subject} />
             ) : view === 'text' ? (
-              <pre className="whitespace-pre-wrap break-words font-mono text-[12.5px] leading-relaxed text-foreground">
+              <pre className="whitespace-pre-wrap break-words rounded-lg border border-border bg-background p-4 font-mono text-[12.5px] leading-relaxed text-foreground">
                 {messagePlain(displayed)}
               </pre>
             ) : view === 'headers' ? (
@@ -553,7 +553,9 @@ function HtmlBody({ html, title }: { html: string; title: string }) {
         // (descender space below images) and hide 1×1 tracking pixels, both of
         // which otherwise add a stray line of height below the email.
         style.textContent =
-          'html,body{height:auto!important;margin:0!important}' +
+          'html{height:auto!important;margin:0!important}' +
+          // Small inset so text/images don't sit flush against the edge.
+          'body{height:auto!important;margin:0!important;padding:8px!important;box-sizing:border-box!important}' +
           'img{max-width:100%;vertical-align:middle}' +
           'img[width="1"],img[height="1"]{display:none!important}'
         doc.head.appendChild(style)

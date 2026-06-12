@@ -87,14 +87,14 @@ pub async fn fetch_body_by_uid(
     .map_err(|e| e.to_string())?;
 
     // Store attachments (lazy-synced messages only get them here; full sync
-    // stores them during the folder walk). Skip if already recorded.
-    let have_attachments: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE message_id = ?")
+    // stores them during the folder walk). Re-stored from scratch each fetch so
+    // a re-fetch backfills columns added later (e.g. content_id for inline
+    // images) on rows synced before they existed.
+    if !parsed.attachments.is_empty() {
+        let _ = sqlx::query("DELETE FROM attachments WHERE message_id = ?")
             .bind(message_id)
-            .fetch_one(user_db)
-            .await
-            .unwrap_or(0);
-    if have_attachments == 0 {
+            .execute(user_db)
+            .await;
         for (i, att) in parsed.attachments.iter().enumerate() {
             let att_key = mailquill_core::blob::blob_key_attachment(
                 account_id,

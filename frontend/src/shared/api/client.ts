@@ -85,6 +85,13 @@ export async function apiGet<T>(path: string): Promise<T> {
   return parseResponse(await apiFetch(path))
 }
 
+/// Binary fetch (attachments, inline images) — bypasses the JSON parsing.
+export async function apiGetBlob(path: string): Promise<Blob> {
+  const res = await apiFetch(path)
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  return res.blob()
+}
+
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const res = await apiFetch(path, {
     method: 'POST',

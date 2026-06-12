@@ -62,6 +62,15 @@ export interface Message {
   phishing_verdict?: 'clean' | 'suspicious' | 'phishing' | null
   phishing_score?: number | null
   phishing_checks?: PhishingCheck[]
+  attachments?: MessageAttachment[]
+}
+
+export interface MessageAttachment {
+  id: string
+  filename: string | null
+  content_type: string
+  content_id: string | null
+  size_bytes: number | null
 }
 
 export interface PhishingCheck {

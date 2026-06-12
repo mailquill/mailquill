@@ -86,6 +86,40 @@ pub async fn fetch_body_by_uid(
     .await
     .map_err(|e| e.to_string())?;
 
+    // Store attachments (lazy-synced messages only get them here; full sync
+    // stores them during the folder walk). Skip if already recorded.
+    let have_attachments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_one(user_db)
+            .await
+            .unwrap_or(0);
+    if have_attachments == 0 {
+        for (i, att) in parsed.attachments.iter().enumerate() {
+            let att_key = mailquill_core::blob::blob_key_attachment(
+                account_id,
+                folder_id,
+                uid,
+                internal_date,
+                i,
+            );
+            let att_blob = bytes::Bytes::from(att.data.clone());
+            if blob_store.put(&att_key, att_blob).await.is_ok() {
+                let _ = sqlx::query(
+                    "INSERT OR IGNORE INTO attachments (message_id, filename, content_type, content_id, size_bytes, blob_key) VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(message_id)
+                .bind(att.filename.as_deref())
+                .bind(&att.content_type)
+                .bind(att.content_id.as_deref())
+                .bind(att.data.len() as i64)
+                .bind(&att_key)
+                .execute(user_db)
+                .await;
+            }
+        }
+    }
+
     // Update FTS index
     let body_text = parsed.text.as_deref().unwrap_or("");
     if !body_text.is_empty() {

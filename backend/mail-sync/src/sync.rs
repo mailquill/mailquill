@@ -434,11 +434,12 @@ async fn sync_folder(
                         let att_blob = bytes::Bytes::from(att.data.clone());
                         if let Ok(()) = app.blob_store().put(&att_key, att_blob).await {
                             let _ = sqlx::query(
-                            "INSERT OR IGNORE INTO attachments (message_id, filename, content_type, size_bytes, blob_key) VALUES (?, ?, ?, ?, ?)",
+                            "INSERT OR IGNORE INTO attachments (message_id, filename, content_type, content_id, size_bytes, blob_key) VALUES (?, ?, ?, ?, ?, ?)",
                         )
                         .bind(&msg_db_id)
                         .bind(att.filename.as_deref())
                         .bind(&att.content_type)
+                        .bind(att.content_id.as_deref())
                         .bind(att.data.len() as i64)
                         .bind(&att_key)
                         .execute(db)

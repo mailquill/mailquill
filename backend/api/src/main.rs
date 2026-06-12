@@ -118,6 +118,7 @@ async fn main() {
         .route("/messages/{id}", delete(routes::messages::delete_message))
         .route("/messages/{id}/move", post(routes::messages::move_message))
         .route("/messages/{id}/reanalyse", post(routes::messages::reanalyse_message))
+        .route("/attachments/{id}", get(routes::messages::download_attachment))
         // Threads
         .route("/threads/{thread_id}", get(routes::threads::get_thread))
         .route("/threads/{thread_id}/archive", post(routes::threads::archive_thread))

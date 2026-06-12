@@ -31,6 +31,7 @@ import {
   messageRawEml,
   downloadEml,
 } from '@/shared/lib/messageSource'
+import { apiGetBlob } from '@/shared/api'
 import { blockRemoteContent } from '@/shared/lib/remoteContent'
 import {
   useArchiveThread,
@@ -289,7 +290,37 @@ function MessageCard({
   const { data: imageAllowlist } = useImageAllowlist()
   const addAllowedSender = useAddAllowedImageSender()
   const [showRemoteOnce, setShowRemoteOnce] = useState(false)
+  const [cidUrls, setCidUrls] = useState<Record<string, string>>({})
   const displayed = detail ?? message
+
+  // Resolve inline attachments: the HTML references them as cid:<Content-ID>,
+  // which the browser can't load — fetch each one (authenticated) and swap in
+  // an object URL.
+  const inlineAttachments = useMemo(
+    () => (displayed.attachments ?? []).filter((a) => a.content_id),
+    [displayed.attachments],
+  )
+  useEffect(() => {
+    if (!expanded || !inlineAttachments.length) return
+    let cancelled = false
+    const urls: string[] = []
+    Promise.all(
+      inlineAttachments.map(async (att) => {
+        const blob = await apiGetBlob(`/attachments/${att.id}`)
+        const url = URL.createObjectURL(blob)
+        urls.push(url)
+        return [att.content_id as string, url] as const
+      }),
+    )
+      .then((entries) => {
+        if (!cancelled) setCidUrls(Object.fromEntries(entries))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+      urls.forEach((url) => URL.revokeObjectURL(url))
+    }
+  }, [expanded, inlineAttachments])
   const bodyLoaded = Boolean(displayed.body_html || displayed.body_text || displayed.snippet)
   const offlineMissing = !navigator.onLine && displayed.body_available === false
   const color = accountColor(message.account_id)
@@ -310,9 +341,12 @@ function MessageCard({
     (imageAllowlist ?? []).some((entry) => entry.sender === senderEmail)
   const htmlContent = useMemo(() => {
     if (!expanded || view !== 'html') return { html: '', blocked: false }
-    const rawHtml = displayed.body_html ?? messageHtml(displayed)
+    let rawHtml = displayed.body_html ?? messageHtml(displayed)
+    for (const [cid, url] of Object.entries(cidUrls)) {
+      rawHtml = rawHtml.split(`cid:${cid}`).join(url)
+    }
     return allowRemote ? { html: rawHtml, blocked: false } : blockRemoteContent(rawHtml)
-  }, [expanded, view, displayed, allowRemote])
+  }, [expanded, view, displayed, allowRemote, cidUrls])
 
   return (
     <section className="shrink-0 overflow-hidden rounded-lg border border-border bg-card">

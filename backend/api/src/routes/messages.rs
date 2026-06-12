@@ -165,8 +165,8 @@ pub async fn get_message(
     };
 
     // Attachments
-    let attachments: Vec<(String, Option<String>, String, Option<i64>)> = sqlx::query_as(
-        "SELECT id, filename, content_type, size_bytes FROM attachments WHERE message_id = ?",
+    let attachments: Vec<(String, Option<String>, String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT id, filename, content_type, content_id, size_bytes FROM attachments WHERE message_id = ?",
     )
     .bind(&message_id)
     .fetch_all(&user_db)
@@ -201,13 +201,51 @@ pub async fn get_message(
         "phishing_checks": phishing_checks,
         "thread_size": thread_size,
         "thread_unread": thread_unread,
-        "attachments": attachments.into_iter().map(|(id, filename, content_type, size)| json!({
+        "attachments": attachments.into_iter().map(|(id, filename, content_type, content_id, size)| json!({
             "id": id,
             "filename": filename,
             "content_type": content_type,
+            "content_id": content_id,
             "size_bytes": size,
         })).collect::<Vec<_>>(),
     })))
+}
+
+/// Raw attachment bytes with their content type — used for downloads and for
+/// resolving inline cid: images in the reader.
+pub async fn download_attachment(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(attachment_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT blob_key, content_type, filename FROM attachments WHERE id = ?",
+    )
+    .bind(&attachment_id)
+    .fetch_optional(&user_db)
+    .await?;
+    let (blob_key, content_type, filename) = row.ok_or(AppError::NotFound)?;
+
+    let bytes = state
+        .blob_store
+        .get(&blob_key)
+        .await
+        .map_err(|_| AppError::NotFound)?;
+
+    let disposition = match filename {
+        Some(name) => format!("inline; filename=\"{}\"", name.replace('"', "")),
+        None => "inline".to_owned(),
+    };
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    ))
 }
 
 /// Re-run phishing analysis (e.g. after a brands-list update). Fetches the

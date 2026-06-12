@@ -1,6 +1,7 @@
 export {
   apiFetch,
   apiGet,
+  apiGetBlob,
   apiPost,
   apiPatch,
   apiPut,

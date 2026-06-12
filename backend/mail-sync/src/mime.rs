@@ -14,6 +14,9 @@ pub struct ParsedBody {
 pub struct Attachment {
     pub filename: Option<String>,
     pub content_type: String,
+    /// MIME Content-ID (without angle brackets) for inline parts that the
+    /// HTML body references as `cid:` URLs.
+    pub content_id: Option<String>,
     pub data: Vec<u8>,
 }
 
@@ -41,8 +44,17 @@ fn walk_parts(part: &ParsedMail, body: &mut ParsedBody) {
         .unwrap_or_default()
         .to_lowercase();
 
+    let content_id = part
+        .get_headers()
+        .get_first_value("Content-ID")
+        .map(|v| v.trim().trim_start_matches('<').trim_end_matches('>').to_owned())
+        .filter(|v| !v.is_empty());
+
+    // Inline images often carry only a Content-ID, no Content-Disposition —
+    // they must still be stored so cid: references in the HTML resolve.
     let is_attachment = disposition.starts_with("attachment")
-        || (disposition.starts_with("inline") && !ct.starts_with("text/"));
+        || (disposition.starts_with("inline") && !ct.starts_with("text/"))
+        || (content_id.is_some() && !ct.starts_with("text/") && !ct.starts_with("multipart/"));
 
     if is_attachment {
         let filename = part
@@ -70,6 +82,7 @@ fn walk_parts(part: &ParsedMail, body: &mut ParsedBody) {
         body.attachments.push(Attachment {
             filename,
             content_type: ct.clone(),
+            content_id,
             data,
         });
         return;

@@ -370,7 +370,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
               <ChevronLeft className="size-4" />
               {t('wiz.back')}
             </Button>
-            <Button type="button" className="ml-auto" disabled={!step3Valid || createAccount.isPending} onClick={finish}>
+            <Button type="button" className="ml-auto" disabled={!step3Valid || createAccount.isPending} onClick={() => finish()}>
               <Check className="size-4" />
               {createAccount.isPending ? t('settings.adding') : t('settings.addAccount')}
             </Button>

@@ -223,6 +223,7 @@ type AccountEditInput = z.input<typeof accountEditSchema>
 type AccountEditData = z.output<typeof accountEditSchema>
 
 function AccountCard({ account }: { account: Account }) {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const updateAccount = useUpdateAccount()
   const deleteAccount = useDeleteAccount()

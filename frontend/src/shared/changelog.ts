@@ -1,4 +1,5 @@
-export const APP_VERSION = '1.6.0'
+/** Injected from package.json at build time (see vite.config.ts). */
+export const APP_VERSION: string = __APP_VERSION__
 
 export type ChangeType = 'new' | 'improved' | 'fixed'
 

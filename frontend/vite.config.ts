@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
+import { version } from './package.json'
 
 // In dev the Vite server (default :5173) must forward API calls to the Rust
 // backend (default :8080); the production build is self-served by the backend,
@@ -10,6 +11,10 @@ import path from 'path'
 const API_TARGET = process.env.VITE_API_TARGET ?? 'http://127.0.0.1:8080'
 
 export default defineConfig({
+  // package.json is the single source of truth for the app version.
+  define: {
+    __APP_VERSION__: JSON.stringify(version),
+  },
   server: {
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: true },

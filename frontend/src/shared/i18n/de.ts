@@ -93,6 +93,16 @@ export const de = {
     licenses: 'Lizenzen',
     openSourceLicenses: 'Open-Source-Lizenzen',
     licensesIntro: 'Open-Source-Projekte, mit denen dieser Client gebaut ist.',
+    viewProject: 'Projekt ansehen',
+  },
+  sysInfo: {
+    title: 'Systeminformationen',
+    changelog: 'Änderungshistorie',
+    legal: 'Rechtliches',
+    current: 'Aktuell',
+    new: 'Neu',
+    improved: 'Verbessert',
+    fixed: 'Behoben',
   },
   syncMenu: {
     title: 'Aktualisierungsstatus',

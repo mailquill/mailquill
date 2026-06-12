@@ -1,6 +1,6 @@
 import { MailSearch } from '@/widgets/MailSearch'
 import { ThemeMenu } from '@/widgets/topbar/ThemeMenu'
-import { LicensesMenu } from '@/widgets/topbar/LicensesMenu'
+import { SystemInfoMenu } from '@/widgets/topbar/SystemInfoMenu'
 import { SyncStatusMenu } from '@/widgets/topbar/SyncStatusMenu'
 import { NotificationMenu } from '@/widgets/topbar/NotificationMenu'
 import { AccountMenu } from '@/widgets/topbar/AccountMenu'
@@ -15,7 +15,7 @@ export function TopBar({ onSettings }: TopBarProps) {
       <MailSearch />
       <div className="flex shrink-0 items-center gap-2">
         <ThemeMenu />
-        <LicensesMenu />
+        <SystemInfoMenu />
         <SyncStatusMenu />
         <NotificationMenu />
         <AccountMenu onSettings={onSettings} />

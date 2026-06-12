@@ -81,6 +81,16 @@ export const en = {
     licenses: 'Licenses',
     openSourceLicenses: 'Open-source licenses',
     licensesIntro: 'Open-source projects this client is built with.',
+    viewProject: 'View project',
+  },
+  sysInfo: {
+    title: 'System information',
+    changelog: 'Changelog',
+    legal: 'Legal',
+    current: 'Current',
+    new: 'New',
+    improved: 'Improved',
+    fixed: 'Fixed',
   },
   action: {
     reply: 'Reply',

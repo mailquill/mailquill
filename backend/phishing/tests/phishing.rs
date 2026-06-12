@@ -1,4 +1,9 @@
-use phishing::{analyse, bundled_brands, OpenPhishFeed};
+use phishing::{analyse, load_brands_file, OpenPhishFeed};
+
+/// The shipped brand list, loaded from the crate's brands.json at test time.
+fn bundled_brands() -> Vec<(String, String)> {
+    load_brands_file(concat!(env!("CARGO_MANIFEST_DIR"), "/brands.json"))
+}
 
 fn raw(headers: &str, html: Option<&str>) -> Vec<u8> {
     match html {
@@ -45,6 +50,15 @@ fn brand_subdomain_does_not_fire() {
     let msg = raw("From: PayPal <service@mail.paypal.com>\r\n", None);
     let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
     assert!(!report.checks.iter().any(|c| c.id == "display_name_spoof"));
+}
+
+#[test]
+fn regional_brand_domain_does_not_fire() {
+    // paypal.de is a legitimate PayPal domain; claiming "PayPal" from it must
+    // not flag as spoofing, even though the list also has paypal.com.
+    let msg = raw("From: PayPal <service@paypal.de>\r\n", None);
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    assert!(report.checks.is_empty(), "checks: {:?}", report.checks);
 }
 
 #[test]

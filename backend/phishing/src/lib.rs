@@ -32,77 +32,6 @@ pub struct Report {
     pub checks: Vec<Check>,
 }
 
-/// Seed brand list: canonical domain → brand name. Written to
-/// `<data_dir>/brands.json` on first start; from then on that file is the
-/// source of truth and can be edited/replaced by the operator. User additions
-/// live in `user_brand_entries` and are merged at analysis time.
-const DEFAULT_BRANDS: &[(&str, &str)] = &[
-    ("paypal.com", "PayPal"),
-    ("amazon.com", "Amazon"),
-    ("amazon.de", "Amazon"),
-    ("apple.com", "Apple"),
-    ("icloud.com", "iCloud"),
-    ("microsoft.com", "Microsoft"),
-    ("outlook.com", "Outlook"),
-    ("google.com", "Google"),
-    ("gmail.com", "Gmail"),
-    ("facebook.com", "Facebook"),
-    ("instagram.com", "Instagram"),
-    ("whatsapp.com", "WhatsApp"),
-    ("linkedin.com", "LinkedIn"),
-    ("netflix.com", "Netflix"),
-    ("spotify.com", "Spotify"),
-    ("ebay.com", "eBay"),
-    ("ebay.de", "eBay"),
-    ("klarna.com", "Klarna"),
-    ("elster.de", "ELSTER"),
-    ("bund.de", "Bund"),
-    ("zoll.de", "Zoll"),
-    ("sparkasse.de", "Sparkasse"),
-    ("volksbank.de", "Volksbank"),
-    ("commerzbank.de", "Commerzbank"),
-    ("deutsche-bank.de", "Deutsche Bank"),
-    ("postbank.de", "Postbank"),
-    ("dkb.de", "DKB"),
-    ("ing.de", "ING-DiBa"),
-    ("n26.com", "N26"),
-    ("comdirect.de", "Comdirect"),
-    ("targobank.de", "Targobank"),
-    ("santander.de", "Santander"),
-    ("barclays.de", "Barclays"),
-    ("mastercard.com", "Mastercard"),
-    ("visa.com", "Visa"),
-    ("americanexpress.com", "American Express"),
-    ("coinbase.com", "Coinbase"),
-    ("binance.com", "Binance"),
-    ("bitpanda.com", "Bitpanda"),
-    ("dhl.de", "DHL"),
-    ("dpd.de", "DPD"),
-    ("hermes.de", "Hermes"),
-    ("gls.de", "GLS"),
-    ("ups.com", "UPS"),
-    ("fedex.com", "FedEx"),
-    ("deutschepost.de", "Deutsche Post"),
-    ("telekom.de", "Telekom"),
-    ("vodafone.de", "Vodafone"),
-    ("o2online.de", "O2"),
-    ("1und1.de", "1&1"),
-    ("ionos.de", "IONOS"),
-    ("gmx.net", "GMX"),
-    ("web.de", "WEB.DE"),
-    ("t-online.de", "T-Online"),
-    ("strato.de", "Strato"),
-    ("hetzner.com", "Hetzner"),
-    ("steampowered.com", "Steam"),
-    ("booking.com", "Booking.com"),
-    ("airbnb.com", "Airbnb"),
-    ("dropbox.com", "Dropbox"),
-    ("adobe.com", "Adobe"),
-    ("docusign.com", "DocuSign"),
-    ("ikea.com", "IKEA"),
-    ("ikano.de", "Ikano"),
-];
-
 const VERDICT_CLEAN: &str = "clean";
 const VERDICT_SUSPICIOUS: &str = "suspicious";
 const VERDICT_PHISHING: &str = "phishing";
@@ -126,17 +55,62 @@ pub struct OpenPhishFeed {
 static FILE_BRANDS: OnceLock<Vec<(String, String)>> = OnceLock::new();
 static FEED: OnceLock<RwLock<OpenPhishFeed>> = OnceLock::new();
 
-pub fn bundled_brands() -> Vec<(String, String)> {
-    DEFAULT_BRANDS.iter().map(|(d, n)| (d.to_string(), n.to_string())).collect()
+/// File name of the brand list, in both `<data_dir>` (operator override) and
+/// the shipped default locations.
+const BRANDS_FILE: &str = "brands.json";
+
+/// Load a brands file by path, returning an empty list on any error. Exposed
+/// for callers/tests that want to analyse with a specific brand list.
+pub fn load_brands_file(path: impl AsRef<Path>) -> Vec<(String, String)> {
+    read_brands_file(path.as_ref()).unwrap_or_default()
 }
 
-/// Initialise external threat data. Loads (or seeds) `<data_dir>/brands.json`,
-/// loads the cached OpenPhish feed if present, and — when `feed_url` is set —
-/// spawns a background task refreshing the feed every 12 hours.
+/// Read and parse a brands file, lowercasing the domain.
+fn read_brands_file(path: &Path) -> Option<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<Vec<BrandEntry>>(&text) {
+        Ok(entries) => Some(
+            entries
+                .into_iter()
+                .map(|e| (e.domain.to_lowercase(), e.name))
+                .collect(),
+        ),
+        Err(e) => {
+            warn!("phishing: {} is not valid brands JSON: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Locate the shipped default `brands.json`. It is part of the repo/release,
+/// not compiled into the binary, so it is found by path at runtime. Honours an
+/// explicit override via the `MAILQUILL_BRANDS_FILE` env var, then tries paths
+/// relative to the working directory and the executable.
+fn shipped_brands_path() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(explicit) = std::env::var("MAILQUILL_BRANDS_FILE") {
+        candidates.push(PathBuf::from(explicit));
+    }
+    candidates.push(PathBuf::from(BRANDS_FILE));
+    candidates.push(PathBuf::from("backend/phishing").join(BRANDS_FILE));
+    candidates.push(PathBuf::from("phishing").join(BRANDS_FILE));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(BRANDS_FILE));
+            candidates.push(dir.join("share/mailquill").join(BRANDS_FILE));
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Initialise external threat data. Loads brands (operator override in
+/// `<data_dir>/brands.json`, else the shipped default — copied into data_dir
+/// on first start so the operator has an editable copy), loads the cached
+/// OpenPhish feed, and — when `feed_url` is set — spawns a 12-hour refresh.
 pub async fn init(data_dir: &str, feed_url: Option<String>) {
     let dir = Path::new(data_dir);
     let _ = std::fs::create_dir_all(dir);
-    let _ = FILE_BRANDS.set(load_or_seed_brands(dir));
+    let _ = FILE_BRANDS.set(load_brands(dir));
 
     let feed_lock = FEED.get_or_init(|| RwLock::new(OpenPhishFeed::default()));
     let cache_path = dir.join("openphish.txt");
@@ -154,34 +128,32 @@ pub async fn init(data_dir: &str, feed_url: Option<String>) {
     }
 }
 
-fn load_or_seed_brands(dir: &Path) -> Vec<(String, String)> {
-    let path = dir.join("brands.json");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<Vec<BrandEntry>>(&text) {
-            Ok(entries) => {
-                info!("phishing: loaded {} brands from {}", entries.len(), path.display());
-                return entries.into_iter().map(|e| (e.domain.to_lowercase(), e.name)).collect();
+fn load_brands(dir: &Path) -> Vec<(String, String)> {
+    // 1. Operator override in the data dir wins.
+    let override_path = dir.join(BRANDS_FILE);
+    if let Some(brands) = read_brands_file(&override_path) {
+        info!("phishing: loaded {} brands from {}", brands.len(), override_path.display());
+        return brands;
+    }
+
+    // 2. Shipped default (repo/release). Seed a copy into the data dir so the
+    //    operator has an editable file.
+    if let Some(shipped) = shipped_brands_path() {
+        if let Some(brands) = read_brands_file(&shipped) {
+            if let Err(e) = std::fs::copy(&shipped, &override_path) {
+                warn!("phishing: could not seed {}: {e}", override_path.display());
             }
-            Err(e) => {
-                warn!("phishing: {} is not valid brands JSON ({e}); using bundled list", path.display());
-            }
-        },
-        Err(_) => {
-            // First start: seed the file so the operator has something to edit.
-            let entries: Vec<BrandEntry> = DEFAULT_BRANDS
-                .iter()
-                .map(|(d, n)| BrandEntry { domain: d.to_string(), name: n.to_string() })
-                .collect();
-            if let Ok(json) = serde_json::to_string_pretty(&entries) {
-                if let Err(e) = std::fs::write(&path, json) {
-                    warn!("phishing: could not seed {}: {e}", path.display());
-                } else {
-                    info!("phishing: seeded default brands at {}", path.display());
-                }
-            }
+            info!(
+                "phishing: loaded {} brands from shipped {}",
+                brands.len(),
+                shipped.display()
+            );
+            return brands;
         }
     }
-    bundled_brands()
+
+    warn!("phishing: no brands.json found; brand checks disabled");
+    Vec::new()
 }
 
 fn parse_feed(text: &str) -> OpenPhishFeed {
@@ -230,7 +202,7 @@ async fn fetch_feed(url: &str) -> Result<String, reqwest::Error> {
 }
 
 fn current_brands() -> Vec<(String, String)> {
-    FILE_BRANDS.get().cloned().unwrap_or_else(bundled_brands)
+    FILE_BRANDS.get().cloned().unwrap_or_default()
 }
 
 fn verdict_for(score: i32) -> &'static str {
@@ -351,32 +323,52 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
         .map(|t| t.to_owned())
         .collect();
 
+    // A brand can have several legitimate domains (paypal.com + paypal.de,
+    // amazon.com + amazon.de). Group them by brand name so a sender on ANY of
+    // a brand's domains is not flagged as spoofing that brand.
+    let mut domains_by_brand: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for (brand_domain, brand_name) in brands {
-        let brand_domain = brand_domain.to_lowercase();
-        // Sender legitimately on the brand domain (or a subdomain of it).
-        if from_domain == brand_domain || from_domain.ends_with(&format!(".{brand_domain}")) {
+        domains_by_brand
+            .entry(brand_name.to_lowercase())
+            .or_default()
+            .push(brand_domain.to_lowercase());
+    }
+
+    let on_domain = |domain: &str| from_domain == domain || from_domain.ends_with(&format!(".{domain}"));
+
+    for (brand_name_lower, brand_domains) in &domains_by_brand {
+        // Sender legitimately on one of this brand's domains — never a spoof.
+        if brand_domains.iter().any(|d| on_domain(d)) {
             continue;
         }
 
-        // Display name claims the brand but the domain doesn't match.
-        let brand_lower = brand_name.to_lowercase();
-        let claims_brand = if brand_lower.contains(' ') {
-            display_name.to_lowercase().contains(&brand_lower)
+        let claims_brand = if brand_name_lower.contains(' ') {
+            display_name.to_lowercase().contains(brand_name_lower.as_str())
         } else {
             // Token match avoids substring false positives ("ing" in "Marketing").
-            name_tokens.iter().any(|t| t == &brand_lower)
+            name_tokens.iter().any(|t| t == brand_name_lower)
         };
         if claims_brand && !from_domain.is_empty() {
+            let expected = brand_domains.join(", ");
             checks.push(Check {
                 id: "display_name_spoof",
                 points: 40,
                 detail: format!(
-                    "Display name claims \"{brand_name}\" but the message was sent from {from_domain} (expected {brand_domain})"
+                    "Display name claims \"{brand_name_lower}\" but the message was sent from {from_domain} (expected {expected})"
                 ),
             });
         }
+    }
 
-        // Typosquatting: small edit distance between domains (sans TLD).
+    // Typosquatting: small edit distance between the sender domain and any
+    // known brand domain (sans TLD). Skip when the sender is on a same-org
+    // domain to avoid flagging legitimate regional variants.
+    for (brand_domain, _) in brands {
+        let brand_domain = brand_domain.to_lowercase();
+        if on_domain(&brand_domain) || same_org(&from_domain, &brand_domain) {
+            continue;
+        }
         let from_head = sans_tld(&from_domain);
         let brand_head = sans_tld(&brand_domain);
         if from_head.len() >= 5 && brand_head.len() >= 5 {
@@ -390,8 +382,8 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
             }
         }
     }
-    // The same display name can claim several brand variants (amazon.com /
-    // amazon.de); count spoof and lookalike once each.
+
+    // The same display name can claim several brand variants; count once each.
     dedup_by_id(&mut checks, "display_name_spoof");
     dedup_by_id(&mut checks, "domain_lookalike");
 

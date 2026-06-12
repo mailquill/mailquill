@@ -43,6 +43,11 @@ RUN mkdir /data && chown 1000:1000 /data
 
 COPY --from=rust-builder /mailquill /usr/local/bin/mailquill
 
+# Shipped (not compiled-in) phishing brand list. Operators can override it by
+# editing /data/brands.json, which is seeded from this file on first start.
+COPY --from=rust-builder /app/backend/phishing/brands.json /usr/local/share/mailquill/brands.json
+ENV MAILQUILL_BRANDS_FILE=/usr/local/share/mailquill/brands.json
+
 USER 1000
 VOLUME ["/data"]
 EXPOSE 8080

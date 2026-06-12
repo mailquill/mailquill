@@ -22,8 +22,10 @@ app_base_url = "http://localhost:8080"
 
 # ── Phishing detection ───────────────────────────────────────────────────────
 
-# Brand list for spoofing/lookalike checks is read from <data_dir>/brands.json
-# (seeded with defaults on first start — edit or replace it there).
+# Brand list for spoofing/lookalike checks. The shipped default lives next to
+# the binary (brands.json, set MAILQUILL_BRANDS_FILE to override its path) and
+# is copied to <data_dir>/brands.json on first start; edit that copy to
+# customise — it takes precedence over the shipped file.
 
 # OpenPhish community feed for link-reputation checks. Download only (no user
 # data leaves the server); refreshed every 12 hours, cached in <data_dir>.

@@ -9,6 +9,7 @@ pub mod error;
 pub mod middleware;
 pub mod oauth_tokens;
 pub mod routes;
+pub mod secrets;
 pub mod sieve;
 pub mod state;
 pub mod sync_impl;

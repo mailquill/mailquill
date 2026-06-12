@@ -7,10 +7,12 @@
 
 # ── Required ─────────────────────────────────────────────────────────────────
 
-# AES-256-GCM key. Generate: openssl rand -hex 32
+# Generate both with: mailquill secrets
+
+# AES-256-GCM key (64 hex chars).
 credential_encryption_key = "replace_me_64_hex_chars"
 
-# JWT signing secret. Generate: openssl rand -base64 48
+# JWT signing secret.
 jwt_secret = "replace_me_long_random_string"
 
 # ── Optional — defaults shown ────────────────────────────────────────────────

@@ -40,6 +40,8 @@ enum Command {
     Serve,
     /// Generate a Web Push (VAPID) key pair and print it as env lines.
     VapidKeys,
+    /// Generate CREDENTIAL_ENCRYPTION_KEY and JWT_SECRET as env lines.
+    Secrets,
 }
 
 #[tokio::main]
@@ -47,6 +49,10 @@ async fn main() {
     match Cli::parse().command {
         Some(Command::VapidKeys) => {
             api::vapid_keys::print_generated();
+            return;
+        }
+        Some(Command::Secrets) => {
+            api::secrets::print_generated();
             return;
         }
         Some(Command::Serve) | None => {}

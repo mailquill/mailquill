@@ -153,6 +153,23 @@ pub async fn get_message(
         None => (None, None, json!([])),
     };
 
+    // Inline images: if the HTML references cid: parts but no attachments are
+    // stored (the body was fetched before attachment storage existed, so it
+    // sits in the blob store and the path above never re-fetches), pull the
+    // raw message once to backfill the attachment rows.
+    let references_cid = body_html.as_deref().is_some_and(|h| h.contains("cid:"));
+    if references_cid {
+        let have_attachments: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE message_id = ?")
+                .bind(&message_id)
+                .fetch_one(&user_db)
+                .await
+                .unwrap_or(0);
+        if have_attachments == 0 {
+            let _ = fetch_body_on_demand(&state, &user.0, &user_db, &message_id, row.account_id.clone(), row.folder_id.clone(), row.uid as u32).await;
+        }
+    }
+
     // Thread summary
     let (thread_size, thread_unread) = if let Some(ref tid) = row.thread_id {
         let size: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_deleted = 0")

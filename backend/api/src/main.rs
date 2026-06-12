@@ -25,8 +25,33 @@ struct FrontendAssets;
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; object-src 'none'";
 
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "mailquill", about = "Mailquill — self-hosted web mail server")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the API + web server (default).
+    Serve,
+    /// Generate a Web Push (VAPID) key pair and print it as env lines.
+    VapidKeys,
+}
+
 #[tokio::main]
 async fn main() {
+    match Cli::parse().command {
+        Some(Command::VapidKeys) => {
+            api::vapid_keys::print_generated();
+            return;
+        }
+        Some(Command::Serve) | None => {}
+    }
+
     let settings = config::Settings::load();
 
     // Sensible default when RUST_LOG is unset: our crates at debug, noisy

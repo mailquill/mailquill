@@ -13,3 +13,4 @@ pub mod sieve;
 pub mod state;
 pub mod sync_impl;
 pub mod validate;
+pub mod vapid_keys;

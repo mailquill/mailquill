@@ -35,7 +35,7 @@ app_base_url = "http://localhost:8080"
 # ── Web Push (desktop notifications) ─────────────────────────────────────────
 
 # VAPID keys enable desktop notifications. Generate a pair with:
-#   npx web-push generate-vapid-keys --json
+#   mailquill vapid-keys
 # Without them, the notifications toggle is disabled.
 # vapid_public_key  = ""
 # vapid_private_key = ""

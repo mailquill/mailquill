@@ -52,7 +52,7 @@ import {
 } from '@/shared/hooks/usePushNotifications'
 import type { Account } from '@/shared/types'
 
-type Section = 'accounts' | 'appearance' | 'composing' | 'notifications' | 'rules'
+type Section = 'accounts' | 'appearance' | 'composing' | 'notifications' | 'rules' | 'privacy'
 
 const NAV: { id: Section; icon: typeof Users }[] = [
   { id: 'accounts', icon: Users },
@@ -60,6 +60,7 @@ const NAV: { id: Section; icon: typeof Users }[] = [
   { id: 'composing', icon: PenLine },
   { id: 'rules', icon: Filter },
   { id: 'notifications', icon: Bell },
+  { id: 'privacy', icon: ShieldCheck },
 ]
 
 function providerOf(account: Account): string {
@@ -120,6 +121,7 @@ export function SettingsPage() {
             {section === 'composing' && <ComposingSection />}
             {section === 'rules' && <RulesSection />}
             {section === 'notifications' && <NotificationsSection />}
+            {section === 'privacy' && <PrivacySection />}
           </div>
         </div>
       </div>
@@ -459,8 +461,6 @@ function ComposingSection() {
 
 function NotificationsSection() {
   const { t } = useTranslation()
-  const { data: settings } = useSettings()
-  const updateSettings = useUpdateSettings()
   const { data: vapidPublicKey } = useVapidPublicKey()
   const enablePush = useEnablePushNotifications()
   const disablePush = useDisablePushNotifications()
@@ -502,6 +502,29 @@ function NotificationsSection() {
           onChange={(c) => toggleNotifications(c).catch(() => setMessage(t('settings.pushSetupFailed')))}
         />
         {message && <p className="text-[12.5px] text-muted-foreground">{message}</p>}
+      </div>
+    </div>
+  )
+}
+
+function PrivacySection() {
+  const { t } = useTranslation()
+  const { data: settings } = useSettings()
+  const updateSettings = useUpdateSettings()
+
+  return (
+    <div>
+      <SectionHeader title={t('settings.privacy')} description={t('settings.privacyDesc')} />
+      <div className="flex max-w-2xl flex-col gap-3">
+        <Toggle
+          label={t('settings.externalImages')}
+          hint={t('settings.externalImagesHint')}
+          checked={Boolean(settings?.load_external_images)}
+          disabled={!settings || updateSettings.isPending}
+          onChange={(c) => updateSettings.mutate({ load_external_images: c })}
+        />
+        <ImageAllowlist />
+        <PhishingResetRow />
         <Toggle
           label={t('settings.pgpWkd')}
           hint={t('settings.pgpHint')}
@@ -516,15 +539,6 @@ function NotificationsSection() {
           disabled={!settings || updateSettings.isPending}
           onChange={(c) => updateSettings.mutate({ pgp_discovery_keyserver_enabled: c })}
         />
-        <Toggle
-          label={t('settings.externalImages')}
-          hint={t('settings.externalImagesHint')}
-          checked={Boolean(settings?.load_external_images)}
-          disabled={!settings || updateSettings.isPending}
-          onChange={(c) => updateSettings.mutate({ load_external_images: c })}
-        />
-        <ImageAllowlist />
-        <PhishingResetRow />
       </div>
     </div>
   )

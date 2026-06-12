@@ -31,15 +31,13 @@ pub struct PushSubscriptionResponse {
     id: String,
 }
 
-pub async fn vapid_public_key(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let vapid = state
-        .vapid
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("web push is not configured".to_owned()))?;
-
-    Ok(Json(VapidPublicKeyResponse {
-        public_key: vapid.public_key.clone(),
-    }))
+pub async fn vapid_public_key(State(state): State<AppState>) -> impl IntoResponse {
+    // Web push is optional: when VAPID isn't configured, return an empty key
+    // (HTTP 200) instead of an error. The client treats a missing key as
+    // "push unavailable" and disables the toggle — no need to log a 500.
+    Json(VapidPublicKeyResponse {
+        public_key: state.vapid.as_ref().map(|v| v.public_key.clone()).unwrap_or_default(),
+    })
 }
 
 pub async fn create_subscription(

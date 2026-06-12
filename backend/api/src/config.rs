@@ -26,6 +26,12 @@ pub struct Settings {
     pub google_oauth_client_secret: Option<String>,
     pub microsoft_oauth_client_id: Option<String>,
     pub microsoft_oauth_client_secret: Option<String>,
+    /// Web Push (VAPID). Generate with: npx web-push generate-vapid-keys.
+    /// When unset, desktop notifications are disabled.
+    pub vapid_public_key: Option<String>,
+    pub vapid_private_key: Option<String>,
+    #[serde(default = "default_vapid_subject")]
+    pub vapid_subject: String,
     /// Periodically download the OpenPhish community feed for link-reputation
     /// checks (outbound GET only; no user data leaves the server).
     #[serde(default = "default_true")]
@@ -39,6 +45,7 @@ fn default_host() -> String { "0.0.0.0".into() }
 fn default_port() -> u16 { 8080 }
 fn default_base_url() -> String { "http://localhost:8080".into() }
 fn default_true() -> bool { true }
+fn default_vapid_subject() -> String { "mailto:admin@example.com".into() }
 fn default_openphish_feed_url() -> String { "https://openphish.com/feed.txt".into() }
 
 impl Settings {

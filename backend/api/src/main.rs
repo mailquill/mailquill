@@ -56,7 +56,7 @@ async fn main() {
     let user_db_pool = UserDbPool::new(&data_dir);
 
     let sync_manager = Arc::new(SyncManager::new());
-    let vapid = load_vapid_config();
+    let vapid = load_vapid_config(&settings);
     let web_push_client = vapid
         .as_ref()
         .and_then(|_| match IsahcWebPushClient::new() {
@@ -173,22 +173,18 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-fn load_vapid_config() -> Option<Arc<VapidConfig>> {
-    let public_key = std::env::var("VAPID_PUBLIC_KEY").ok().filter(|v| !v.is_empty());
-    let private_key = std::env::var("VAPID_PRIVATE_KEY").ok().filter(|v| !v.is_empty());
-    let subject = std::env::var("VAPID_SUBJECT")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "mailto:admin@example.com".to_owned());
+fn load_vapid_config(settings: &config::Settings) -> Option<Arc<VapidConfig>> {
+    let public_key = settings.vapid_public_key.as_ref().filter(|v| !v.is_empty());
+    let private_key = settings.vapid_private_key.as_ref().filter(|v| !v.is_empty());
 
     match (public_key, private_key) {
         (Some(public_key), Some(private_key)) => Some(Arc::new(VapidConfig {
-            public_key,
-            private_key,
-            subject,
+            public_key: public_key.clone(),
+            private_key: private_key.clone(),
+            subject: settings.vapid_subject.clone(),
         })),
         _ => {
-            tracing::warn!("web push disabled: VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY is missing");
+            tracing::warn!("web push disabled: vapid_public_key or vapid_private_key is missing");
             None
         }
     }

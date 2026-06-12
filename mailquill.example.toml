@@ -32,6 +32,15 @@ app_base_url = "http://localhost:8080"
 # openphish_enabled  = true
 # openphish_feed_url = "https://openphish.com/feed.txt"
 
+# ── Web Push (desktop notifications) ─────────────────────────────────────────
+
+# VAPID keys enable desktop notifications. Generate a pair with:
+#   npx web-push generate-vapid-keys --json
+# Without them, the notifications toggle is disabled.
+# vapid_public_key  = ""
+# vapid_private_key = ""
+# vapid_subject     = "mailto:admin@example.com"
+
 # ── OAuth2 (only needed for Gmail / Outlook OAuth login) ─────────────────────
 
 # google_oauth_client_id     = ""

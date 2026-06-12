@@ -16,6 +16,17 @@ function phaseOf(status?: SyncStatus): Phase {
   return 'idle'
 }
 
+/**
+ * Phase used for all visuals. A sync that has nothing queued yet (totals not
+ * known) or is already complete stays visually idle, so triggering a refresh
+ * doesn't reset the progress bar or flip a green status to "syncing" until
+ * there is actually new mail to fetch.
+ */
+function visualPhase(phase: Phase, synced: number, total: number): Phase {
+  if (phase === 'syncing' && synced >= total) return 'idle'
+  return phase
+}
+
 /** Progress bar coloured by sync phase; full when idle, fractional while syncing. */
 function ProgressBar({ phase, synced, total }: { phase: Phase; synced: number; total: number }) {
   const pct =
@@ -46,7 +57,11 @@ export function SyncStatusMenu() {
     .filter((d): d is string => Boolean(d))
     .sort()
     .at(-1)
-  const overallPhase: Phase = anySyncing ? 'syncing' : anyError ? 'error' : 'idle'
+  const overallPhase = visualPhase(
+    anySyncing ? 'syncing' : anyError ? 'error' : 'idle',
+    aggSynced,
+    aggTotal,
+  )
 
   function refreshAll() {
     statuses.forEach(({ account }) => triggerSync.mutate(account.id))
@@ -74,7 +89,7 @@ export function SyncStatusMenu() {
           open ? 'bg-secondary' : 'bg-card',
         )}
       >
-        <RefreshCw className={cn('size-4', anySyncing && 'animate-spin text-primary')} />
+        <RefreshCw className={cn('size-4', overallPhase === 'syncing' && 'animate-spin text-primary')} />
       </button>
 
       {open && (
@@ -121,9 +136,9 @@ export function SyncStatusMenu() {
             </div>
             <div className="flex flex-col gap-3.5">
               {statuses.map(({ account, status }) => {
-                const phase = phaseOf(status)
                 const synced = status?.synced ?? 0
                 const total = status?.total ?? 0
+                const phase = visualPhase(phaseOf(status), synced, total)
                 const color = accountColor(account.id)
                 return (
                   <div key={account.id} className="flex items-start gap-3">

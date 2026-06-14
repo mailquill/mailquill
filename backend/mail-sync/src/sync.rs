@@ -56,7 +56,7 @@ pub async fn run_sync_task(
     .flatten()
     .unwrap_or_else(|| ("imap".into(), "idle".into()));
 
-    let idle_mode = sync_mode == "idle" && ProviderKind::parse(&provider_kind) == ProviderKind::Imap;
+    let idle_mode = sync_mode == "idle" && ProviderKind::parse(&provider_kind).syncs_over_imap();
     // The guard aborts the IDLE child when this sync task shuts down or is dropped.
     let _idle_guard = if idle_mode {
         let handle = tokio::spawn(run_idle_task(
@@ -334,7 +334,7 @@ async fn idle_session_loop(
     catch_up: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (config, kind) = load_provider_config(account_id, user_id, app).await?;
-    if kind != ProviderKind::Imap {
+    if !kind.syncs_over_imap() {
         return Ok(());
     }
 
@@ -433,6 +433,10 @@ async fn sync_folder(
     // IMAP UIDs are u32; last_uid is stored as i64. Work in u32 for the walk.
     let prev_last_uid: u32 = last_uid.unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
     let uid_start: u32 = prev_last_uid + 1;
+    // First-ever backfill of this folder (no prior cursor): every message is
+    // "new", so suppress push notifications — they should only fire for mail
+    // that actually arrives after the initial sync.
+    let initial_sync = prev_last_uid == 0;
 
     // Reconcile read/flagged state of already-synced messages with the server.
     // Header backfill below only fetches NEW uids, so server-side flag changes on
@@ -520,7 +524,7 @@ async fn sync_folder(
 
             // Insert or update message (task 4.6)
             let msg_id: Option<String> = sqlx::query_scalar(
-            "INSERT INTO messages (account_id, folder_id, uid, message_id_header, thread_id, in_reply_to, \"references\", list_id, subject, subject_normalized, snippet, from_addr, to_addrs, cc_addrs, date, internal_date, is_read, is_flagged) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id, uid) DO UPDATE SET thread_id = excluded.thread_id, is_read = excluded.is_read, is_flagged = excluded.is_flagged, subject = excluded.subject, subject_normalized = excluded.subject_normalized, snippet = excluded.snippet, from_addr = excluded.from_addr, to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs RETURNING id",
+            "INSERT INTO messages (account_id, folder_id, uid, message_id_header, thread_id, in_reply_to, \"references\", list_id, subject, subject_normalized, snippet, from_addr, to_addrs, cc_addrs, date, internal_date, is_read, is_flagged, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id, uid) DO UPDATE SET thread_id = excluded.thread_id, is_read = excluded.is_read, is_flagged = excluded.is_flagged, is_deleted = MAX(excluded.is_deleted, messages.is_deleted), subject = excluded.subject, subject_normalized = excluded.subject_normalized, snippet = excluded.snippet, from_addr = excluded.from_addr, to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs RETURNING id",
         )
         .bind(account_id)
         .bind(&folder_id)
@@ -540,6 +544,7 @@ async fn sync_folder(
         .bind(&msg.internal_date)
         .bind(msg.is_seen as i64)
         .bind(msg.is_flagged as i64)
+        .bind(msg.is_deleted as i64)
         .fetch_optional(db)
         .await?
         .flatten();
@@ -566,7 +571,6 @@ async fn sync_folder(
                     let internal_date = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
                     let blob_key = mailquill_core::blob::blob_key_body(
                         account_id,
-                        &folder_id,
                         msg.uid,
                         internal_date,
                     );
@@ -587,7 +591,6 @@ async fn sync_folder(
                     for (i, att) in parsed.attachments.iter().enumerate() {
                         let att_key = mailquill_core::blob::blob_key_attachment(
                             account_id,
-                            &folder_id,
                             msg.uid,
                             internal_date,
                             i,
@@ -647,7 +650,7 @@ async fn sync_folder(
             .await;
             }
 
-            if is_new_message && notify_allowed {
+            if is_new_message && notify_allowed && !msg.is_deleted && !initial_sync {
                 let notification = NewMessageNotification {
                     message_id: msg_db_id,
                     account_id: account_id.to_owned(),
@@ -717,12 +720,15 @@ async fn reconcile_flags(
         let flags = provider
             .fetch_flags(folder_path, &format!("{}:{}", start, end))
             .await?;
-        for (uid, seen, flagged) in flags {
+        for (uid, seen, flagged, deleted) in flags {
+            // Hide messages the server has marked \Deleted (e.g. left behind by a
+            // copy-then-flag move) without un-hiding a locally deleted row.
             sqlx::query(
-                "UPDATE messages SET is_read = ?, is_flagged = ? WHERE folder_id = ? AND uid = ?",
+                "UPDATE messages SET is_read = ?, is_flagged = ?, is_deleted = MAX(?, is_deleted) WHERE folder_id = ? AND uid = ?",
             )
             .bind(seen as i64)
             .bind(flagged as i64)
+            .bind(deleted as i64)
             .bind(folder_id)
             .bind(uid as i64)
             .execute(db)

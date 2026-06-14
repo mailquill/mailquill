@@ -543,7 +543,6 @@ async fn fetch_body_on_demand(
         uid,
         state.blob_store.clone(),
         &account_id,
-        &folder_id,
         message_id,
         user_db,
     )

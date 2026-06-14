@@ -27,16 +27,10 @@ pub trait BlobStore: Send + Sync {
 
 // ── Key helpers ──────────────────────────────────────────────────────────────
 
-pub fn blob_key_body(
-    account_id: &str,
-    folder_id: &str,
-    uid: u32,
-    internal_date: NaiveDate,
-) -> String {
+pub fn blob_key_body(account_id: &str, uid: u32, internal_date: NaiveDate) -> String {
     format!(
-        "mail/{}/{}/{}/{}/{}/{}/body",
+        "mail/{}/{}/{}/{}/{}/body",
         account_id,
-        folder_id,
         internal_date.format("%Y"),
         internal_date.format("%m"),
         internal_date.format("%d"),
@@ -46,15 +40,13 @@ pub fn blob_key_body(
 
 pub fn blob_key_attachment(
     account_id: &str,
-    folder_id: &str,
     uid: u32,
     internal_date: NaiveDate,
     n: usize,
 ) -> String {
     format!(
-        "mail/{}/{}/{}/{}/{}/{}/attach/{}",
+        "mail/{}/{}/{}/{}/{}/attach/{}",
         account_id,
-        folder_id,
         internal_date.format("%Y"),
         internal_date.format("%m"),
         internal_date.format("%d"),

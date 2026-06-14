@@ -43,7 +43,6 @@ pub async fn fetch_body_by_uid(
     uid: u32,
     blob_store: Arc<dyn BlobStore>,
     account_id: &str,
-    folder_id: &str,
     message_id: &str,
     user_db: &sqlx::SqlitePool,
 ) -> Result<(Option<String>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
@@ -67,7 +66,7 @@ pub async fn fetch_body_by_uid(
     let compressed = mailquill_core::compression::compress_body(&body_bytes);
 
     let internal_date = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
-    let blob_key = mailquill_core::blob::blob_key_body(account_id, folder_id, uid, internal_date);
+    let blob_key = mailquill_core::blob::blob_key_body(account_id, uid, internal_date);
 
     let blob = bytes::Bytes::from(compressed.clone());
     blob_store
@@ -98,7 +97,6 @@ pub async fn fetch_body_by_uid(
         for (i, att) in parsed.attachments.iter().enumerate() {
             let att_key = mailquill_core::blob::blob_key_attachment(
                 account_id,
-                folder_id,
                 uid,
                 internal_date,
                 i,

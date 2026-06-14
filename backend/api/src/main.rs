@@ -173,8 +173,9 @@ async fn main() {
         .route("/contacts/{id}", delete(routes::contacts::delete_contact))
         // Calendar
         .route("/calendars", get(routes::calendar::list_calendars).post(routes::calendar::create_calendar))
+        .route("/calendars/{id}", put(routes::calendar::update_calendar).delete(routes::calendar::delete_calendar))
         .route("/calendar/events", get(routes::calendar::list_events).post(routes::calendar::create_event))
-        .route("/calendar/events/{id}", delete(routes::calendar::delete_event))
+        .route("/calendar/events/{id}", put(routes::calendar::update_event).delete(routes::calendar::delete_event))
         // Rules
         .route("/rules", get(routes::rules::list_rules).post(routes::rules::create_rule))
         .route("/rules/{id}", put(routes::rules::update_rule).delete(routes::rules::delete_rule))

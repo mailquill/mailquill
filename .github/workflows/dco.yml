@@ -1,0 +1,47 @@
+name: DCO
+
+# Requires every non-merge commit in a pull request to carry a
+# `Signed-off-by:` trailer matching the commit author or committer, certifying
+# the Developer Certificate of Origin (see DCO.txt). Sign commits with:
+#   git commit -s          (or for existing commits: git rebase --signoff <base>)
+#
+# Alternative: install the zero-config DCO GitHub App
+# (https://github.com/apps/dco) and delete this workflow.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  dco-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify Signed-off-by on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          missing=0
+          while read -r sha; do
+            [ -z "$sha" ] && continue
+            author_email=$(git show -s --format='%ae' "$sha")
+            committer_email=$(git show -s --format='%ce' "$sha")
+            signoffs=$(git show -s --format='%B' "$sha" | grep -iE '^Signed-off-by: .+ <.+@.+>' || true)
+            if echo "$signoffs" | grep -qiF "<$author_email>" \
+               || echo "$signoffs" | grep -qiF "<$committer_email>"; then
+              continue
+            fi
+            subject=$(git show -s --format='%s' "$sha")
+            echo "::error::Commit $sha (\"$subject\") is missing a valid Signed-off-by line"
+            missing=1
+          done < <(git rev-list --no-merges "$BASE_SHA".."$HEAD_SHA")
+          if [ "$missing" -ne 0 ]; then
+            echo "One or more commits lack a DCO sign-off."
+            echo "Fix with: git commit -s   (or: git rebase --signoff $BASE_SHA)"
+            exit 1
+          fi
+          echo "All commits are signed off. ✔"

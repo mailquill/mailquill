@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, Plus } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Plus, Trash2 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
@@ -13,6 +13,8 @@ import {
   useCalendars,
   useCreateCalendar,
   useCreateEvent,
+  useUpdateEvent,
+  useDeleteEvent,
   useEvents,
 } from '@/shared/hooks/useCalendar'
 import { useModuleNav } from '@/shared/hooks/useModuleNav'
@@ -53,7 +55,11 @@ export function CalendarPage() {
   const { hiddenCalendars } = useModuleNav()
   const [searchParams, setSearchParams] = useSearchParams()
   const addOpen = searchParams.get('new') === '1'
-  const closeAdd = () => setSearchParams({}, { replace: true })
+  const [editing, setEditing] = useState<CalendarEvent | null>(null)
+  const closeDialog = () => {
+    setEditing(null)
+    if (addOpen) setSearchParams({}, { replace: true })
+  }
 
   const range = useMemo(() => visibleRange(view, cursor), [view, cursor])
   const { data: events = [] } = useEvents(iso(range.from), iso(range.to))
@@ -104,16 +110,26 @@ export function CalendarPage() {
       </header>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {view === 'month' && <MonthView cursor={cursor} events={visibleEvents} />}
-        {view !== 'month' && <TimeGrid view={view} cursor={cursor} events={visibleEvents} />}
+        {view === 'month' && <MonthView cursor={cursor} events={visibleEvents} onSelectEvent={setEditing} />}
+        {view !== 'month' && (
+          <TimeGrid view={view} cursor={cursor} events={visibleEvents} onSelectEvent={setEditing} />
+        )}
       </div>
 
-      <NewEventDialog open={addOpen} onClose={closeAdd} defaultDate={cursor} />
+      <EventDialog open={addOpen || editing !== null} onClose={closeDialog} defaultDate={cursor} event={editing} />
     </div>
   )
 }
 
-function MonthView({ cursor, events }: { cursor: Date; events: CalendarEvent[] }) {
+function MonthView({
+  cursor,
+  events,
+  onSelectEvent,
+}: {
+  cursor: Date
+  events: CalendarEvent[]
+  onSelectEvent: (e: CalendarEvent) => void
+}) {
   const { t } = useTranslation()
   const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1)
   const gridStart = startOfWeekMon(monthStart)
@@ -147,14 +163,15 @@ function MonthView({ cursor, events }: { cursor: Date; events: CalendarEvent[] }
               </div>
               <div className="space-y-0.5">
                 {dayEvents.slice(0, 3).map((e) => (
-                  <div
+                  <button
                     key={e.id}
-                    className="truncate rounded px-1.5 py-0.5 text-[11px] font-medium text-white"
+                    onClick={() => onSelectEvent(e)}
+                    className="block w-full truncate rounded px-1.5 py-0.5 text-left text-[11px] font-medium text-white hover:brightness-110"
                     style={{ backgroundColor: e.color }}
                     title={e.title}
                   >
                     {e.title}
-                  </div>
+                  </button>
                 ))}
                 {dayEvents.length > 3 && (
                   <div className="px-1.5 text-[11px] font-medium text-muted-foreground">
@@ -170,7 +187,17 @@ function MonthView({ cursor, events }: { cursor: Date; events: CalendarEvent[] }
   )
 }
 
-function TimeGrid({ view, cursor, events }: { view: ViewMode; cursor: Date; events: CalendarEvent[] }) {
+function TimeGrid({
+  view,
+  cursor,
+  events,
+  onSelectEvent,
+}: {
+  view: ViewMode
+  cursor: Date
+  events: CalendarEvent[]
+  onSelectEvent: (e: CalendarEvent) => void
+}) {
   const days = view === 'day' ? [startOfDay(cursor)] : Array.from({ length: 7 }, (_, i) => addDays(startOfWeekMon(cursor), i))
   const hours = Array.from({ length: 24 }, (_, h) => h)
   const today = new Date()
@@ -217,15 +244,16 @@ function TimeGrid({ view, cursor, events }: { view: ViewMode; cursor: Date; even
                   const top = (start.getHours() + start.getMinutes() / 60) * HOUR_PX
                   const height = Math.max(22, ((end.getTime() - start.getTime()) / 3_600_000) * HOUR_PX)
                   return (
-                    <div
+                    <button
                       key={e.id}
-                      className="absolute left-1 right-1 overflow-hidden rounded-md px-1.5 py-1 text-[11px] font-medium text-white shadow-sm"
+                      onClick={() => onSelectEvent(e)}
+                      className="absolute left-1 right-1 overflow-hidden rounded-md px-1.5 py-1 text-left text-[11px] font-medium text-white shadow-sm hover:brightness-110"
                       style={{ top, height, backgroundColor: e.color }}
                       title={e.title}
                     >
                       <div className="truncate font-semibold">{e.title}</div>
                       {e.location && <div className="truncate opacity-90">{e.location}</div>}
-                    </div>
+                    </button>
                   )
                 })}
               </div>
@@ -237,14 +265,51 @@ function TimeGrid({ view, cursor, events }: { view: ViewMode; cursor: Date; even
   )
 }
 
-function NewEventDialog({ open, onClose, defaultDate }: { open: boolean; onClose: () => void; defaultDate: Date }) {
+function hhmm(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function EventDialog({
+  open,
+  onClose,
+  defaultDate,
+  event,
+}: {
+  open: boolean
+  onClose: () => void
+  defaultDate: Date
+  event: CalendarEvent | null
+}) {
   const { t } = useTranslation()
   const { data: calendars = [] } = useCalendars()
   const createCalendar = useCreateCalendar()
   const createEvent = useCreateEvent()
-  const dateStr = defaultDate.toISOString().slice(0, 10)
-  const [form, setForm] = useState({ title: '', calendar_id: '', date: dateStr, start: '09:00', end: '10:00', location: '', all_day: false })
-  // Default to the first calendar without an effect; the explicit choice wins.
+  const updateEvent = useUpdateEvent()
+  const deleteEvent = useDeleteEvent()
+  const isEdit = event !== null
+  const [form, setForm] = useState(() => emptyForm(defaultDate))
+
+  // Reset the form whenever the dialog opens or the target event changes.
+  useEffect(() => {
+    if (!open) return
+    if (event) {
+      const s = new Date(event.starts_at)
+      const e = new Date(event.ends_at)
+      setForm({
+        title: event.title,
+        calendar_id: event.calendar_id,
+        date: s.toISOString().slice(0, 10),
+        start: hhmm(s),
+        end: hhmm(e),
+        location: event.location ?? '',
+        all_day: event.all_day,
+      })
+    } else {
+      setForm(emptyForm(defaultDate))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, event])
+
   const selectedCalendar = form.calendar_id || calendars[0]?.id || ''
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
@@ -253,24 +318,32 @@ function NewEventDialog({ open, onClose, defaultDate }: { open: boolean; onClose
 
   async function submit() {
     if (!form.title.trim()) return
+    const starts = form.all_day ? `${form.date}T00:00:00.000Z` : new Date(`${form.date}T${form.start}`).toISOString()
+    const ends = form.all_day ? `${form.date}T23:59:59.000Z` : new Date(`${form.date}T${form.end}`).toISOString()
+    const data = { title: form.title, location: form.location || null, starts_at: starts, ends_at: ends, all_day: form.all_day }
+    if (isEdit && event) {
+      updateEvent.mutate({ id: event.id, data }, { onSuccess: onClose })
+      return
+    }
     let calendarId = selectedCalendar
     if (!calendarId) {
       const created = await createCalendar.mutateAsync({ name: 'My calendar', color: '#2563EB' })
       calendarId = created.id
     }
-    const starts = form.all_day ? `${form.date}T00:00:00.000Z` : new Date(`${form.date}T${form.start}`).toISOString()
-    const ends = form.all_day ? `${form.date}T23:59:59.000Z` : new Date(`${form.date}T${form.end}`).toISOString()
-    createEvent.mutate(
-      { calendar_id: calendarId, title: form.title, location: form.location || null, starts_at: starts, ends_at: ends, all_day: form.all_day },
-      { onSuccess: () => { setForm((f) => ({ ...f, title: '', location: '' })); onClose() } },
-    )
+    createEvent.mutate({ calendar_id: calendarId, ...data }, { onSuccess: onClose })
   }
+
+  function remove() {
+    if (event) deleteEvent.mutate(event.id, { onSuccess: onClose })
+  }
+
+  const busy = createEvent.isPending || updateEvent.isPending
 
   return (
     <Dialog open={open} onClose={onClose}>
       <DialogContent className="w-[min(480px,calc(100vw-2rem))] max-w-none">
         <DialogHeader>
-          <DialogTitle>{t('calendar.newEvent')}</DialogTitle>
+          <DialogTitle>{isEdit ? t('calendar.editEvent') : t('calendar.newEvent')}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <Field label={t('calendar.title')}>
@@ -308,17 +381,42 @@ function NewEventDialog({ open, onClose, defaultDate }: { open: boolean; onClose
             {t('calendar.allDay')}
           </label>
         </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>
-            {t('action.cancel')}
-          </Button>
-          <Button onClick={submit} disabled={createEvent.isPending || !form.title.trim()}>
-            {createEvent.isPending ? t('settings.saving') : t('calendar.addEvent')}
-          </Button>
+        <div className="mt-4 flex items-center gap-2">
+          {isEdit && (
+            <Button
+              variant="ghost"
+              onClick={remove}
+              disabled={deleteEvent.isPending}
+              className="text-red-600 hover:text-red-700"
+            >
+              <Trash2 className="size-4" />
+              {t('action.delete')}
+            </Button>
+          )}
+          <div className="ml-auto flex gap-2">
+            <Button variant="ghost" onClick={onClose}>
+              {t('action.cancel')}
+            </Button>
+            <Button onClick={submit} disabled={busy || !form.title.trim()}>
+              {busy ? t('settings.saving') : isEdit ? t('calendar.save') : t('calendar.addEvent')}
+            </Button>
+          </div>
         </div>
       </DialogContent>
     </Dialog>
   )
+}
+
+function emptyForm(defaultDate: Date) {
+  return {
+    title: '',
+    calendar_id: '',
+    date: defaultDate.toISOString().slice(0, 10),
+    start: '09:00',
+    end: '10:00',
+    location: '',
+    all_day: false,
+  }
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

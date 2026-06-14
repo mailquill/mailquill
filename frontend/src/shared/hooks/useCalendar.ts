@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPost, apiDelete } from '@/shared/api'
+import { apiGet, apiPost, apiPut, apiDelete } from '@/shared/api'
 import type { Calendar, CalendarEvent, NewCalendarEvent } from '@/shared/types'
+
+export type EventUpdate = Omit<NewCalendarEvent, 'calendar_id'>
 
 export function useCalendars() {
   return useQuery({
@@ -37,10 +39,39 @@ export function useCreateEvent() {
   })
 }
 
+export function useUpdateEvent() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: EventUpdate }) =>
+      apiPut<{ id: string }>(`/calendar/events/${id}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['events'] }),
+  })
+}
+
 export function useDeleteEvent() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => apiDelete(`/calendar/events/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['events'] }),
+  })
+}
+
+export function useUpdateCalendar() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...data }: { id: string; name?: string; color?: string }) =>
+      apiPut<Calendar>(`/calendars/${id}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['calendars'] }),
+  })
+}
+
+export function useDeleteCalendar() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => apiDelete(`/calendars/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['calendars'] })
+      qc.invalidateQueries({ queryKey: ['events'] })
+    },
   })
 }

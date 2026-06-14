@@ -27,12 +27,12 @@ import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { useAccounts, useFolders, useSyncStatus } from '@/shared/hooks/useAccounts'
 import { useMoveMessage, useUnifiedCounts } from '@/shared/hooks/useMessages'
 import { useContacts } from '@/shared/hooks/useContacts'
-import { useCalendars } from '@/shared/hooks/useCalendar'
+import { useCalendars, useCreateCalendar, useUpdateCalendar, useDeleteCalendar } from '@/shared/hooks/useCalendar'
 import { useModuleNav } from '@/shared/hooks/useModuleNav'
 import { useUiPrefs } from '@/shared/hooks/useUiPrefs'
 import { buildFolderTree, folderLeafLabel, folderIcon, type FolderNode } from '@/shared/lib/folders'
 import { UNIFIED_VIEWS, isUnifiedView, type UnifiedView } from '@/shared/lib/unifiedViews'
-import type { Account, Folder } from '@/shared/types'
+import type { Account, Calendar, Folder } from '@/shared/types'
 
 const UNIFIED_ICONS: Record<UnifiedView, ElementType> = {
   inbox: Inbox,
@@ -357,34 +357,126 @@ function CalendarNav() {
   const navigate = useNavigate()
   const { t } = useTranslation()
   const { data: calendars = [] } = useCalendars()
+  const { data: accounts = [] } = useAccounts()
   const { hiddenCalendars, toggleCalendar } = useModuleNav()
+  const createCalendar = useCreateCalendar()
+  const grouping = useUiPrefs((s) => s.calendarGrouping)
+
+  function addCalendar() {
+    const name = window.prompt(t('sidebar.newCalendar'))?.trim()
+    if (name) createCalendar.mutate({ name, color: '#2563EB' })
+  }
+
+  const row = (c: Calendar) => (
+    <CalendarRow key={c.id} calendar={c} shown={!hiddenCalendars.includes(c.id)} onToggle={() => toggleCalendar(c.id)} />
+  )
+
+  // Group by owning account (preserving calendar order); local calendars (no
+  // account) collect under their own heading.
+  const groups: [string | null, Calendar[]][] = []
+  for (const c of calendars) {
+    const key = c.account_id ?? null
+    const existing = groups.find(([k]) => k === key)
+    if (existing) existing[1].push(c)
+    else groups.push([key, [c]])
+  }
+  const accountLabel = (id: string | null) => {
+    if (!id) return t('sidebar.localCalendars')
+    const a = accounts.find((x) => x.id === id)
+    return a?.display_name || a?.primary_email || t('sidebar.localCalendars')
+  }
 
   return (
     <>
       <SidebarCta icon={Plus} label={t('sidebar.newEvent')} onClick={() => navigate('/mail/calendar?new=1')} />
       <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-3">
-        <div className={CAP}>{t('sidebar.myCalendars')}</div>
-        {calendars.map((c) => {
-          const shown = !hiddenCalendars.includes(c.id)
-          return (
-            <button
-              key={c.id}
-              onClick={() => toggleCalendar(c.id)}
-              className="flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left text-[12.5px] text-[#cbd5e1] transition-colors hover:bg-white/5"
-            >
-              <span
-                className="flex size-[17px] items-center justify-center rounded-[5px] border-2"
-                style={{ borderColor: c.color, backgroundColor: shown ? c.color : 'transparent' }}
-              >
-                {shown && <Check className="size-3 text-white" strokeWidth={3} />}
-              </span>
-              <span className={cn('flex-1 truncate', !shown && 'text-[#64748b]')}>{c.name}</span>
-            </button>
-          )
-        })}
-        {!calendars.length && <p className="px-3 py-2 text-[12px] text-[#64748b]">{t('sidebar.noCalendars')}</p>}
+        <div className="flex items-center justify-between pr-2">
+          <span className={CAP}>{t('sidebar.myCalendars')}</span>
+          <button
+            onClick={addCalendar}
+            title={t('sidebar.newCalendar')}
+            className="rounded p-1 text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Plus className="size-3.5" />
+          </button>
+        </div>
+
+        {grouping === 'flat'
+          ? calendars.map(row)
+          : groups.map(([accId, cals]) => (
+              <div key={accId ?? 'local'} className="mb-1">
+                <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#64748b]">
+                  {accountLabel(accId)}
+                </div>
+                {cals.map(row)}
+              </div>
+            ))}
+
+        {!calendars.length && (
+          <button
+            onClick={addCalendar}
+            className="mx-1 mt-1 flex w-[calc(100%-0.5rem)] items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-white"
+          >
+            <Plus className="size-4" />
+            {t('sidebar.createCalendar')}
+          </button>
+        )}
       </nav>
     </>
+  )
+}
+
+function CalendarRow({ calendar: c, shown, onToggle }: { calendar: Calendar; shown: boolean; onToggle: () => void }) {
+  const { t } = useTranslation()
+  const updateCalendar = useUpdateCalendar()
+  const deleteCalendar = useDeleteCalendar()
+
+  function rename() {
+    const name = window.prompt(t('sidebar.renameCalendar'), c.name)?.trim()
+    if (name && name !== c.name) updateCalendar.mutate({ id: c.id, name })
+  }
+  function remove() {
+    if (window.confirm(t('sidebar.deleteCalendarConfirm', { name: c.name }))) deleteCalendar.mutate(c.id)
+  }
+
+  return (
+    <div className="group flex items-center rounded-md pr-1.5 transition-colors hover:bg-white/5">
+      <button
+        onClick={onToggle}
+        className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-1.5 text-left text-[12.5px] text-[#cbd5e1]"
+      >
+        <span
+          className="flex size-[17px] shrink-0 items-center justify-center rounded-[5px] border-2"
+          style={{ borderColor: c.color, backgroundColor: shown ? c.color : 'transparent' }}
+        >
+          {shown && <Check className="size-3 text-white" strokeWidth={3} />}
+        </span>
+        <span className={cn('flex-1 truncate', !shown && 'text-[#64748b]')}>{c.name}</span>
+      </button>
+      <label className="shrink-0 cursor-pointer opacity-0 transition-opacity group-hover:opacity-100" title={t('sidebar.calendarColor')}>
+        <span className="block size-4 rounded-full border border-white/20" style={{ backgroundColor: c.color }} />
+        <input
+          type="color"
+          value={c.color}
+          onChange={(e) => updateCalendar.mutate({ id: c.id, color: e.currentTarget.value })}
+          className="sr-only"
+        />
+      </label>
+      <button
+        onClick={rename}
+        title={t('sidebar.renameCalendar')}
+        className="ml-1 shrink-0 p-0.5 text-[#94a3b8] opacity-0 transition-opacity hover:text-white group-hover:opacity-100"
+      >
+        <Pencil className="size-3.5" />
+      </button>
+      <button
+        onClick={remove}
+        title={t('action.delete')}
+        className="ml-0.5 shrink-0 p-0.5 text-[#94a3b8] opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+      >
+        <Trash2 className="size-3.5" />
+      </button>
+    </div>
   )
 }
 

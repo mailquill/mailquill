@@ -32,7 +32,7 @@ import { RulesSection } from '@/widgets/RulesSection'
 import { davDefaults } from '@/shared/lib/dav'
 import { useAccounts, useDeleteAccount, useUpdateAccount, useFolders, useSetFolderSync } from '@/shared/hooks/useAccounts'
 import { useThemeStore, type ThemePref } from '@/shared/hooks/useTheme'
-import { useUiPrefs, type Density, type AccountMarker } from '@/shared/hooks/useUiPrefs'
+import { useUiPrefs, type Density, type AccountMarker, type CalendarGrouping } from '@/shared/hooks/useUiPrefs'
 import { getLangPref, setLangPref, type LangPref } from '@/shared/i18n'
 import {
   useImageAllowlist,
@@ -400,7 +400,7 @@ function FolderSyncList({ accountId }: { accountId: string }) {
 function AppearanceSection() {
   const { t } = useTranslation()
   const { pref, setPref } = useThemeStore()
-  const { density, marker, setDensity, setMarker } = useUiPrefs()
+  const { density, marker, setDensity, setMarker, calendarGrouping, setCalendarGrouping } = useUiPrefs()
   const [lang, setLang] = useState<LangPref>(() => getLangPref())
 
   function changeLang(next: LangPref) {
@@ -458,6 +458,19 @@ function AppearanceSection() {
             ] as [AccountMarker, string][]
           ).map(([value, label]) => (
             <Choice key={value} active={marker === value} onClick={() => setMarker(value)}>
+              {label}
+            </Choice>
+          ))}
+        </PrefGroup>
+
+        <PrefGroup label={t('settings.calendarGrouping')}>
+          {(
+            [
+              ['account', t('settings.groupByAccount')],
+              ['flat', t('settings.flatList')],
+            ] as [CalendarGrouping, string][]
+          ).map(([value, label]) => (
+            <Choice key={value} active={calendarGrouping === value} onClick={() => setCalendarGrouping(value)}>
               {label}
             </Choice>
           ))}

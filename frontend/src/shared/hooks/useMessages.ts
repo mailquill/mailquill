@@ -82,6 +82,49 @@ function invalidateMailLists(qc: QueryClient) {
   qc.invalidateQueries({ queryKey: ['unified-counts'] })
 }
 
+// Raw cache shape of the infinite mail-list queries (before `select` flattens).
+type ListPage = { messages: Message[]; total?: number; next_cursor: string | null }
+type InfiniteList = { pages: ListPage[]; pageParams: unknown[] }
+
+// Drop every row matching `match` from all cached mail lists (unified +
+// per-folder) right away, so delete/archive/move feel instant instead of
+// waiting for the server roundtrip and a full refetch. Returns a restore()
+// that puts the snapshots back if the mutation fails.
+async function removeFromMailLists(
+  qc: QueryClient,
+  match: (m: Message) => boolean,
+): Promise<() => void> {
+  await Promise.all([
+    qc.cancelQueries({ queryKey: ['unified'] }),
+    qc.cancelQueries({ queryKey: ['folder-messages'] }),
+  ])
+  const snapshots = [
+    ...qc.getQueriesData<InfiniteList>({ queryKey: ['unified'] }),
+    ...qc.getQueriesData<InfiniteList>({ queryKey: ['folder-messages'] }),
+  ]
+  for (const [key, data] of snapshots) {
+    if (!data) continue
+    qc.setQueryData<InfiniteList>(key, {
+      ...data,
+      pages: data.pages.map((page) => {
+        // `total` counts messages, but each removed row is a thread; decrement
+        // by the thread's message count so the header stays accurate.
+        const removed = page.messages
+          .filter(match)
+          .reduce((sum, m) => sum + (m.thread_size ?? 1), 0)
+        return {
+          ...page,
+          messages: page.messages.filter((m) => !match(m)),
+          total: page.total != null ? Math.max(0, page.total - removed) : page.total,
+        }
+      }),
+    })
+  }
+  return () => {
+    for (const [key, data] of snapshots) qc.setQueryData(key, data)
+  }
+}
+
 export function useMarkRead() {
   const qc = useQueryClient()
   return useMutation({
@@ -110,7 +153,9 @@ export function useArchiveMessage() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => apiPost(`/messages/${id}/archive`),
-    onSuccess: () => invalidateMailLists(qc),
+    onMutate: (id) => removeFromMailLists(qc, (m) => m.id === id),
+    onError: (_e, _id, restore) => restore?.(),
+    onSettled: () => invalidateMailLists(qc),
   })
 }
 
@@ -119,7 +164,9 @@ export function useMoveMessage() {
   return useMutation({
     mutationFn: ({ id, folder_id }: { id: string; folder_id: string }) =>
       apiPost(`/messages/${id}/move`, { folder_id }),
-    onSuccess: () => invalidateMailLists(qc),
+    onMutate: ({ id }) => removeFromMailLists(qc, (m) => m.id === id),
+    onError: (_e, _vars, restore) => restore?.(),
+    onSettled: () => invalidateMailLists(qc),
   })
 }
 
@@ -127,7 +174,34 @@ export function useDeleteMessage() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => apiDelete(`/messages/${id}`),
-    onSuccess: () => {
+    onMutate: (id) => removeFromMailLists(qc, (m) => m.id === id),
+    onError: (_e, _id, restore) => restore?.(),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['thread'] })
+      invalidateMailLists(qc)
+    },
+  })
+}
+
+export interface BulkScope {
+  view?: string
+  accountId?: string
+  folder?: string
+}
+
+// Server-side "select all": acts on a whole view/folder without the client
+// enumerating ids. Use for the "select all N conversations" path.
+export function useBulkAction() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      action,
+      view,
+      accountId,
+      folder,
+    }: { action: 'read' | 'archive' | 'delete' | 'flag' } & BulkScope) =>
+      apiPost('/mailbox/bulk', { action, view, account_id: accountId, folder }),
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ['thread'] })
       invalidateMailLists(qc)
     },
@@ -138,7 +212,9 @@ export function useArchiveThread() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (threadId: string) => apiPost(`/threads/${threadId}/archive`),
-    onSuccess: () => invalidateMailLists(qc),
+    onMutate: (threadId) => removeFromMailLists(qc, (m) => m.thread_id === threadId),
+    onError: (_e, _id, restore) => restore?.(),
+    onSettled: () => invalidateMailLists(qc),
   })
 }
 
@@ -146,7 +222,9 @@ export function useDeleteThread() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (threadId: string) => apiPost(`/threads/${threadId}/delete`),
-    onSuccess: () => invalidateMailLists(qc),
+    onMutate: (threadId) => removeFromMailLists(qc, (m) => m.thread_id === threadId),
+    onError: (_e, _id, restore) => restore?.(),
+    onSettled: () => invalidateMailLists(qc),
   })
 }
 

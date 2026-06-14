@@ -123,8 +123,9 @@ pub async fn fetch_body_by_uid(
     // Update FTS index
     let body_text = parsed.text.as_deref().unwrap_or("");
     if !body_text.is_empty() {
+        // FTS5 has no UPSERT; INSERT OR REPLACE refreshes the row by rowid.
         let _ = sqlx::query(
-            "INSERT INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), (SELECT subject FROM messages WHERE id = ?), (SELECT from_addr FROM messages WHERE id = ?), ?) ON CONFLICT DO UPDATE SET body_text = excluded.body_text",
+            "INSERT OR REPLACE INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), (SELECT subject FROM messages WHERE id = ?), (SELECT from_addr FROM messages WHERE id = ?), ?)",
         )
         .bind(message_id)
         .bind(message_id)

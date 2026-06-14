@@ -373,8 +373,16 @@ pub async fn delete_message(
     let user_db = state.user_db_pool.get(&user.0).await?;
     let (account_id, uid, folder_full_path) = get_message_location(&user_db, &message_id).await?;
 
-    let is_trash = folder_full_path.to_lowercase().contains("trash")
-        || folder_full_path.to_lowercase().contains("deleted");
+    // Already-in-trash means hard delete. Detect by the folder's type, not its
+    // name — localized servers call it "Papierkorb", "Corbeille", etc.
+    let src_type: Option<String> = sqlx::query_scalar(
+        "SELECT f.folder_type FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.id = ?",
+    )
+    .bind(&message_id)
+    .fetch_optional(&user_db)
+    .await?
+    .flatten();
+    let is_trash = src_type.as_deref() == Some("TRASH");
 
     if is_trash {
         // Hard delete — EXPUNGE

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPost, apiPut, apiDelete } from '@/shared/api'
+import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from '@/shared/api'
 import type { Account, AccountAlias, Folder, SyncStatus } from '@/shared/types'
 
 export function useAccounts() {
@@ -146,6 +146,28 @@ export function useUpdateAccount() {
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: unknown }) => apiPut(`/accounts/${id}`, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['accounts'] }),
+  })
+}
+
+export function useSetFolderSync(accountId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ folderPath, syncEnabled }: { folderPath: string; syncEnabled: boolean }) =>
+      apiPatch(`/accounts/${accountId}/folders/${encodeURIComponent(folderPath)}/sync`, {
+        sync_enabled: syncEnabled,
+      }),
+    onMutate: async ({ folderPath, syncEnabled }) => {
+      await qc.cancelQueries({ queryKey: ['folders', accountId] })
+      const prev = qc.getQueryData<Folder[]>(['folders', accountId])
+      qc.setQueryData<Folder[]>(['folders', accountId], (old) =>
+        old?.map((f) => (f.full_path === folderPath ? { ...f, sync_enabled: syncEnabled } : f)),
+      )
+      return prev
+    },
+    onError: (_e, _vars, prev) => {
+      if (prev) qc.setQueryData(['folders', accountId], prev)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['folders', accountId] }),
   })
 }
 

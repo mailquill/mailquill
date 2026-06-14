@@ -35,6 +35,24 @@ export function parseFromAddr(addr: string): { name: string; email: string } {
 
 export function listIdToName(listId: string | null | undefined): string | null {
   if (!listId) return null
-  const match = listId.match(/^([^<]+)/)
-  return match ? match[1].trim().replace(/\.$/, '') : listId
+  // RFC 2919: an optional human-readable phrase followed by <list-label.host>.
+  // Keep the phrase; drop the bracketed id, surrounding quotes and trailing dot.
+  const phrase = listId
+    .replace(/<[^>]*>/, '')
+    .trim()
+    .replace(/^"(.*)"$/, '$1')
+    .replace(/\.$/, '')
+    .trim()
+  if (!phrase) return null
+
+  // Many ESPs (Sendinblue/Brevo, Civey, JACOB, …) put an opaque token in the
+  // phrase instead of a real list name — base64 ids, long numeric or hex
+  // strings. Those are noise, not a friendly tag, so show nothing.
+  const isOpaqueToken =
+    !/\s/.test(phrase) &&
+    (/=$/.test(phrase) ||
+      /^\d{7,}$/.test(phrase) ||
+      /^[0-9a-f]{16,}$/i.test(phrase) ||
+      (phrase.length >= 20 && /\d/.test(phrase) && /[a-z]/i.test(phrase)))
+  return isOpaqueToken ? null : phrase
 }

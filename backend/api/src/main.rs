@@ -99,6 +99,7 @@ async fn main() {
         });
 
     let pkce_store = Arc::new(routes::oauth::new_pkce_store());
+    let (events, _) = tokio::sync::broadcast::channel(256);
 
     let state = AppState {
         app_db,
@@ -109,6 +110,7 @@ async fn main() {
         jwt_key,
         vapid,
         web_push_client,
+        events,
     };
 
     // Re-start sync tasks for existing accounts (needs the assembled AppState as
@@ -125,6 +127,9 @@ async fn main() {
         // query parameter validated inside the handler instead.
         .route("/auth/oauth/{provider}/start", get(routes::oauth::oauth_start))
         .route("/auth/oauth/{provider}/callback", get(routes::oauth::oauth_callback))
+        // SSE: EventSource can't set an Authorization header, so this validates
+        // a `?token=` query parameter itself (like oauth_start above).
+        .route("/events", get(routes::events::events_stream))
         .route("/auth/me", get(routes::auth::me).layer(axum_middleware::from_fn_with_state(state.clone(), middleware::require_auth)));
 
     let protected = Router::new()
@@ -137,10 +142,12 @@ async fn main() {
         .route("/accounts/{id}/aliases/{alias_id}", patch(routes::accounts::update_alias).delete(routes::accounts::delete_alias))
         .route("/accounts/{id}/sync-dav", post(routes::dav::sync_dav))
         .route("/accounts/{id}/folders", get(routes::mailbox::list_folders))
+        .route("/accounts/{id}/folders/{folder}/sync", patch(routes::mailbox::set_folder_sync))
         .route("/accounts/{id}/folders/{folder}/messages", get(routes::mailbox::list_folder_messages))
         // Mailbox
         .route("/mailbox/unified", get(routes::mailbox::unified_inbox))
         .route("/mailbox/unified/counts", get(routes::mailbox::unified_counts))
+        .route("/mailbox/bulk", post(routes::mailbox::bulk_action))
         // Messages
         .route("/messages/{id}", get(routes::messages::get_message))
         .route("/messages/{id}/read", patch(routes::messages::mark_read))

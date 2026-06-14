@@ -152,6 +152,29 @@ fn link_text_href_mismatch_fires_and_caps() {
 }
 
 #[test]
+fn social_handles_in_link_text_do_not_fire() {
+    // Reported false positive: Instagram story-recap mails render usernames
+    // like `hebamme.aachen` as anchor text while every link points to
+    // instagram.com. A dotted handle must not be read as a spoofed domain.
+    let body = r#"
+        <a href="https://www.instagram.com/hebamme.aachen">hebamme.aachen</a>
+        <a href="https://www.instagram.com/dany.thewarning">dany.thewarning</a>
+        <a href="https://www.instagram.com/paulina.thewarning">paulina.thewarning</a>
+    "#;
+    let msg = raw(
+        "From: Instagram <stories-recap@mail.instagram.com>\r\nReturn-Path: <stories-recap@mail.instagram.com>\r\n",
+        Some(body),
+    );
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    assert!(
+        !report.checks.iter().any(|c| c.id == "link_mismatch"),
+        "checks: {:?}",
+        report.checks
+    );
+    assert_eq!(report.verdict, "clean");
+}
+
+#[test]
 fn custom_brand_entry_is_used() {
     let mut brands = vec![("acme-corp.com".to_string(), "ACME Corp".to_string())];
     brands.extend(bundled_brands());

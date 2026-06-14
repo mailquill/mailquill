@@ -15,7 +15,21 @@ export function setRefreshSubscriber(subscriber: (token: string | null) => void)
   refreshSubscriber = subscriber
 }
 
+let refreshInFlight: Promise<string | null> | null = null
+
 export async function refreshAccessToken(): Promise<string | null> {
+  // Single-flight: when the access token expires the app fires many requests at
+  // once, each hitting 401. The refresh token rotates server-side (the old one
+  // is revoked), so parallel /auth/refresh calls would revoke each other and
+  // log the user out. De-dupe them onto one in-flight refresh.
+  if (refreshInFlight) return refreshInFlight
+  refreshInFlight = doRefresh().finally(() => {
+    refreshInFlight = null
+  })
+  return refreshInFlight
+}
+
+async function doRefresh(): Promise<string | null> {
   try {
     const res = await fetch(`${BASE}/auth/refresh`, {
       method: 'POST',

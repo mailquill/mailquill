@@ -8,6 +8,7 @@ members = [
     "backend/smtp",
     "backend/calendar-sync",
     "backend/contact-sync",
+    "backend/bench",
     "xtask",
 ]
 resolver = "2"

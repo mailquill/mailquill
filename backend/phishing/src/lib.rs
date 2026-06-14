@@ -478,8 +478,12 @@ fn mismatched_links(html: &str) -> Vec<(String, String)> {
         Regex::new(r#"(?is)<a\b[^>]*?href\s*=\s*["']?(https?://[^"'\s>]+)["']?[^>]*>(.*?)</a>"#).unwrap()
     });
     let tags = TAGS.get_or_init(|| Regex::new(r"(?s)<[^>]*>").unwrap());
+    // The visible text only counts as a navigable domain when it is presented
+    // like a link — an explicit http(s):// scheme or a www. prefix. A bare
+    // dotted token (Instagram handles like `hebamme.aachen`, filenames, …) is
+    // too ambiguous to treat as a spoofed destination.
     let text_url = TEXT_URL.get_or_init(|| {
-        Regex::new(r"(?i)(?:https?://)?((?:[a-z0-9-]+\.)+[a-z]{2,})").unwrap()
+        Regex::new(r"(?i)(?:https?://|www\.)((?:[a-z0-9-]+\.)+[a-z]{2,})").unwrap()
     });
 
     let mut out = Vec::new();

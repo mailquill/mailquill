@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { MessageList, SelectModeToggle } from '@/widgets/MessageList'
+import { MessageList } from '@/widgets/MessageList'
 import { ReadingPaneEmpty, ThreadDetail } from '@/widgets/ReadingPane'
-import { useUnifiedInbox } from '@/shared/hooks/useMessages'
+import { useUnifiedInbox, useUnifiedCounts } from '@/shared/hooks/useMessages'
+import { useAccounts } from '@/shared/hooks/useAccounts'
 import { LIST_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
 import { PaneResizer } from '@/shared/components/PaneResizer'
 import { UNIFIED_LABEL_KEY, isUnifiedView } from '@/shared/lib/unifiedViews'
@@ -14,7 +15,6 @@ export function UnifiedMailboxPage() {
   const { view: viewParam } = useParams()
   const view = isUnifiedView(viewParam) ? viewParam : 'inbox'
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
-  const [selectMode, setSelectMode] = useState(false)
   // Clear the open thread when switching unified views (adjust state on change).
   const [prevView, setPrevView] = useState(view)
   if (view !== prevView) {
@@ -22,7 +22,11 @@ export function UnifiedMailboxPage() {
     setSelectedMessage(null)
   }
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useUnifiedInbox(view)
+  const { data: counts } = useUnifiedCounts()
+  const { data: accounts } = useAccounts()
   const messages = data?.messages ?? []
+  const accountCount = accounts?.length ?? 0
+  const unread = counts?.[view] ?? 0
   const listWidth = useUiPrefs((s) => s.listWidth)
   const setListWidth = useUiPrefs((s) => s.setListWidth)
 
@@ -39,22 +43,24 @@ export function UnifiedMailboxPage() {
       <div className="flex min-h-0 shrink-0 flex-col border-r border-border bg-card" style={{ width: listWidth }}>
         <header className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
-            <h1 className="text-lg font-semibold">{t(UNIFIED_LABEL_KEY[view])}</h1>
+            <h1 className="text-lg font-semibold">
+              {t(UNIFIED_LABEL_KEY[view])} ({t('mail.allAccounts')})
+            </h1>
             <p className="text-xs text-muted-foreground">
-              {t('mail.conversations', { count: data?.total ?? messages.length })}
+              {t('mail.accountsUnread', { accounts: accountCount, unread })}
             </p>
           </div>
-          <SelectModeToggle active={selectMode} onToggle={() => setSelectMode((m) => !m)} />
         </header>
         <MessageList
           messages={messages}
           activeId={selectedMessage?.id}
           onSelect={handleSelect}
           loading={isLoading}
-          selectMode={selectMode}
           onLoadMore={fetchNextPage}
           hasMore={hasNextPage}
           loadingMore={isFetchingNextPage}
+          total={data?.total}
+          scope={{ view }}
         />
       </div>
       <PaneResizer

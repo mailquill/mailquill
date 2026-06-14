@@ -10,6 +10,7 @@ export interface Account {
   smtp_auth_scheme: string
   body_sync_mode: string
   sync_interval_secs: number
+  sync_mode: string
   created_at: string
   carddav_url?: string | null
   caldav_url?: string | null
@@ -29,6 +30,7 @@ export interface Folder {
   full_path: string
   folder_type: string
   unread_count: number
+  sync_enabled?: boolean
 }
 
 export interface Message {

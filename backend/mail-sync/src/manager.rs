@@ -81,9 +81,11 @@ impl SyncManager {
         let (tx, rx) = mpsc::channel(32);
         let account_id_clone = account_id.clone();
         let user_id_clone = user_id.clone();
+        // The task gets its own sender so the IMAP IDLE child can queue polls.
+        let self_tx = tx.clone();
 
         let handle = tokio::spawn(async move {
-            crate::sync::run_sync_task(account_id_clone, user_id_clone, rx, app_state).await;
+            crate::sync::run_sync_task(account_id_clone, user_id_clone, rx, self_tx, app_state).await;
         });
 
         let mut tasks = self.tasks.lock().await;

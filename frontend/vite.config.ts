@@ -28,7 +28,7 @@ export default defineConfig({
       srcDir: 'src',
       filename: 'sw.js',
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png'],
+      includeAssets: ['favicon.svg', 'favicon.ico', 'favicon-32.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png'],
       manifest: {
         name: 'Mailquill',
         short_name: 'Mailquill',
@@ -36,8 +36,8 @@ export default defineConfig({
         start_url: '/',
         scope: '/',
         display: 'standalone',
-        background_color: '#ffffff',
-        theme_color: '#ffffff',
+        background_color: '#0F172A',
+        theme_color: '#0F172A',
         icons: [
           {
             src: '/icons/icon-192.png',

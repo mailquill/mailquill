@@ -32,7 +32,7 @@ import { AddAccountForm } from '@/features/accounts'
 import { RulesSection } from '@/widgets/RulesSection'
 import { startOAuthRedirect } from '@/shared/lib/oauth'
 import { davDefaults } from '@/shared/lib/dav'
-import { useAccounts, useDeleteAccount, useUpdateAccount } from '@/shared/hooks/useAccounts'
+import { useAccounts, useDeleteAccount, useUpdateAccount, useFolders, useSetFolderSync } from '@/shared/hooks/useAccounts'
 import { useThemeStore, type ThemePref } from '@/shared/hooks/useTheme'
 import { useUiPrefs, type Density, type AccountMarker } from '@/shared/hooks/useUiPrefs'
 import { getLangPref, setLangPref, type LangPref } from '@/shared/i18n'
@@ -44,7 +44,6 @@ import {
   useUpdateSettings,
 } from '@/shared/hooks/useSettings'
 import {
-  getStoredPushSubscriptionId,
   pushNotificationsSupported,
   useDisablePushNotifications,
   useEnablePushNotifications,
@@ -218,6 +217,7 @@ const accountEditSchema = z.object({
   smtp_auth_scheme: z.string().min(1),
   body_sync_mode: z.enum(['lazy', 'full']),
   sync_interval_secs: z.coerce.number().int().positive(),
+  sync_mode: z.enum(['idle', 'interval']),
   carddav_url: z.string().optional(),
   caldav_url: z.string().optional(),
 })
@@ -279,6 +279,12 @@ function AccountCard({ account }: { account: Account }) {
             <Field id={`${account.id}-display`} label={t('settings.displayName')} error={errors.display_name?.message}>
               <Input id={`${account.id}-display`} {...register('display_name')} />
             </Field>
+            <Field id={`${account.id}-sync-mode`} label={t('settings.syncMode')} error={errors.sync_mode?.message}>
+              <Select id={`${account.id}-sync-mode`} {...register('sync_mode')}>
+                <option value="idle">{t('settings.syncModeIdle')}</option>
+                <option value="interval">{t('settings.syncModeInterval')}</option>
+              </Select>
+            </Field>
             <Field id={`${account.id}-sync`} label={t('settings.syncInterval')} error={errors.sync_interval_secs?.message}>
               <Input id={`${account.id}-sync`} type="number" {...register('sync_interval_secs')} />
             </Field>
@@ -328,6 +334,9 @@ function AccountCard({ account }: { account: Account }) {
             </div>
           </div>
 
+          {/* Folder selection — pick which mailboxes get synced */}
+          <FolderSyncList accountId={account.id} />
+
           <div className="mt-4 flex justify-between gap-2">
             <Button
               type="button"
@@ -360,9 +369,46 @@ function accountToForm(account: Account): AccountEditInput {
     smtp_auth_scheme: account.smtp_auth_scheme,
     body_sync_mode: account.body_sync_mode === 'full' ? 'full' : 'lazy',
     sync_interval_secs: account.sync_interval_secs,
+    sync_mode: account.sync_mode === 'interval' ? 'interval' : 'idle',
     carddav_url: account.carddav_url ?? '',
     caldav_url: account.caldav_url ?? '',
   }
+}
+
+function FolderSyncList({ accountId }: { accountId: string }) {
+  const { t } = useTranslation()
+  const { data: folders = [] } = useFolders(accountId)
+  const setSync = useSetFolderSync(accountId)
+
+  if (!folders.length) return null
+
+  return (
+    <div className="mt-4 border-t border-border pt-4">
+      <span className="text-[12px] font-bold uppercase tracking-wide text-muted-foreground">
+        {t('settings.syncedFolders')}
+      </span>
+      <p className="mb-3 mt-1 text-[12px] text-muted-foreground">{t('settings.syncedFoldersDesc')}</p>
+      <div className="grid gap-1.5 sm:grid-cols-2">
+        {folders.map((folder) => {
+          const enabled = folder.sync_enabled !== false
+          return (
+            <label
+              key={folder.id}
+              className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-secondary/60"
+            >
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => setSync.mutate({ folderPath: folder.full_path, syncEnabled: e.target.checked })}
+                className="size-4 accent-[#2563eb]"
+              />
+              <span className="truncate">{folder.full_path}</span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 function AppearanceSection() {
@@ -459,35 +505,96 @@ function ComposingSection() {
   )
 }
 
+/** Detect Brave so we can point users at its push-service setting. */
+async function isBrave(): Promise<boolean> {
+  const nav = navigator as Navigator & { brave?: { isBrave?: () => Promise<boolean> } }
+  try {
+    return (await nav.brave?.isBrave?.()) ?? false
+  } catch {
+    return false
+  }
+}
+
+/** iOS Safari only supports web push when installed to the home screen. */
+function isIosSafariNonStandalone(): boolean {
+  const ua = navigator.userAgent
+  const ios =
+    /iPad|iPhone|iPod/.test(ua) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  const standalone =
+    (navigator as Navigator & { standalone?: boolean }).standalone === true ||
+    window.matchMedia('(display-mode: standalone)').matches
+  return ios && !standalone
+}
+
+/** Map a push subscribe failure to a user-facing i18n key. A push-service
+ *  registration error means the browser's push backend is unavailable: Brave
+ *  disables Google's FCM by default; de-googled Chromium builds (Ungoogled,
+ *  some Vivaldi/Kiwi setups) have no push service at all. */
+async function classifyPushFailure(err: unknown): Promise<string> {
+  const e = err instanceof Error ? err : null
+  const serviceError = !e || e.name === 'AbortError' || /push service|permission denied/i.test(e.message)
+  if (serviceError) {
+    if (await isBrave()) return 'settings.pushBraveBlocked'
+    return 'settings.pushServiceUnavailable'
+  }
+  return 'settings.pushForegroundOnly'
+}
+
 function NotificationsSection() {
   const { t } = useTranslation()
   const { data: vapidPublicKey } = useVapidPublicKey()
   const enablePush = useEnablePushNotifications()
   const disablePush = useDisablePushNotifications()
-  const [enabled, setEnabled] = useState(() => Boolean(getStoredPushSubscriptionId()))
+  const enabled = useUiPrefs((s) => s.notificationsEnabled)
+  const setEnabled = useUiPrefs((s) => s.setNotificationsEnabled)
   const [message, setMessage] = useState<string | null>(null)
 
   async function toggleNotifications(checked: boolean) {
     setMessage(null)
     if (!checked) {
-      await disablePush.mutateAsync()
       setEnabled(false)
+      await disablePush.mutateAsync().catch(() => {})
       return
     }
-    if (!pushNotificationsSupported()) {
+    // The Notification API is the baseline for both the background (web push)
+    // and foreground (SSE) paths.
+    if (!('Notification' in window)) {
       setMessage(t('settings.pushUnsupported'))
+      return
+    }
+    // Push/notifications require a secure context (HTTPS; localhost counts).
+    if (!window.isSecureContext) {
+      setMessage(t('settings.pushInsecure'))
       return
     }
     if ((await Notification.requestPermission()) !== 'granted') {
       setMessage(t('settings.pushPermissionDenied'))
       return
     }
-    if (!vapidPublicKey?.public_key) {
-      setMessage(t('settings.pushNotAvailable'))
+    // Notifications are on from here: the in-app (SSE) path works without a
+    // browser push service.
+    setEnabled(true)
+
+    // Background web push needs a service worker + PushManager. iOS Safari only
+    // provides them once installed to the home screen; otherwise it's
+    // foreground-only.
+    if (!pushNotificationsSupported()) {
+      setMessage(t(isIosSafariNonStandalone() ? 'settings.pushIosPwa' : 'settings.pushForegroundOnly'))
       return
     }
-    await enablePush.mutateAsync(vapidPublicKey.public_key)
-    setEnabled(true)
+    if (!vapidPublicKey?.public_key) {
+      setMessage(t('settings.pushNotConfigured'))
+      return
+    }
+    try {
+      await enablePush.mutateAsync(vapidPublicKey.public_key)
+      setMessage(t('settings.pushEnabled'))
+    } catch (err) {
+      // Background push unavailable (push service blocked/missing). Tell the
+      // user the specifics; foreground notifications keep working meanwhile.
+      setMessage(t(await classifyPushFailure(err)))
+    }
   }
 
   return (
@@ -499,7 +606,13 @@ function NotificationsSection() {
           hint={t('settings.desktopNotificationsHint')}
           checked={enabled}
           disabled={enablePush.isPending || disablePush.isPending}
-          onChange={(c) => toggleNotifications(c).catch(() => setMessage(t('settings.pushSetupFailed')))}
+          onChange={(c) =>
+            toggleNotifications(c).catch((err) => {
+              console.error('notification setup failed:', err)
+              const detail = err instanceof Error ? err.message : String(err)
+              setMessage(`${t('settings.pushSetupFailed')} (${detail})`)
+            })
+          }
         />
         {message && <p className="text-[12.5px] text-muted-foreground">{message}</p>}
       </div>

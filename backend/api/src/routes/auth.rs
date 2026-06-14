@@ -118,22 +118,31 @@ pub async fn refresh(
     let raw = cookie_from_request(&req, "refresh_token").ok_or(AppError::Unauthorized)?;
     let token_hash = hash_token(&raw);
 
-    let row: Option<(String, String, bool)> = sqlx::query_as(
-        "SELECT id, user_id, (revoked = 1) FROM refresh_tokens WHERE token_hash = ? AND expires_at > datetime('now')",
+    let row: Option<(String, String, bool, bool)> = sqlx::query_as(
+        "SELECT id, user_id, (revoked = 1), (replaced_at IS NOT NULL AND replaced_at > datetime('now', '-60 seconds')) FROM refresh_tokens WHERE token_hash = ? AND expires_at > datetime('now')",
     )
     .bind(&token_hash)
     .fetch_optional(&state.app_db)
     .await?;
 
-    let (token_id, user_id, revoked) = row.ok_or(AppError::Unauthorized)?;
-    if revoked {
-        return Err(AppError::Unauthorized);
-    }
+    let (token_id, user_id, revoked, recently_replaced) = row.ok_or(AppError::Unauthorized)?;
 
-    sqlx::query("UPDATE refresh_tokens SET revoked = 1 WHERE id = ?")
-        .bind(&token_id)
-        .execute(&state.app_db)
-        .await?;
+    if revoked {
+        // Reuse grace: a token rotated moments ago is a benign concurrent or
+        // multi-tab refresh (the client raced its own parallel requests, or a
+        // second tab is open). Issue a fresh token for this client instead of
+        // logging it out. Outside the grace window — or for a token revoked by
+        // logout (replaced_at stays NULL) — this is genuine reuse: reject.
+        if !recently_replaced {
+            return Err(AppError::Unauthorized);
+        }
+    } else {
+        // Normal rotation: mark the presented token replaced.
+        sqlx::query("UPDATE refresh_tokens SET revoked = 1, replaced_at = datetime('now') WHERE id = ?")
+            .bind(&token_id)
+            .execute(&state.app_db)
+            .await?;
+    }
 
     let access_token = state
         .jwt_key

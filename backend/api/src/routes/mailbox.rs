@@ -21,19 +21,6 @@ pub struct PaginationQuery {
     view: Option<String>,
 }
 
-/// SQL predicate selecting the messages for a unified view.
-fn view_filter(view: Option<&str>) -> &'static str {
-    match view.unwrap_or("inbox") {
-        "starred" => "m.is_flagged = 1",
-        "sent" => "f.folder_type = 'SENT'",
-        "drafts" => "f.folder_type = 'DRAFTS'",
-        "archive" => "f.folder_type = 'ARCHIVE'",
-        "spam" => "f.folder_type = 'SPAM'",
-        "trash" => "f.folder_type = 'TRASH'",
-        _ => "f.folder_type = 'INBOX'",
-    }
-}
-
 pub async fn unified_inbox(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -42,40 +29,12 @@ pub async fn unified_inbox(
     let user_db = state.user_db_pool.get(&user.0).await?;
     let limit = q.limit.unwrap_or(PAGE_SIZE).min(100);
 
-    // Cursor = internal_date of last item (ISO string)
-    let cursor_clause = if let Some(ref c) = q.cursor {
-        format!("AND m.internal_date < '{}'", c.replace('\'', "''"))
-    } else {
-        String::new()
-    };
-
-    // Select the chosen view's messages across all accounts.
-    let filter = view_filter(q.view.as_deref());
-    let sql = format!(
-        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0 {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
-    );
-
-    let rows: Vec<MessageListRow> = sqlx::query_as(&sql)
-        .bind(limit)
-        .fetch_all(&user_db)
-        .await?;
-
-    let next_cursor = rows.last().map(|r| r.5.clone());
-    let has_more = rows.len() as i64 == limit;
-
-    let total: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0",
-    ))
-    .fetch_one(&user_db)
-    .await
-    .unwrap_or(0);
-
-    let items = build_thread_rows(&user_db, rows).await;
+    let page = db::queries::unified_page(&user_db, q.view.as_deref(), q.cursor.as_deref(), limit).await?;
 
     Ok(Json(json!({
-        "items": items,
-        "total": total,
-        "next_cursor": if has_more { next_cursor } else { None::<String> },
+        "items": page.items,
+        "total": page.total,
+        "next_cursor": page.next_cursor,
     })))
 }
 
@@ -111,6 +70,146 @@ pub async fn unified_counts(
     })))
 }
 
+#[derive(Deserialize)]
+pub struct BulkActionRequest {
+    /// "read" | "archive" | "delete"
+    action: String,
+    /// Unified view scope (inbox/starred/sent/…). Used when no folder is given.
+    view: Option<String>,
+    /// Single-folder scope.
+    account_id: Option<String>,
+    folder: Option<String>,
+}
+
+/// Server-side bulk action over a whole view or folder — the "select all N"
+/// path, so the client never enumerates thousands of ids. The local state
+/// change is a single UPDATE (RETURNING the affected rows); IMAP propagation is
+/// queued in a background task so the response stays fast.
+pub async fn bulk_action(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Json(req): Json<BulkActionRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+
+    // Resolve the scope into a WHERE predicate plus an optional bind value.
+    let (where_sql, bind): (String, Option<String>) =
+        if let (Some(account_id), Some(folder)) = (&req.account_id, &req.folder) {
+            let fid: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM folders WHERE account_id = ? AND full_path = ? COLLATE NOCASE LIMIT 1",
+            )
+            .bind(account_id)
+            .bind(folder)
+            .fetch_optional(&user_db)
+            .await?;
+            (
+                "folder_id = ? AND is_deleted = 0".into(),
+                Some(fid.ok_or(AppError::NotFound)?),
+            )
+        } else {
+            match req.view.as_deref().unwrap_or("inbox") {
+                "starred" => ("is_flagged = 1 AND is_deleted = 0".into(), None),
+                v => {
+                    let ft = match v {
+                        "sent" => "SENT",
+                        "drafts" => "DRAFTS",
+                        "archive" => "ARCHIVE",
+                        "spam" => "SPAM",
+                        "trash" => "TRASH",
+                        _ => "INBOX",
+                    };
+                    (
+                        "folder_id IN (SELECT id FROM folders WHERE folder_type = ?) AND is_deleted = 0".into(),
+                        Some(ft.to_string()),
+                    )
+                }
+            }
+        };
+
+    let set_sql = match req.action.as_str() {
+        "read" => "is_read = 1",
+        "flag" => "is_flagged = 1",
+        // Archive and delete both hide the rows locally now; IMAP MOVE (queued
+        // below) and the next sync reconcile their real location.
+        "archive" | "delete" => "is_deleted = 1",
+        _ => return Err(AppError::Unprocessable("invalid action".into())),
+    };
+
+    let sql =
+        format!("UPDATE messages SET {set_sql} WHERE {where_sql} RETURNING account_id, uid, folder_id");
+    let mut q = sqlx::query_as::<_, (String, i64, String)>(&sql);
+    if let Some(b) = &bind {
+        q = q.bind(b);
+    }
+    let affected = q.fetch_all(&user_db).await?;
+    let affected_len = affected.len();
+
+    crate::routes::messages::refresh_unread_counts(&user_db).await;
+
+    // Propagate to IMAP in the background — queueing potentially thousands of
+    // commands must not block the response.
+    let action = req.action.clone();
+    let state2 = state.clone();
+    let user_id = user.0.clone();
+    let db2 = user_db.clone();
+    tokio::spawn(async move {
+        let mut paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (account_id, uid, folder_id) in affected {
+            let full_path = match paths.get(&folder_id) {
+                Some(p) => p.clone(),
+                None => {
+                    let p: String =
+                        sqlx::query_scalar("SELECT full_path FROM folders WHERE id = ?")
+                            .bind(&folder_id)
+                            .fetch_one(&db2)
+                            .await
+                            .unwrap_or_default();
+                    paths.insert(folder_id.clone(), p.clone());
+                    p
+                }
+            };
+            let uid = uid as u32;
+            match action.as_str() {
+                "read" => {
+                    state2
+                        .sync_manager
+                        .queue_imap_flag(user_id.clone(), account_id, uid, full_path, "seen".into(), true)
+                        .await
+                }
+                "flag" => {
+                    state2
+                        .sync_manager
+                        .queue_imap_flag(user_id.clone(), account_id, uid, full_path, "flagged".into(), true)
+                        .await
+                }
+                "archive" => {
+                    state2
+                        .sync_manager
+                        .queue_imap_move(user_id.clone(), account_id, uid, full_path, "Archive".into(), false)
+                        .await
+                }
+                "delete" => {
+                    let lower = full_path.to_lowercase();
+                    if lower.contains("trash") || lower.contains("deleted") {
+                        state2
+                            .sync_manager
+                            .queue_imap_expunge(user_id.clone(), account_id, uid, full_path)
+                            .await
+                    } else {
+                        state2
+                            .sync_manager
+                            .queue_imap_move(user_id.clone(), account_id, uid, full_path, "Trash".into(), false)
+                            .await
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    Ok(Json(json!({ "affected": affected_len })))
+}
+
 pub async fn list_folders(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -128,8 +227,8 @@ pub async fn list_folders(
         return Err(AppError::NotFound);
     }
 
-    let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as(
-        "SELECT id, name, full_path, folder_type, unread_count FROM folders WHERE account_id = ? ORDER BY folder_type, full_path",
+    let rows: Vec<(String, String, String, String, i64, i64)> = sqlx::query_as(
+        "SELECT id, name, full_path, folder_type, unread_count, sync_enabled FROM folders WHERE account_id = ? ORDER BY folder_type, full_path",
     )
     .bind(&account_id)
     .fetch_all(&user_db)
@@ -137,19 +236,56 @@ pub async fn list_folders(
 
     let folders: Vec<_> = rows
         .into_iter()
-        .map(|(id, name, full_path, folder_type, unread_count)| {
+        .map(|(id, name, full_path, folder_type, unread_count, sync_enabled)| {
             json!({
                 "id": id,
                 "name": name,
                 "full_path": full_path,
                 "folder_type": folder_type,
                 "unread_count": unread_count,
+                "sync_enabled": sync_enabled != 0,
                 "account_id": account_id,
             })
         })
         .collect();
 
     Ok(Json(folders))
+}
+
+#[derive(Deserialize)]
+pub struct FolderSyncRequest {
+    sync_enabled: bool,
+}
+
+/// Toggle whether a folder is synced. Disabling stops future syncs for it (its
+/// already-fetched messages stay); enabling triggers an immediate poll so it
+/// backfills now instead of waiting for the next cycle.
+pub async fn set_folder_sync(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path((account_id, folder_path)): Path<(String, String)>,
+    Json(req): Json<FolderSyncRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let folder_path = urlencoding::decode(&folder_path)
+        .unwrap_or_else(|_| std::borrow::Cow::Borrowed(&folder_path))
+        .into_owned();
+
+    let res = sqlx::query("UPDATE folders SET sync_enabled = ? WHERE account_id = ? AND full_path = ?")
+        .bind(req.sync_enabled as i64)
+        .bind(&account_id)
+        .bind(&folder_path)
+        .execute(&user_db)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    if req.sync_enabled {
+        state.sync_manager.force_poll(&account_id).await;
+    }
+
+    Ok(Json(json!({ "sync_enabled": req.sync_enabled })))
 }
 
 pub async fn list_folder_messages(
@@ -166,96 +302,34 @@ pub async fn list_folder_messages(
         .unwrap_or_else(|_| std::borrow::Cow::Borrowed(&folder_path))
         .into_owned();
 
-    let folder_id: Option<String> = sqlx::query_scalar(
+    let exact: Option<String> = sqlx::query_scalar(
         "SELECT id FROM folders WHERE account_id = ? AND full_path = ?",
     )
     .bind(&account_id)
     .bind(&folder_path)
     .fetch_optional(&user_db)
     .await?;
-    let folder_id = folder_id.ok_or(AppError::NotFound)?;
-
-    let cursor_clause = if let Some(ref c) = q.cursor {
-        format!("AND m.internal_date < '{}'", c.replace('\'', "''"))
-    } else {
-        String::new()
+    // Fall back to a case-insensitive match so a bookmarked/typed `inbox`
+    // resolves to the canonical `INBOX` folder instead of 404ing.
+    let folder_id = match exact {
+        Some(id) => id,
+        None => sqlx::query_scalar(
+            "SELECT id FROM folders WHERE account_id = ? AND full_path = ? COLLATE NOCASE LIMIT 1",
+        )
+        .bind(&account_id)
+        .bind(&folder_path)
+        .fetch_optional(&user_db)
+        .await?
+        .ok_or(AppError::NotFound)?,
     };
 
-    let sql = format!(
-        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id = ? AND m.is_deleted = 0 {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
-    );
-
-    let rows: Vec<MessageListRow> = sqlx::query_as(&sql)
-        .bind(&folder_id)
-        .bind(limit)
-        .fetch_all(&user_db)
-        .await?;
-
-    let next_cursor = rows.last().map(|r| r.5.clone());
-    let has_more = rows.len() as i64 == limit;
-
-    let total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_deleted = 0")
-            .bind(&folder_id)
-            .fetch_one(&user_db)
-            .await
-            .unwrap_or(0);
-
-    let items = build_thread_rows(&user_db, rows).await;
+    let page = db::queries::folder_page(&user_db, &folder_id, q.cursor.as_deref(), limit).await?;
 
     Ok(Json(json!({
         "account_id": account_id,
         "folder_path": folder_path,
-        "items": items,
-        "total": total,
-        "next_cursor": if has_more { next_cursor } else { None::<String> },
+        "items": page.items,
+        "total": page.total,
+        "next_cursor": page.next_cursor,
     })))
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-/// (id, thread_id, subject, from_addr, snippet, internal_date, is_read,
-///  is_flagged, account_id, folder_id, list_id, phishing_verdict, folder_path)
-type MessageListRow = (String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>, Option<String>, String);
-
-async fn build_thread_rows(
-    db: &sqlx::SqlitePool,
-    rows: Vec<MessageListRow>,
-) -> Vec<serde_json::Value> {
-    let mut result = Vec::with_capacity(rows.len());
-
-    for (msg_id, thread_id, subject, from_addr, snippet, internal_date, is_read, is_flagged, account_id, folder_id, list_id, phishing_verdict, folder_path) in rows {
-        let (thread_size, thread_unread, participants) = if let Some(ref tid) = thread_id {
-            let size: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_deleted = 0")
-                .bind(tid).fetch_one(db).await.unwrap_or(1);
-            let unread: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_read = 0 AND is_deleted = 0")
-                .bind(tid).fetch_one(db).await.unwrap_or(0);
-            let p: Vec<String> = sqlx::query_scalar("SELECT DISTINCT from_addr FROM messages WHERE thread_id = ? AND is_deleted = 0 ORDER BY internal_date ASC LIMIT 3")
-                .bind(tid).fetch_all(db).await.unwrap_or_default();
-            (size, unread, p)
-        } else {
-            (1, if is_read { 0 } else { 1 }, vec![from_addr.clone()])
-        };
-
-        result.push(json!({
-            "message_id": msg_id,
-            "thread_id": thread_id,
-            "subject": subject,
-            "from_addr": from_addr,
-            "snippet": snippet,
-            "internal_date": internal_date,
-            "is_read": is_read,
-            "is_flagged": is_flagged,
-            "account_id": account_id,
-            "folder_id": folder_id,
-            "folder_path": folder_path,
-            "list_id": list_id,
-            "phishing_verdict": phishing_verdict,
-            "thread_size": thread_size,
-            "thread_unread": thread_unread,
-            "thread_participants": participants,
-        }));
-    }
-
-    result
 }

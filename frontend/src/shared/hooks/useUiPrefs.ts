@@ -13,11 +13,15 @@ interface UiPrefsState {
   maxRecipients: number
   sidebarWidth: number
   listWidth: number
+  /** Desktop notifications on. Drives the foreground SSE stream and reflects
+   *  the settings toggle; web push is attempted separately on enable. */
+  notificationsEnabled: boolean
   setDensity: (density: Density) => void
   setMarker: (marker: AccountMarker) => void
   setMaxRecipients: (n: number) => void
   setSidebarWidth: (w: number) => void
   setListWidth: (w: number) => void
+  setNotificationsEnabled: (on: boolean) => void
 }
 
 const clamp = (value: number, { min, max }: { min: number; max: number }) =>
@@ -31,11 +35,13 @@ export const useUiPrefs = create<UiPrefsState>()(
       maxRecipients: 25,
       sidebarWidth: SIDEBAR_WIDTH.default,
       listWidth: LIST_WIDTH.default,
+      notificationsEnabled: false,
       setDensity: (density) => set({ density }),
       setMarker: (marker) => set({ marker }),
       setMaxRecipients: (maxRecipients) => set({ maxRecipients: Math.max(1, maxRecipients) }),
       setSidebarWidth: (w) => set({ sidebarWidth: clamp(w, SIDEBAR_WIDTH) }),
       setListWidth: (w) => set({ listWidth: clamp(w, LIST_WIDTH) }),
+      setNotificationsEnabled: (notificationsEnabled) => set({ notificationsEnabled }),
     }),
     { name: 'mailquill-ui' },
   ),

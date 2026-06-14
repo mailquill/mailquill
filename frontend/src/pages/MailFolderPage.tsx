@@ -1,7 +1,6 @@
-import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { MessageList, SelectModeToggle } from '@/widgets/MessageList'
+import { MessageList } from '@/widgets/MessageList'
 import { ThreadDetail } from '@/widgets/ReadingPane'
 import { useFolderMessages } from '@/shared/hooks/useMessages'
 import { LIST_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
@@ -14,7 +13,6 @@ export function MailFolderPage() {
   const { accountId = '', folder = '', threadId = '' } = useParams()
   const folderName = decodeURIComponent(folder)
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useFolderMessages(accountId, folderName)
-  const [selectMode, setSelectMode] = useState(false)
   const messages = data?.messages ?? []
   const listWidth = useUiPrefs((s) => s.listWidth)
   const setListWidth = useUiPrefs((s) => s.setListWidth)
@@ -30,20 +28,20 @@ export function MailFolderPage() {
           <div className="min-w-0">
             <h1 className="truncate text-[16px] font-bold tracking-tight">{folderName}</h1>
             <p className="text-xs text-muted-foreground">
-              {t('mail.conversations', { count: data?.total ?? messages.length })}
+              {t('mail.messageCount', { count: data?.total ?? messages.length })}
             </p>
           </div>
-          <SelectModeToggle active={selectMode} onToggle={() => setSelectMode((m) => !m)} />
         </header>
         <MessageList
           messages={messages}
           activeId={threadId}
           onSelect={handleSelect}
           loading={isLoading}
-          selectMode={selectMode}
           onLoadMore={fetchNextPage}
           hasMore={hasNextPage}
           loadingMore={isFetchingNextPage}
+          total={data?.total}
+          scope={{ accountId, folder: folderName }}
         />
       </div>
       <PaneResizer

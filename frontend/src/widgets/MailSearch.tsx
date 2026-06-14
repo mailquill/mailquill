@@ -124,6 +124,10 @@ export function MailSearch() {
         <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" aria-hidden="true" />
         <Input
           ref={inputRef}
+          id="mail-search"
+          name="mail-search"
+          type="search"
+          autoComplete="off"
           value={search}
           onChange={(e) => setSearch(e.currentTarget.value)}
           className="bg-secondary pl-9 pr-9"
@@ -172,23 +176,24 @@ export function MailSearch() {
         {open && (
           <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-[min(580px,calc(100vw-2rem))] rounded-xl border border-border bg-popover p-5 shadow-xl">
             <FilterRow label={t('filter.from')}>
-              <Input className="h-[34px]" value={filter.from} onChange={(e) => set('from', e.currentTarget.value)} placeholder={t('filter.fromPh')} />
+              <Input className="h-[34px]" name="filter-from" value={filter.from} onChange={(e) => set('from', e.currentTarget.value)} placeholder={t('filter.fromPh')} />
             </FilterRow>
             <FilterRow label={t('filter.to')}>
-              <Input className="h-[34px]" value={filter.to} onChange={(e) => set('to', e.currentTarget.value)} placeholder={t('filter.toPh')} />
+              <Input className="h-[34px]" name="filter-to" value={filter.to} onChange={(e) => set('to', e.currentTarget.value)} placeholder={t('filter.toPh')} />
             </FilterRow>
             <FilterRow label={t('filter.subject')}>
-              <Input className="h-[34px]" value={filter.subject} onChange={(e) => set('subject', e.currentTarget.value)} />
+              <Input className="h-[34px]" name="filter-subject" value={filter.subject} onChange={(e) => set('subject', e.currentTarget.value)} />
             </FilterRow>
             <FilterRow label={t('filter.has')}>
-              <Input className="h-[34px]" value={filter.has} onChange={(e) => set('has', e.currentTarget.value)} />
+              <Input className="h-[34px]" name="filter-has" value={filter.has} onChange={(e) => set('has', e.currentTarget.value)} />
             </FilterRow>
             <FilterRow label={t('filter.hasNot')}>
-              <Input className="h-[34px]" value={filter.not} onChange={(e) => set('not', e.currentTarget.value)} />
+              <Input className="h-[34px]" name="filter-not" value={filter.not} onChange={(e) => set('not', e.currentTarget.value)} />
             </FilterRow>
             <FilterRow label={t('filter.date')}>
               <Select
                 className="h-[34px] flex-1"
+                name="filter-within"
                 value={filter.within}
                 onChange={(e) =>
                   setFilter((f) => ({ ...f, within: e.currentTarget.value, withinDate: f.withinDate || isoDate(new Date()) }))
@@ -203,6 +208,7 @@ export function MailSearch() {
               </Select>
               <Input
                 className="h-[34px] flex-1"
+                name="filter-within-date"
                 type="date"
                 value={filter.withinDate}
                 onChange={(e) => set('withinDate', e.currentTarget.value)}

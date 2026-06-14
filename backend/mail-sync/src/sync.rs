@@ -14,6 +14,7 @@ pub async fn run_sync_task(
     account_id: String,
     user_id: String,
     mut rx: mpsc::Receiver<SyncCommand>,
+    self_tx: mpsc::Sender<SyncCommand>,
     app_state: Arc<dyn SyncAppState>,
 ) {
     info!("sync task starting: account={account_id}");
@@ -40,9 +41,39 @@ pub async fn run_sync_task(
     let mut ticker = time::interval(time::Duration::from_secs(interval_secs as u64));
     ticker.reset();
 
+    // Sync strategy (sync_mode): in 'idle' mode a dedicated IMAP IDLE connection
+    // triggers a ForcePoll the moment the server reports new mail (near-instant),
+    // and the periodic ticker is disabled. In 'interval' mode there is no IDLE
+    // and the ticker polls every sync_interval_secs. IDLE is IMAP-only — Gmail/
+    // Outlook API accounts always use the interval path regardless of sync_mode.
+    let (provider_kind, sync_mode): (String, String) = sqlx::query_as(
+        "SELECT provider_kind, sync_mode FROM email_accounts WHERE id = ?",
+    )
+    .bind(&account_id)
+    .fetch_optional(&db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| ("imap".into(), "idle".into()));
+
+    let idle_mode = sync_mode == "idle" && ProviderKind::parse(&provider_kind) == ProviderKind::Imap;
+    // The guard aborts the IDLE child when this sync task shuts down or is dropped.
+    let _idle_guard = if idle_mode {
+        let handle = tokio::spawn(run_idle_task(
+            account_id.clone(),
+            user_id.clone(),
+            app_state.clone(),
+            self_tx.clone(),
+        ));
+        Some(AbortOnDrop(handle))
+    } else {
+        None
+    };
+
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
+            // Disabled in idle mode — IDLE drives polling there.
+            _ = ticker.tick(), if !idle_mode => {
                 do_sync(&account_id, &user_id, &app_state).await;
             }
             cmd = rx.recv() => {
@@ -76,8 +107,9 @@ pub async fn run_sync_task(
 }
 
 async fn do_sync(account_id: &str, user_id: &str, app: &Arc<dyn SyncAppState>) {
-    // Reset progress counters for this run, then mark syncing.
-    app.sync_manager().set_progress(account_id, 0, 0).await;
+    // Mark syncing but keep the last known progress counters — sync_account
+    // recomputes them as soon as it has the new totals. Resetting to 0/0 here
+    // would make a manual refresh flash "0 / 0" until that recompute lands.
     app.sync_manager()
         .set_state(account_id, "syncing", None, None)
         .await;
@@ -120,7 +152,8 @@ async fn sync_account(
 
     let mut provider = open_provider(account_id, user_id, app).await?;
 
-    // Discover folders (task 4.1)
+    // Discover folders (task 4.1). Every folder is upserted so it stays visible
+    // and toggle-able in settings, regardless of whether it's synced.
     let folders = provider.list_folders().await?;
     for folder in &folders {
         sqlx::query(
@@ -134,26 +167,45 @@ async fn sync_account(
         .await?;
     }
 
-    // Progress total: sum of server-reported message counts across all folders.
-    // A cheap status pre-pass gives a stable denominator before the backfill
-    // starts inserting rows.
+    // Only sync folders the user kept enabled (sync_enabled defaults to 1).
+    let enabled: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT full_path FROM folders WHERE account_id = ? AND sync_enabled = 1",
+    )
+    .bind(account_id)
+    .fetch_all(&db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
+    let synced_folders: Vec<&crate::session::FolderInfo> =
+        folders.iter().filter(|f| enabled.contains(&f.full_path)).collect();
+
+    // Progress total: sum of server-reported message counts across synced
+    // folders. A cheap status pre-pass gives a stable denominator before the
+    // backfill starts inserting rows.
     let mut total: i64 = 0;
-    for folder in &folders {
+    for folder in &synced_folders {
         if let Ok(status) = provider.folder_status(&folder.full_path).await {
             total += status.exists as i64;
         }
     }
-    let already: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE account_id = ?")
-        .bind(account_id)
-        .fetch_one(&db)
-        .await
-        .unwrap_or(0);
+    // Count over the same set `total` covers: synced (enabled) folders, live
+    // messages only. Counting every folder or including soft-deleted rows made
+    // `synced` exceed `total` (e.g. "519 / 226").
+    let already: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages m JOIN folders f ON f.id = m.folder_id \
+         WHERE m.account_id = ? AND f.sync_enabled = 1 AND m.is_deleted = 0",
+    )
+    .bind(account_id)
+    .fetch_one(&db)
+    .await
+    .unwrap_or(0);
     app.sync_manager()
         .set_progress(account_id, already, total)
         .await;
 
-    // Sync each folder
-    for folder in &folders {
+    // Sync each enabled folder
+    for folder in &synced_folders {
         if let Err(e) = sync_folder(
             account_id,
             user_id,
@@ -174,13 +226,13 @@ async fn sync_account(
     Ok(())
 }
 
-/// Open the account's mailbox backend (IMAP or one of the API providers,
-/// chosen by `email_accounts.provider_kind`).
-async fn open_provider(
+/// Load the connection config for an account, plus its provider kind. Shared by
+/// the polling path ([`open_provider`]) and the IMAP IDLE task.
+async fn load_provider_config(
     account_id: &str,
     user_id: &str,
     app: &Arc<dyn SyncAppState>,
-) -> Result<Box<dyn MailProvider>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(ProviderConfig, ProviderKind), Box<dyn std::error::Error + Send + Sync>> {
     let db = app.user_db(user_id).await?;
     let row: Option<(Vec<u8>, String, i64, String, Option<String>, String)> = sqlx::query_as(
         "SELECT credentials_encrypted, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
@@ -211,9 +263,114 @@ async fn open_provider(
         db: Some(db),
         account_id: account_id.to_owned(),
     };
-    provider::connect(ProviderKind::parse(&kind), &config)
+    Ok((config, ProviderKind::parse(&kind)))
+}
+
+/// Open the account's mailbox backend (IMAP or one of the API providers,
+/// chosen by `email_accounts.provider_kind`).
+async fn open_provider(
+    account_id: &str,
+    user_id: &str,
+    app: &Arc<dyn SyncAppState>,
+) -> Result<Box<dyn MailProvider>, Box<dyn std::error::Error + Send + Sync>> {
+    let (config, kind) = load_provider_config(account_id, user_id, app).await?;
+    provider::connect(kind, &config)
         .await
         .map_err(|e| Box::new(e) as _)
+}
+
+/// Aborts the wrapped task when dropped — ties the IMAP IDLE task's lifetime to
+/// its parent sync task, whether that ends gracefully or is aborted.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Per-account IMAP IDLE loop: holds a dedicated connection on INBOX and asks
+/// the sync task to poll whenever the server reports activity. Reconnects with
+/// exponential backoff; exits cleanly once the sync task's command channel is
+/// gone.
+async fn run_idle_task(
+    account_id: String,
+    user_id: String,
+    app: Arc<dyn SyncAppState>,
+    tx: mpsc::Sender<SyncCommand>,
+) {
+    // Refresh well under the RFC 2177 29-minute ceiling.
+    const MAX_WAIT: time::Duration = time::Duration::from_secs(25 * 60);
+    let mut backoff = time::Duration::from_secs(5);
+    // The first connection follows the task's own initial sync, so no catch-up
+    // poll is needed; reconnects do poll once to pick up anything missed.
+    let mut catch_up = false;
+
+    loop {
+        match idle_session_loop(&account_id, &user_id, &app, &tx, MAX_WAIT, catch_up).await {
+            Ok(()) => {
+                info!("idle task stopping: account={account_id}");
+                return;
+            }
+            Err(e) => {
+                warn!("idle: account={account_id} connection error: {e}; reconnecting in {backoff:?}");
+                time::sleep(backoff).await;
+                backoff = (backoff * 2).min(time::Duration::from_secs(300));
+                catch_up = true;
+            }
+        }
+    }
+}
+
+/// One IMAP IDLE connection's lifetime. Returns `Ok(())` when there is nothing
+/// to idle on (non-IMAP) or the sync task has gone away; returns `Err` on any
+/// connection error so the caller reconnects.
+async fn idle_session_loop(
+    account_id: &str,
+    user_id: &str,
+    app: &Arc<dyn SyncAppState>,
+    tx: &mpsc::Sender<SyncCommand>,
+    max_wait: time::Duration,
+    catch_up: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (config, kind) = load_provider_config(account_id, user_id, app).await?;
+    if kind != ProviderKind::Imap {
+        return Ok(());
+    }
+
+    let mut session = crate::session::connect_imap(
+        &config.host,
+        config.port,
+        &config.username,
+        &config.password,
+        config.oauth_access_token.as_deref(),
+        &config.auth_scheme,
+        config.trusted_cert_der.as_deref(),
+    )
+    .await?;
+    crate::session::select_folder(&mut session, "INBOX").await?;
+    info!("idle: account={account_id} watching INBOX");
+
+    // Reconnecting after a drop — poll once to pick up mail that arrived while
+    // the IDLE connection was down.
+    if catch_up && tx.send(SyncCommand::ForcePoll).await.is_err() {
+        let _ = session.logout().await;
+        return Ok(());
+    }
+
+    loop {
+        let (next, activity) = crate::session::idle_once(session, max_wait).await?;
+        session = next;
+        if activity {
+            info!("idle: account={account_id} reported activity, triggering poll");
+            if tx.send(SyncCommand::ForcePoll).await.is_err() {
+                // Sync task is gone — stop without reconnecting.
+                let _ = session.logout().await;
+                return Ok(());
+            }
+        }
+        // On timeout, just re-issue IDLE to keep the session under 29 minutes.
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,15 +385,19 @@ async fn sync_folder(
     app: &Arc<dyn SyncAppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Get stored folder info
-    let folder_row: Option<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT id, uidvalidity, last_uid FROM folders WHERE account_id = ? AND full_path = ?",
+    let folder_row: Option<(String, Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+        "SELECT id, uidvalidity, last_uid, folder_type FROM folders WHERE account_id = ? AND full_path = ?",
     )
     .bind(account_id)
     .bind(folder_path)
     .fetch_optional(db)
     .await?;
 
-    let (folder_id, stored_uidvalidity, last_uid) = folder_row.ok_or("folder not found")?;
+    let (folder_id, stored_uidvalidity, last_uid, folder_type) =
+        folder_row.ok_or("folder not found")?;
+
+    // Spam and trash get new mail constantly; never push-notify for them.
+    let notify_allowed = !matches!(folder_type.as_deref(), Some("SPAM") | Some("TRASH"));
 
     // Folder status (IMAP: SELECT; APIs: metadata lookup)
     let server_uidvalidity = provider.folder_status(folder_path).await?.uidvalidity;
@@ -449,8 +610,10 @@ async fn sync_folder(
 
                     // FTS index (task 4.9)
                     let body_text = parsed.text.as_deref().unwrap_or("");
+                    // FTS5 rejects ON CONFLICT/UPSERT on a virtual table, so use
+                    // INSERT OR REPLACE to refresh the row keyed by rowid.
                     let _ = sqlx::query(
-                    "INSERT INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, ?) ON CONFLICT DO UPDATE SET body_text = excluded.body_text",
+                    "INSERT OR REPLACE INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, ?)",
                 )
                 .bind(&msg_db_id)
                 .bind(&msg.subject)
@@ -472,8 +635,10 @@ async fn sync_folder(
 
             // Update FTS for lazy sync with subject + from_addr (no body text)
             if body_sync_mode == "lazy" {
+                // OR IGNORE keeps any existing row (with body) intact; FTS5
+                // does not support ON CONFLICT here.
                 let _ = sqlx::query(
-                "INSERT INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, '') ON CONFLICT DO NOTHING",
+                "INSERT OR IGNORE INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, '')",
             )
             .bind(&msg_db_id)
             .bind(&msg.subject)
@@ -482,7 +647,7 @@ async fn sync_folder(
             .await;
             }
 
-            if is_new_message {
+            if is_new_message && notify_allowed {
                 let notification = NewMessageNotification {
                     message_id: msg_db_id,
                     account_id: account_id.to_owned(),
@@ -514,11 +679,15 @@ async fn sync_folder(
             .await?;
 
         // Report sync progress (synced / total) for the live UI indicator.
-        let synced: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE account_id = ?")
-            .bind(account_id)
-            .fetch_one(db)
-            .await
-            .unwrap_or(0);
+        // Match the denominator: enabled folders, live messages only.
+        let synced: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages m JOIN folders f ON f.id = m.folder_id \
+             WHERE m.account_id = ? AND f.sync_enabled = 1 AND m.is_deleted = 0",
+        )
+        .bind(account_id)
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
         app.sync_manager()
             .set_progress(account_id, synced, total)
             .await;
@@ -598,10 +767,42 @@ async fn do_imap_move(
     _expunge: bool,
     app: &Arc<dyn SyncAppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dest = resolve_dest_folder(account_id, user_id, dest_folder, app).await;
     let mut provider = open_provider(account_id, user_id, app).await?;
-    provider.move_message(src_folder, uid, dest_folder).await?;
+    provider.move_message(src_folder, uid, &dest).await?;
     let _ = provider.close().await;
     Ok(())
+}
+
+/// Map a logical destination ("Trash"/"Archive"/"Spam") to the account's real
+/// folder. IMAP servers localize these ("Papierkorb", "INBOX.Trash"), so a
+/// literal name won't match — we look the path up by folder_type instead. Any
+/// other value is treated as an explicit folder path and passed through.
+async fn resolve_dest_folder(
+    account_id: &str,
+    user_id: &str,
+    dest: &str,
+    app: &Arc<dyn SyncAppState>,
+) -> String {
+    let folder_type = match dest {
+        "Trash" => "TRASH",
+        "Archive" => "ARCHIVE",
+        "Spam" | "Junk" => "SPAM",
+        _ => return dest.to_owned(),
+    };
+    if let Ok(db) = app.user_db(user_id).await {
+        if let Ok(Some(path)) = sqlx::query_scalar::<_, String>(
+            "SELECT full_path FROM folders WHERE account_id = ? AND folder_type = ? ORDER BY full_path LIMIT 1",
+        )
+        .bind(account_id)
+        .bind(folder_type)
+        .fetch_optional(&db)
+        .await
+        {
+            return path;
+        }
+    }
+    dest.to_owned()
 }
 
 async fn do_imap_flag(

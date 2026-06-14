@@ -40,6 +40,23 @@ impl SyncAppState for AppState {
         user_id: &str,
         message: NewMessageNotification,
     ) -> Result<(), String> {
+        let payload = crate::routes::push_subscriptions::push_payload(
+            &message.message_id,
+            &message.account_id,
+            &message.account_name,
+            &message.sender,
+            &message.subject,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Foreground SSE: always broadcast (open clients show a notification
+        // even without web push). Errors mean no subscriber — ignore.
+        let _ = self.events.send(crate::state::UserEvent {
+            user_id: user_id.to_owned(),
+            payload: String::from_utf8_lossy(&payload).into_owned(),
+        });
+
+        // Background web push, only when VAPID is configured.
         let Some(vapid) = &self.vapid else {
             return Ok(());
         };
@@ -58,15 +75,6 @@ impl SyncAppState for AppState {
         if subscriptions.is_empty() {
             return Ok(());
         }
-
-        let payload = crate::routes::push_subscriptions::push_payload(
-            &message.message_id,
-            &message.account_id,
-            &message.account_name,
-            &message.sender,
-            &message.subject,
-        )
-        .map_err(|e| e.to_string())?;
 
         for (id, endpoint, p256dh, auth) in subscriptions {
             let subscription = SubscriptionInfo::new(&endpoint, &p256dh, &auth);

@@ -5,6 +5,7 @@ import type { ComposeInitialState } from '@/features/compose'
 import { useOnlineStatus } from '@/shared/hooks/useOnlineStatus'
 import { useSyncActivity } from '@/shared/hooks/useAccounts'
 import { SIDEBAR_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
+import { useMailNotifications } from '@/shared/hooks/useMailNotifications'
 import { PaneResizer } from '@/shared/components/PaneResizer'
 import { TopBar } from '@/widgets/TopBar'
 import { Sidebar } from '@/widgets/Sidebar'
@@ -20,6 +21,8 @@ export function MailLayout() {
   useSyncActivity({ watch: true })
   const sidebarWidth = useUiPrefs((s) => s.sidebarWidth)
   const setSidebarWidth = useUiPrefs((s) => s.setSidebarWidth)
+  // Foreground desktop notifications (SSE), alongside service-worker push.
+  useMailNotifications(useUiPrefs((s) => s.notificationsEnabled))
   const [isComposeOpen, setIsComposeOpen] = useState(false)
   const [composeState, setComposeState] = useState<ComposeInitialState>({ mode: 'new' })
   const [composeKey, setComposeKey] = useState(0)

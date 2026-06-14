@@ -124,10 +124,10 @@ pub async fn search(
 
     let where_clause = conditions.join(" AND ");
     let sql = format!(
-        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE {where_clause} ORDER BY m.internal_date DESC LIMIT ?",
+        "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, f.full_path FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE {where_clause} ORDER BY m.internal_date DESC LIMIT ?",
     );
 
-    let mut query = sqlx::query_as::<_, (String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>)>(&sql);
+    let mut query = sqlx::query_as::<_, (String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>, Option<String>)>(&sql);
     for b in &binds {
         query = query.bind(b);
     }
@@ -140,7 +140,7 @@ pub async fn search(
 
     let items: Vec<_> = rows
         .into_iter()
-        .map(|(id, thread_id, subject, from_addr, snippet, internal_date, is_read, is_flagged, account_id, folder_id, list_id)| {
+        .map(|(id, thread_id, subject, from_addr, snippet, internal_date, is_read, is_flagged, account_id, folder_id, list_id, folder_path)| {
             json!({
                 "id": id,
                 "thread_id": thread_id,
@@ -152,6 +152,7 @@ pub async fn search(
                 "is_flagged": is_flagged,
                 "account_id": account_id,
                 "folder_id": folder_id,
+                "folder_path": folder_path,
                 "list_id": list_id,
             })
         })

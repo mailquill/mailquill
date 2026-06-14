@@ -9,8 +9,11 @@ import {
   useMarkRead,
   useArchiveMessage,
   useDeleteMessage,
+  useToggleFlag,
+  useBulkAction,
+  type BulkScope,
 } from '@/shared/hooks/useMessages'
-import { Star, Check, MousePointerClick, MailOpen, Archive, Trash2, ShieldAlert } from 'lucide-react'
+import { Star, Check, MailOpen, Archive, Trash2, ShieldAlert } from 'lucide-react'
 import { MessageContextMenu, type ContextMenuState } from '@/widgets/MessageContextMenu'
 import type { Message } from '@/shared/types'
 
@@ -18,7 +21,6 @@ interface MessageRowProps {
   message: Message
   index: number
   isActive: boolean
-  selectMode: boolean
   checked: boolean
   onClick: () => void
   onToggleCheck: (id: string) => void
@@ -50,7 +52,6 @@ export function MessageRow({
   message,
   index,
   isActive,
-  selectMode,
   checked,
   onClick,
   onToggleCheck,
@@ -58,6 +59,7 @@ export function MessageRow({
   onRowMouseDown,
   onRowMouseEnter,
 }: MessageRowProps) {
+  const { t } = useTranslation()
   const density = useUiPrefs((s) => s.density)
   const marker = useUiPrefs((s) => s.marker)
   const { name } = parseFromAddr(message.from_addr)
@@ -79,29 +81,18 @@ export function MessageRow({
 
   return (
     <button
-      onClick={() => (selectMode ? onToggleCheck(message.id) : onClick())}
+      onClick={() => onClick()}
       onContextMenu={(e) => onContextMenu(e, message)}
-      draggable={!selectMode}
+      draggable
       onDragStart={(e) => {
-        if (selectMode) {
-          e.preventDefault()
-          return
-        }
         e.dataTransfer.effectAllowed = 'move'
         e.dataTransfer.setData('application/x-mailtastic-message', message.id)
         e.dataTransfer.setData('text/plain', message.id)
       }}
-      onMouseDown={(e) => {
-        if (selectMode && e.button === 0) {
-          e.preventDefault()
-          onRowMouseDown(index, message.id)
-        }
-      }}
-      onMouseEnter={() => selectMode && onRowMouseEnter(index)}
+      onMouseEnter={() => onRowMouseEnter(index)}
       className={cn(
-        'relative flex w-full items-start gap-2.5 border-b border-secondary pl-4 pr-3 text-left transition-colors',
+        'relative flex w-full select-none items-start gap-2.5 border-b border-secondary pl-4 pr-3 text-left transition-colors',
         DENSITY_PAD[density],
-        selectMode && 'select-none',
         checked ? 'bg-[var(--mq-bulk)]' : isActive ? 'bg-[var(--mq-row-open)]' : 'bg-card hover:bg-secondary/60',
       )}
     >
@@ -112,18 +103,37 @@ export function MessageRow({
         />
       )}
 
-      {selectMode ? (
-        <span className="mt-0.5">
+      <span className="mt-0.5 flex shrink-0 items-center gap-2">
+        <span
+          role="checkbox"
+          aria-checked={checked}
+          aria-label={t('ml.select')}
+          tabIndex={0}
+          onMouseDown={(e) => {
+            if (e.button !== 0) return
+            e.preventDefault()
+            e.stopPropagation()
+            onRowMouseDown(index, message.id)
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === ' ' || e.key === 'Enter') {
+              e.preventDefault()
+              e.stopPropagation()
+              onToggleCheck(message.id)
+            }
+          }}
+          className="cursor-pointer"
+        >
           <Checkbox checked={checked} />
         </span>
-      ) : (
         <Star
           className={cn(
-            'mt-0.5 size-4 shrink-0',
+            'size-4 shrink-0',
             message.is_flagged ? 'fill-primary text-primary' : 'text-input',
           )}
         />
-      )}
+      </span>
 
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex h-6 items-center gap-1.5">
@@ -212,12 +222,14 @@ interface MessageListProps {
   onSelect: (msg: Message) => void
   onRefresh?: () => void
   loading?: boolean
-  /** Selection mode is controlled by the page header's toggle. */
-  selectMode?: boolean
   /** Infinite scroll: fetch the next page when scrolling near the end. */
   onLoadMore?: () => void
   hasMore?: boolean
   loadingMore?: boolean
+  /** Total conversations matching the view/folder, for "select all N". */
+  total?: number
+  /** Scope for server-side "select all" bulk actions. Omit to disable it. */
+  scope?: BulkScope
 }
 
 // Row-height estimates per density; real heights are measured after render.
@@ -232,14 +244,17 @@ export function MessageList({
   activeId,
   onSelect,
   loading,
-  selectMode = false,
   onLoadMore,
   hasMore = false,
   loadingMore = false,
+  total,
+  scope,
 }: MessageListProps) {
   const { t } = useTranslation()
   const [menu, setMenu] = useState<ContextMenuState | null>(null)
   const [checked, setChecked] = useState<Set<string>>(() => new Set())
+  // True once the user opts into "select all N matching" (beyond the loaded page).
+  const [selectAllMatching, setSelectAllMatching] = useState(false)
   const density = useUiPrefs((s) => s.density)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -260,15 +275,11 @@ export function MessageList({
     }
   }, [hasMore, loadingMore, onLoadMore, lastVisibleIndex, messages.length])
 
-  // Leaving selection mode clears any pending checks (adjust state on change).
-  const [prevSelectMode, setPrevSelectMode] = useState(selectMode)
-  if (selectMode !== prevSelectMode) {
-    setPrevSelectMode(selectMode)
-    if (!selectMode) setChecked(new Set())
-  }
   const markRead = useMarkRead()
   const archive = useArchiveMessage()
   const remove = useDeleteMessage()
+  const toggleFlag = useToggleFlag()
+  const bulkAction = useBulkAction()
 
   // drag-to-select: paint a contiguous range from the press row; "additive"
   // mirrors the anchor's start state so dragging over selected rows deselects.
@@ -315,14 +326,26 @@ export function MessageList({
     })
   }
 
-  function bulk(action: 'read' | 'archive' | 'delete') {
-    const ids = [...checked]
-    for (const id of ids) {
-      if (action === 'read') markRead.mutate({ id, is_read: true })
-      else if (action === 'archive') archive.mutate(id)
-      else remove.mutate(id)
+  function bulk(action: 'read' | 'archive' | 'delete' | 'flag') {
+    if (selectAllMatching && scope) {
+      // Whole view/folder — one server-side operation.
+      bulkAction.mutate({ action, ...scope })
+    } else {
+      for (const id of checked) {
+        if (action === 'read') markRead.mutate({ id, is_read: true })
+        else if (action === 'archive') archive.mutate(id)
+        else if (action === 'flag') toggleFlag.mutate({ id, is_flagged: true })
+        else remove.mutate(id)
+      }
     }
     setChecked(new Set())
+    setSelectAllMatching(false)
+  }
+
+  function toggleSelectAll() {
+    setSelectAllMatching(false)
+    const allOnPage = messages.length > 0 && messages.every((m) => checked.has(m.id))
+    setChecked(allOnPage ? new Set() : new Set(messages.map((m) => m.id)))
   }
 
   function openMenu(event: React.MouseEvent, message: Message) {
@@ -342,37 +365,66 @@ export function MessageList({
     )
   }
 
-  const anyChecked = checked.size > 0
+  const allOnPageChecked = messages.length > 0 && messages.every((m) => checked.has(m.id))
+  const anyChecked = checked.size > 0 || selectAllMatching
+  const moreThanLoaded = total != null && total > messages.length
+  const selectedCount = selectAllMatching ? total ?? checked.size : checked.size
+
+  const checkboxChecked = selectAllMatching || allOnPageChecked
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* select-mode toolbar — only while selecting or with items checked */}
-      {(selectMode || anyChecked) && (
-        <div
-          className={cn(
-            'flex h-11 shrink-0 items-center gap-2 border-b border-secondary px-3',
-            anyChecked ? 'bg-[var(--mq-bulk)]' : 'bg-card',
-          )}
+      {/* persistent bar: conversation count when idle, bulk actions when selecting */}
+      <div
+        className={cn(
+          'flex h-11 shrink-0 items-center gap-2.5 border-b border-secondary px-3',
+          anyChecked ? 'bg-[var(--mq-bulk)]' : 'bg-card',
+        )}
+      >
+        <span
+          role="checkbox"
+          aria-checked={checkboxChecked}
+          aria-label={t('ml.select')}
+          tabIndex={0}
+          onClick={toggleSelectAll}
+          onKeyDown={(e) => {
+            if (e.key === ' ' || e.key === 'Enter') {
+              e.preventDefault()
+              toggleSelectAll()
+            }
+          }}
+          className="cursor-pointer"
         >
-          {anyChecked ? (
-            <>
-              <span className="text-[12.5px] font-semibold text-[#1d4ed8]">
-                {t('ml.selected', { n: checked.size })}
-              </span>
-              <div className="ml-1 flex gap-1">
-                <BulkButton icon={MailOpen} label={t('action.markRead')} onClick={() => bulk('read')} />
-                <BulkButton icon={Archive} label={t('action.archive')} onClick={() => bulk('archive')} />
-                <BulkButton icon={Trash2} label={t('action.delete')} onClick={() => bulk('delete')} />
-              </div>
-            </>
-          ) : (
-            <span className="inline-flex items-center gap-2 text-[12px] font-semibold text-[#1d4ed8]">
-              <MousePointerClick className="size-4" />
-              {t('ml.dragHint')}
+          <Checkbox checked={checkboxChecked} />
+        </span>
+
+        {anyChecked ? (
+          <>
+            <span className="text-[12.5px] font-semibold text-[#1d4ed8]">
+              {t('ml.selected', { n: selectedCount })}
             </span>
-          )}
-        </div>
-      )}
+            {!selectAllMatching && allOnPageChecked && moreThanLoaded && scope && (
+              <button
+                type="button"
+                onClick={() => setSelectAllMatching(true)}
+                className="rounded-md px-2 py-1 text-[12px] font-semibold text-[#1d4ed8] transition-colors hover:bg-[#dbeafe] dark:hover:bg-[#1e293b]"
+              >
+                {t('ml.selectAllMatching', { n: total })}
+              </button>
+            )}
+            <div className="ml-auto flex gap-1">
+              <BulkButton icon={MailOpen} label={t('ml.read')} onClick={() => bulk('read')} />
+              <BulkButton icon={Archive} label={t('action.archive')} onClick={() => bulk('archive')} />
+              <BulkButton icon={Trash2} label={t('action.delete')} onClick={() => bulk('delete')} />
+              <BulkButton icon={Star} label={t('ml.flag')} onClick={() => bulk('flag')} />
+            </div>
+          </>
+        ) : (
+          <span className="text-[12.5px] font-medium text-muted-foreground">
+            {t('ml.conversations', { n: total ?? messages.length })}
+          </span>
+        )}
+      </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
@@ -391,7 +443,6 @@ export function MessageList({
                   message={msg}
                   index={item.index}
                   isActive={msg.id === activeId}
-                  selectMode={selectMode}
                   checked={checked.has(msg.id)}
                   onClick={() => onSelect(msg)}
                   onToggleCheck={toggleCheck}
@@ -411,26 +462,6 @@ export function MessageList({
         {menu && <MessageContextMenu state={menu} onClose={() => setMenu(null)} />}
       </div>
     </div>
-  )
-}
-
-/** Header toggle for entering/leaving message selection mode. */
-export function SelectModeToggle({ active, onToggle }: { active: boolean; onToggle: () => void }) {
-  const { t } = useTranslation()
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className={cn(
-        'inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[12.5px] font-semibold transition-colors',
-        active
-          ? 'border-[#2563eb] bg-[#2563eb] text-white'
-          : 'border-border bg-card text-secondary-foreground hover:bg-secondary',
-      )}
-    >
-      <MousePointerClick className="size-3.5" />
-      {active ? t('ml.done') : t('ml.selectMode')}
-    </button>
   )
 }
 

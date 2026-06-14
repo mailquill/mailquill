@@ -128,6 +128,28 @@ pub async fn connect_imap(
     Ok(session)
 }
 
+/// Run one IMAP IDLE cycle on the currently selected folder. Returns the
+/// session (IDLE is left via DONE so it stays usable) plus whether the server
+/// reported activity — new mail, a flag change, an expunge. A timeout returns
+/// `false`. IDLE must be refreshed at least every 29 min (RFC 2177), so keep
+/// `max_wait` under that and re-issue in a loop.
+pub async fn idle_once(
+    session: ImapSession,
+    max_wait: std::time::Duration,
+) -> Result<(ImapSession, bool), SessionError> {
+    use async_imap::extensions::idle::IdleResponse;
+
+    let mut handle = session.idle();
+    handle.init().await?;
+    let activity = {
+        // `wait` borrows `handle`; `_interrupt` stays alive until the borrow ends.
+        let (wait, _interrupt) = handle.wait_with_timeout(max_wait);
+        matches!(wait.await?, IdleResponse::NewData(_))
+    };
+    let session = handle.done().await?;
+    Ok((session, activity))
+}
+
 /// Build XOAUTH2 SASL string: base64("user=<user>\x01auth=Bearer <token>\x01\x01")
 pub fn build_xoauth2_sasl(username: &str, token: &str) -> String {
     let raw = format!("user={username}\x01auth=Bearer {token}\x01\x01");
@@ -140,7 +162,12 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<FolderInfo>, 
     let mut folders = Vec::new();
     for mb in &mailboxes {
         let name = mb.name().to_string();
-        let folder_type = classify_folder(&name);
+        // Prefer the server's RFC 6154 SPECIAL-USE attributes (\Trash, \Junk,
+        // \Archive, …) so localized folders like "Papierkorb" still classify
+        // correctly. Fall back to name heuristics when none are advertised.
+        let folder_type = special_use_type(mb.attributes())
+            .map(str::to_owned)
+            .unwrap_or_else(|| classify_folder(&name));
         folders.push(FolderInfo {
             name: name.clone(),
             full_path: name,
@@ -148,6 +175,19 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<FolderInfo>, 
         });
     }
     Ok(folders)
+}
+
+/// Map an RFC 6154 SPECIAL-USE attribute to our folder_type, if present.
+fn special_use_type(attrs: &[async_imap::types::NameAttribute<'_>]) -> Option<&'static str> {
+    use async_imap::types::NameAttribute as A;
+    attrs.iter().find_map(|a| match a {
+        A::Trash => Some("TRASH"),
+        A::Junk => Some("SPAM"),
+        A::Archive => Some("ARCHIVE"),
+        A::Sent => Some("SENT"),
+        A::Drafts => Some("DRAFTS"),
+        _ => None,
+    })
 }
 
 fn classify_folder(name: &str) -> String {

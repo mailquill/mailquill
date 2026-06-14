@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { MessageList } from '@/widgets/MessageList'
+import { MailListControls, type MailFilter } from '@/widgets/MailListControls'
 import { ReadingPaneEmpty, ThreadDetail } from '@/widgets/ReadingPane'
 import { useUnifiedInbox, useUnifiedCounts } from '@/shared/hooks/useMessages'
 import { useAccounts } from '@/shared/hooks/useAccounts'
@@ -17,14 +18,20 @@ export function UnifiedMailboxPage() {
   const accountId = searchParams.get('account') ?? undefined
   const view = isUnifiedView(viewParam) ? viewParam : 'inbox'
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
+  const [filter, setFilter] = useState<MailFilter>('all')
   // Clear the open thread when switching unified views or account scope.
   const scopeKey = `${view}:${accountId ?? ''}`
   const [prevScope, setPrevScope] = useState(scopeKey)
   if (scopeKey !== prevScope) {
     setPrevScope(scopeKey)
     setSelectedMessage(null)
+    setFilter('all')
   }
-  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useUnifiedInbox(view, accountId)
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useUnifiedInbox(
+    view,
+    accountId,
+    filter === 'unread',
+  )
   const { data: counts } = useUnifiedCounts()
   const { data: accounts } = useAccounts()
   const messages = data?.messages ?? []
@@ -45,9 +52,9 @@ export function UnifiedMailboxPage() {
   return (
     <section className="flex h-full min-h-0">
       <div className="flex min-h-0 shrink-0 flex-col border-r border-border bg-card" style={{ width: listWidth }}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h1 className="text-lg font-semibold">
+        <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-semibold">
               {t(UNIFIED_LABEL_KEY[view])} ({scopedAccount ? scopedAccount.display_name : t('mail.allAccounts')})
             </h1>
             <p className="text-xs text-muted-foreground">
@@ -56,6 +63,7 @@ export function UnifiedMailboxPage() {
                 : t('mail.accountsUnread', { accounts: accountCount, unread })}
             </p>
           </div>
+          <MailListControls filter={filter} onFilterChange={setFilter} unreadCount={unread} />
         </header>
         <MessageList
           messages={messages}

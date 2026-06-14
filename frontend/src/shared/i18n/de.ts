@@ -131,6 +131,8 @@ export const de = {
   },
   ml: {
     selectMode: 'Auswählen',
+    all: 'Alle',
+    unread: 'Ungelesen',
     done: 'Fertig',
     dragHint: 'Zum Auswählen über die Nachrichten ziehen',
     selected: '{{n}} ausgewählt',
@@ -138,7 +140,7 @@ export const de = {
     clear: 'Auswahl aufheben',
     selectAll: 'Alle auswählen',
     deselectAll: 'Auswahl aufheben',
-    selectAllMatching: 'Alle {{n}} auswählen',
+    selectAllMatching: 'Alle {{n}} Mails auswählen',
     conversations: '{{n}} Unterhaltungen',
     read: 'Gelesen',
     flag: 'Markieren',

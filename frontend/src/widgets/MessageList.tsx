@@ -385,8 +385,11 @@ export function MessageList({
   }
 
   function toggleSelectAll() {
-    setSelectAllMatching(false)
     const allOnPage = messages.length > 0 && messages.every((m) => checked.has(m.id))
+    // Header checkbox selects only the loaded page (≤ PAGE_SIZE). When more
+    // match than are loaded, the "select all N" button (rendered below) escalates
+    // to the whole view via the server-side bulk path. A second click clears it.
+    setSelectAllMatching(false)
     setChecked(allOnPage ? new Set() : new Set(messages.map((m) => m.id)))
   }
 
@@ -411,7 +414,6 @@ export function MessageList({
   const anyChecked = checked.size > 0 || selectAllMatching
   const moreThanLoaded = total != null && total > messages.length
   const selectedCount = selectAllMatching ? total ?? checked.size : checked.size
-
   const checkboxChecked = selectAllMatching || allOnPageChecked
 
   return (

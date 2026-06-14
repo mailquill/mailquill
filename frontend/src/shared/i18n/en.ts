@@ -131,6 +131,8 @@ export const en = {
   },
   ml: {
     selectMode: 'Select',
+    all: 'All',
+    unread: 'Unread',
     done: 'Done',
     dragHint: 'Drag over messages to select',
     selected: '{{n}} selected',
@@ -138,7 +140,7 @@ export const en = {
     clear: 'Clear selection',
     selectAll: 'Select all',
     deselectAll: 'Deselect all',
-    selectAllMatching: 'Select all {{n}}',
+    selectAllMatching: 'Select all {{n}} messages',
     conversations: '{{n}} conversations',
     read: 'Read',
     flag: 'Flag',

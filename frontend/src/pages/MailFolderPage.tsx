@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { MessageList } from '@/widgets/MessageList'
+import { MailListControls, type MailFilter } from '@/widgets/MailListControls'
 import { ThreadDetail } from '@/widgets/ReadingPane'
 import { useFolderMessages } from '@/shared/hooks/useMessages'
 import { useFolders } from '@/shared/hooks/useAccounts'
@@ -14,7 +16,12 @@ export function MailFolderPage() {
   const { t } = useTranslation()
   const { accountId = '', folder = '', threadId = '' } = useParams()
   const folderName = decodeURIComponent(folder)
-  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useFolderMessages(accountId, folderName)
+  const [filter, setFilter] = useState<MailFilter>('all')
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useFolderMessages(
+    accountId,
+    folderName,
+    filter === 'unread',
+  )
   const { data: folders } = useFolders(accountId)
   const current = folders?.find((f) => f.full_path === folderName)
   // Decoded display name (server-provided); fall back to the raw leaf segment.
@@ -32,13 +39,14 @@ export function MailFolderPage() {
   return (
     <section className="flex h-full min-h-0">
       <div className="flex min-h-0 shrink-0 flex-col border-r border-border bg-card" style={{ width: listWidth }}>
-        <header className="flex items-center justify-between border-b border-border px-4 py-3.5">
+        <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3.5">
           <div className="min-w-0">
             <h1 className="truncate text-[16px] font-bold tracking-tight">{folderTitle}</h1>
             <p className="text-xs text-muted-foreground">
               {t('mail.messageCount', { count: data?.total ?? messages.length })}
             </p>
           </div>
+          <MailListControls filter={filter} onFilterChange={setFilter} unreadCount={current?.unread_count} />
         </header>
         <MessageList
           messages={messages}

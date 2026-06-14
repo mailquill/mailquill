@@ -9,13 +9,14 @@ import { apiGet, apiPost, apiPatch, apiDelete } from '@/shared/api'
 import type { Message, SendMessageInput } from '@/shared/types'
 import type { UnifiedCounts, UnifiedView } from '@/shared/lib/unifiedViews'
 
-export function useUnifiedInbox(view: UnifiedView = 'inbox', accountId?: string) {
+export function useUnifiedInbox(view: UnifiedView = 'inbox', accountId?: string, unread = false) {
   return useInfiniteQuery({
-    queryKey: ['unified', view, accountId ?? null],
+    queryKey: ['unified', view, accountId ?? null, unread],
     queryFn: ({ pageParam }) => {
       const params = new URLSearchParams()
       if (view !== 'inbox') params.set('view', view)
       if (accountId) params.set('account_id', accountId)
+      if (unread) params.set('unread', 'true')
       if (pageParam) params.set('cursor', pageParam)
       const qs = params.toString()
       return apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; total?: number; next_cursor: string | null }>(
@@ -40,13 +41,18 @@ export function useUnifiedCounts() {
   })
 }
 
-export function useFolderMessages(accountId: string, folder: string) {
+export function useFolderMessages(accountId: string, folder: string, unread = false) {
   return useInfiniteQuery({
-    queryKey: ['folder-messages', accountId, folder],
-    queryFn: ({ pageParam }) =>
-      apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; total?: number; next_cursor: string | null }>(
-        `/accounts/${accountId}/folders/${encodeURIComponent(folder)}/messages${pageParam ? `?cursor=${pageParam}` : ''}`,
-      ).then(normalizeMessagePage),
+    queryKey: ['folder-messages', accountId, folder, unread],
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams()
+      if (unread) params.set('unread', 'true')
+      if (pageParam) params.set('cursor', pageParam)
+      const qs = params.toString()
+      return apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; total?: number; next_cursor: string | null }>(
+        `/accounts/${accountId}/folders/${encodeURIComponent(folder)}/messages${qs ? `?${qs}` : ''}`,
+      ).then(normalizeMessagePage)
+    },
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     select: (data) => ({
@@ -87,6 +93,75 @@ function invalidateMailLists(qc: QueryClient) {
 type ListPage = { messages: Message[]; total?: number; next_cursor: string | null }
 type InfiniteList = { pages: ListPage[]; pageParams: unknown[] }
 
+// Unified views whose sidebar badge is an *unread* count. `starred` is special:
+// its badge counts flagged messages, not unread ones.
+const UNREAD_VIEWS: UnifiedView[] = ['inbox', 'sent', 'drafts', 'archive', 'spam', 'trash']
+
+function unifiedViewOfKey(key: unknown): UnifiedView | null {
+  const k = key as unknown[]
+  return k[0] === 'unified' ? (k[1] as UnifiedView) : null
+}
+
+// Optimistically drop a message's contribution to the cross-account sidebar
+// badges when it leaves a view (delete). We only touch counts the backend
+// confirms synchronously — the *source* unread drop and the `starred` (flagged)
+// drop — so the follow-up refetch agrees and nothing flickers. The destination
+// rise (e.g. Trash) is intentionally left to the next sync, because the backend
+// can't reflect it until the queued IMAP move lands.
+function adjustCountsForRemoval(qc: QueryClient, id: string): () => void {
+  const prev = qc.getQueryData<UnifiedCounts>(['unified-counts'])
+  if (!prev) return () => {}
+  const next = { ...prev }
+  for (const [key, data] of qc.getQueriesData<InfiniteList>({ queryKey: ['unified'] })) {
+    const view = unifiedViewOfKey(key)
+    if (!view || !data) continue
+    const m = data.pages.flatMap((p) => p.messages).find((x) => x.id === id)
+    if (!m) continue
+    if (view === 'starred') next.starred = Math.max(0, next.starred - 1)
+    else if (UNREAD_VIEWS.includes(view) && !m.is_read) next[view] = Math.max(0, next[view] - 1)
+  }
+  qc.setQueryData(['unified-counts'], next)
+  return () => qc.setQueryData(['unified-counts'], prev)
+}
+
+// Optimistically flip a message's read state in every cached list and adjust the
+// affected unread badges. `mark_read` refreshes the same counts server-side, so
+// the reconciling refetch matches and there's no flicker.
+function optimisticMarkRead(qc: QueryClient, id: string, isRead: boolean): () => void {
+  const prevCounts = qc.getQueryData<UnifiedCounts>(['unified-counts'])
+  const snaps = [
+    ...qc.getQueriesData<InfiniteList>({ queryKey: ['unified'] }),
+    ...qc.getQueriesData<InfiniteList>({ queryKey: ['folder-messages'] }),
+  ]
+  // Count deltas first, from the pre-flip read state.
+  if (prevCounts) {
+    const next = { ...prevCounts }
+    for (const [key, data] of snaps) {
+      const view = unifiedViewOfKey(key)
+      if (!view || view === 'starred' || !UNREAD_VIEWS.includes(view) || !data) continue
+      const m = data.pages.flatMap((p) => p.messages).find((x) => x.id === id)
+      if (!m || m.is_read === isRead) continue
+      next[view] = Math.max(0, next[view] + (isRead ? -1 : 1))
+    }
+    qc.setQueryData(['unified-counts'], next)
+  }
+  // Then flip is_read in the list caches so rows update immediately.
+  for (const [key, data] of snaps) {
+    if (!data) continue
+    qc.setQueryData<InfiniteList>(key, {
+      ...data,
+      pages: data.pages.map((p) => ({
+        ...p,
+        messages: p.messages.map((m) => (m.id === id ? { ...m, is_read: isRead } : m)),
+      })),
+    })
+  }
+  return () => {
+    if (prevCounts) qc.setQueryData(['unified-counts'], prevCounts)
+    for (const [key, data] of snaps) qc.setQueryData(key, data)
+  }
+}
+
 // Drop every row matching `match` from all cached mail lists (unified +
 // per-folder) right away, so delete/archive/move feel instant instead of
 // waiting for the server roundtrip and a full refetch. Returns a restore()
@@ -98,6 +173,7 @@ async function removeFromMailLists(
   await Promise.all([
     qc.cancelQueries({ queryKey: ['unified'] }),
     qc.cancelQueries({ queryKey: ['folder-messages'] }),
+    qc.cancelQueries({ queryKey: ['unified-counts'] }),
   ])
   const snapshots = [
     ...qc.getQueriesData<InfiniteList>({ queryKey: ['unified'] }),
@@ -131,7 +207,9 @@ export function useMarkRead() {
   return useMutation({
     mutationFn: ({ id, is_read }: { id: string; is_read: boolean }) =>
       apiPatch(`/messages/${id}/read`, { is_read }),
-    onSuccess: (_data, { id }) => {
+    onMutate: ({ id, is_read }) => optimisticMarkRead(qc, id, is_read),
+    onError: (_e, _vars, restore) => restore?.(),
+    onSettled: (_data, _err, { id }) => {
       qc.invalidateQueries({ queryKey: ['message', id] })
       invalidateMailLists(qc)
     },
@@ -175,7 +253,15 @@ export function useDeleteMessage() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => apiDelete(`/messages/${id}`),
-    onMutate: (id) => removeFromMailLists(qc, (m) => m.id === id),
+    onMutate: async (id) => {
+      // Counts first (reads the message from cache), then drop it from the lists.
+      const restoreCounts = adjustCountsForRemoval(qc, id)
+      const restoreList = await removeFromMailLists(qc, (m) => m.id === id)
+      return () => {
+        restoreList()
+        restoreCounts()
+      }
+    },
     onError: (_e, _id, restore) => restore?.(),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['thread'] })

@@ -159,7 +159,7 @@ impl MailProvider for OutlookProvider {
         &mut self,
         folder: &str,
         uid_set: &str,
-    ) -> Result<Vec<(u32, bool, bool)>, ProviderError> {
+    ) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError> {
         let mut out = Vec::new();
         for (uid, remote_id) in self.ids.resolve_set(folder, uid_set).await? {
             let res = self
@@ -169,7 +169,8 @@ impl MailProvider for OutlookProvider {
             match res {
                 Ok(v) => {
                     let (seen, flagged, _) = Self::state_of(&v);
-                    out.push((uid, seen, flagged));
+                    // API providers move atomically; no IMAP-style \Deleted ghost.
+                    out.push((uid, seen, flagged, false));
                 }
                 // Message gone (deleted/moved on the server) — drop the mapping.
                 Err(_) => self.ids.remove(folder, uid).await?,

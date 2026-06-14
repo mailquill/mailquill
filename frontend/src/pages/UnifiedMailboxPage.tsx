@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { MessageList } from '@/widgets/MessageList'
 import { ReadingPaneEmpty, ThreadDetail } from '@/widgets/ReadingPane'
@@ -13,19 +13,23 @@ import type { Message } from '@/shared/types'
 export function UnifiedMailboxPage() {
   const { t } = useTranslation()
   const { view: viewParam } = useParams()
+  const [searchParams] = useSearchParams()
+  const accountId = searchParams.get('account') ?? undefined
   const view = isUnifiedView(viewParam) ? viewParam : 'inbox'
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
-  // Clear the open thread when switching unified views (adjust state on change).
-  const [prevView, setPrevView] = useState(view)
-  if (view !== prevView) {
-    setPrevView(view)
+  // Clear the open thread when switching unified views or account scope.
+  const scopeKey = `${view}:${accountId ?? ''}`
+  const [prevScope, setPrevScope] = useState(scopeKey)
+  if (scopeKey !== prevScope) {
+    setPrevScope(scopeKey)
     setSelectedMessage(null)
   }
-  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useUnifiedInbox(view)
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useUnifiedInbox(view, accountId)
   const { data: counts } = useUnifiedCounts()
   const { data: accounts } = useAccounts()
   const messages = data?.messages ?? []
   const accountCount = accounts?.length ?? 0
+  const scopedAccount = accountId ? accounts?.find((a) => a.id === accountId) : undefined
   const unread = counts?.[view] ?? 0
   const listWidth = useUiPrefs((s) => s.listWidth)
   const setListWidth = useUiPrefs((s) => s.setListWidth)
@@ -44,10 +48,12 @@ export function UnifiedMailboxPage() {
         <header className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
             <h1 className="text-lg font-semibold">
-              {t(UNIFIED_LABEL_KEY[view])} ({t('mail.allAccounts')})
+              {t(UNIFIED_LABEL_KEY[view])} ({scopedAccount ? scopedAccount.display_name : t('mail.allAccounts')})
             </h1>
             <p className="text-xs text-muted-foreground">
-              {t('mail.accountsUnread', { accounts: accountCount, unread })}
+              {scopedAccount
+                ? t('mail.messageCount', { count: data?.total ?? messages.length })
+                : t('mail.accountsUnread', { accounts: accountCount, unread })}
             </p>
           </div>
         </header>
@@ -60,7 +66,7 @@ export function UnifiedMailboxPage() {
           hasMore={hasNextPage}
           loadingMore={isFetchingNextPage}
           total={data?.total}
-          scope={{ view }}
+          scope={{ view, accountId }}
         />
       </div>
       <PaneResizer

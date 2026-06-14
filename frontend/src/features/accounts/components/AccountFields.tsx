@@ -49,6 +49,8 @@ export interface AccountFormState {
   smtpSecurity: Security
   smtpUser: string
   smtpPass: string
+  /** Add wizard: when false, IMAP credentials are reused for SMTP. */
+  separateCreds?: boolean
   carddavUrl: string
   caldavUrl: string
 }

@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod error;
+pub mod imap_utf7;
 pub mod middleware;
 pub mod oauth_tokens;
 pub mod routes;

@@ -250,7 +250,12 @@ function PhishingBanner({ message }: { message: Message }) {
         <ul className="mt-2 flex list-disc flex-col gap-1 pl-9">
           {checks.map((check, i) => (
             <li key={check.id + i}>
-              {check.detail} <span className="opacity-70">(+{check.points})</span>
+              {/* Older analyses lack `params`; fall back to the English detail
+                  rather than leaving "{{placeholders}}" unfilled. */}
+              {check.params
+                ? t(`phishingCheck.${check.id}`, { ...check.params, defaultValue: check.detail })
+                : check.detail}{' '}
+              <span className="opacity-70">(+{check.points})</span>
             </li>
           ))}
         </ul>

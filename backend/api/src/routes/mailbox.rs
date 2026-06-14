@@ -19,6 +19,8 @@ pub struct PaginationQuery {
     /// Cross-account view: inbox (default), starred, sent, drafts, archive,
     /// spam, trash.
     view: Option<String>,
+    /// Optional: scope the view to a single account (per-mailbox starred list).
+    account_id: Option<String>,
 }
 
 pub async fn unified_inbox(
@@ -29,7 +31,14 @@ pub async fn unified_inbox(
     let user_db = state.user_db_pool.get(&user.0).await?;
     let limit = q.limit.unwrap_or(PAGE_SIZE).min(100);
 
-    let page = db::queries::unified_page(&user_db, q.view.as_deref(), q.cursor.as_deref(), limit).await?;
+    let page = db::queries::unified_page(
+        &user_db,
+        q.view.as_deref(),
+        q.account_id.as_deref(),
+        q.cursor.as_deref(),
+        limit,
+    )
+    .await?;
 
     Ok(Json(json!({
         "items": page.items,
@@ -92,8 +101,8 @@ pub async fn bulk_action(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    // Resolve the scope into a WHERE predicate plus an optional bind value.
-    let (where_sql, bind): (String, Option<String>) =
+    // Resolve the scope into a WHERE predicate plus its bind values.
+    let (where_sql, binds): (String, Vec<String>) =
         if let (Some(account_id), Some(folder)) = (&req.account_id, &req.folder) {
             let fid: Option<String> = sqlx::query_scalar(
                 "SELECT id FROM folders WHERE account_id = ? AND full_path = ? COLLATE NOCASE LIMIT 1",
@@ -104,26 +113,34 @@ pub async fn bulk_action(
             .await?;
             (
                 "folder_id = ? AND is_deleted = 0".into(),
-                Some(fid.ok_or(AppError::NotFound)?),
+                vec![fid.ok_or(AppError::NotFound)?],
             )
         } else {
-            match req.view.as_deref().unwrap_or("inbox") {
-                "starred" => ("is_flagged = 1 AND is_deleted = 0".into(), None),
-                v => {
-                    let ft = match v {
-                        "sent" => "SENT",
-                        "drafts" => "DRAFTS",
-                        "archive" => "ARCHIVE",
-                        "spam" => "SPAM",
-                        "trash" => "TRASH",
-                        _ => "INBOX",
-                    };
-                    (
-                        "folder_id IN (SELECT id FROM folders WHERE folder_type = ?) AND is_deleted = 0".into(),
-                        Some(ft.to_string()),
-                    )
-                }
+            let (mut pred, mut binds): (String, Vec<String>) =
+                match req.view.as_deref().unwrap_or("inbox") {
+                    "starred" => ("is_flagged = 1 AND is_deleted = 0".into(), vec![]),
+                    v => {
+                        let ft = match v {
+                            "sent" => "SENT",
+                            "drafts" => "DRAFTS",
+                            "archive" => "ARCHIVE",
+                            "spam" => "SPAM",
+                            "trash" => "TRASH",
+                            _ => "INBOX",
+                        };
+                        (
+                            "folder_id IN (SELECT id FROM folders WHERE folder_type = ?) AND is_deleted = 0".into(),
+                            vec![ft.to_string()],
+                        )
+                    }
+                };
+            // Scope a view to one account (per-mailbox starred select-all) so the
+            // action never spills over to other accounts' messages.
+            if let Some(account_id) = &req.account_id {
+                pred.push_str(" AND account_id = ?");
+                binds.push(account_id.clone());
             }
+            (pred, binds)
         };
 
     let set_sql = match req.action.as_str() {
@@ -138,7 +155,7 @@ pub async fn bulk_action(
     let sql =
         format!("UPDATE messages SET {set_sql} WHERE {where_sql} RETURNING account_id, uid, folder_id");
     let mut q = sqlx::query_as::<_, (String, i64, String)>(&sql);
-    if let Some(b) = &bind {
+    for b in &binds {
         q = q.bind(b);
     }
     let affected = q.fetch_all(&user_db).await?;
@@ -237,10 +254,16 @@ pub async fn list_folders(
     let folders: Vec<_> = rows
         .into_iter()
         .map(|(id, name, full_path, folder_type, unread_count, sync_enabled)| {
+            // `full_path` stays the raw IMAP identifier (used for commands and
+            // routing); `folder_name`/`folder_name_server` carry the decoded and
+            // raw leaf names for display.
+            let raw_leaf = full_path.rsplit('/').next().unwrap_or(&full_path).to_string();
             json!({
                 "id": id,
                 "name": name,
                 "full_path": full_path,
+                "folder_name": crate::imap_utf7::decode(&raw_leaf),
+                "folder_name_server": raw_leaf,
                 "folder_type": folder_type,
                 "unread_count": unread_count,
                 "sync_enabled": sync_enabled != 0,

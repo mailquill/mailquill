@@ -9,12 +9,13 @@ import { apiGet, apiPost, apiPatch, apiDelete } from '@/shared/api'
 import type { Message, SendMessageInput } from '@/shared/types'
 import type { UnifiedCounts, UnifiedView } from '@/shared/lib/unifiedViews'
 
-export function useUnifiedInbox(view: UnifiedView = 'inbox') {
+export function useUnifiedInbox(view: UnifiedView = 'inbox', accountId?: string) {
   return useInfiniteQuery({
-    queryKey: ['unified', view],
+    queryKey: ['unified', view, accountId ?? null],
     queryFn: ({ pageParam }) => {
       const params = new URLSearchParams()
       if (view !== 'inbox') params.set('view', view)
+      if (accountId) params.set('account_id', accountId)
       if (pageParam) params.set('cursor', pageParam)
       const qs = params.toString()
       return apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; total?: number; next_cursor: string | null }>(

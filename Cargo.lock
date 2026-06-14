@@ -184,6 +184,7 @@ dependencies = [
  "sha2",
  "smtp",
  "sqlx",
+ "strsim",
  "thiserror 2.0.18",
  "tokio",
  "tokio-native-tls",

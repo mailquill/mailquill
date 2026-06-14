@@ -11,6 +11,7 @@
 use mailparse::MailHeaderMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,12 @@ use tracing::{info, warn};
 pub struct Check {
     pub id: &'static str,
     pub points: i32,
+    /// English fallback text. The frontend prefers a localized string keyed by
+    /// `id`, interpolating `params`, and falls back to this.
     pub detail: String,
+    /// Interpolation values for the localized message, keyed by placeholder name.
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,13 +272,13 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
     if let Some(auth) = headers.get_first_value("Authentication-Results") {
         let auth = auth.to_lowercase();
         if auth.contains("dmarc=fail") {
-            checks.push(Check { id: "dmarc_fail", points: 40, detail: "DMARC validation failed".into() });
+            checks.push(Check { id: "dmarc_fail", points: 40, detail: "DMARC validation failed".into(), params: json!({}) });
         }
         if auth.contains("spf=fail") {
-            checks.push(Check { id: "spf_fail", points: 30, detail: "SPF validation failed".into() });
+            checks.push(Check { id: "spf_fail", points: 30, detail: "SPF validation failed".into(), params: json!({}) });
         }
         if auth.contains("dkim=fail") {
-            checks.push(Check { id: "dkim_fail", points: 25, detail: "DKIM signature invalid".into() });
+            checks.push(Check { id: "dkim_fail", points: 25, detail: "DKIM signature invalid".into(), params: json!({}) });
         }
     }
 
@@ -298,6 +304,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                         id: "reply_to_mismatch",
                         points: 20,
                         detail: format!("Reply-To domain ({rd}) differs from sender domain ({from_domain})"),
+                        params: json!({ "replyTo": rd, "from": from_domain }),
                     });
                 }
             }
@@ -309,6 +316,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                         id: "return_path_mismatch",
                         points: 20,
                         detail: format!("Return-Path domain ({rd}) differs from sender domain ({from_domain})"),
+                        params: json!({ "returnPath": rd, "from": from_domain }),
                     });
                 }
             }
@@ -357,6 +365,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                 detail: format!(
                     "Display name claims \"{brand_name_lower}\" but the message was sent from {from_domain} (expected {expected})"
                 ),
+                params: json!({ "brand": brand_name_lower, "from": from_domain, "expected": expected }),
             });
         }
     }
@@ -378,6 +387,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                     id: "domain_lookalike",
                     points: 50,
                     detail: format!("Sender domain {from_domain} looks like {brand_domain}"),
+                    params: json!({ "from": from_domain, "brand": brand_domain }),
                 });
             }
         }
@@ -393,6 +403,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
             id: "idn_homograph",
             points: 35,
             detail: format!("Sender domain {from_domain} uses internationalized (Punycode) characters"),
+            params: json!({ "from": from_domain }),
         });
     }
 
@@ -410,6 +421,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                 id: "link_mismatch",
                 points: 20,
                 detail: format!("Link text shows {text_domain} but points to {href_domain}"),
+                params: json!({ "text": text_domain, "href": href_domain }),
             });
         }
 
@@ -423,6 +435,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                         id: "openphish_url",
                         points: 70,
                         detail: format!("Link {href} is listed in the OpenPhish phishing feed"),
+                        params: json!({ "href": href }),
                     });
                 } else if let Some(domain) = url_domain(&href) {
                     if feed.domains.contains(&domain) {
@@ -430,6 +443,7 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                             id: "openphish_domain",
                             points: 50,
                             detail: format!("Link domain {domain} is listed in the OpenPhish phishing feed"),
+                            params: json!({ "domain": domain }),
                         });
                     }
                 }

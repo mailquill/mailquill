@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { Search, Filter, Check, X } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
@@ -82,12 +82,29 @@ function buildParams(searchText: string, f: SearchFilter): URLSearchParams {
 export function MailSearch() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams] = useSearchParams()
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [search, setSearch] = useState(searchParams.get('q') ?? '')
   const [filter, setFilter] = useState<SearchFilter>(EMPTY_FILTER)
   const [open, setOpen] = useState(false)
   const menuRef = useClickOutside<HTMLDivElement>(() => setOpen(false), open)
+
+  // Remember the view we came from so clearing search returns there.
+  const lastViewRef = useRef('/mail/unified')
+  useEffect(() => {
+    if (!location.pathname.startsWith('/mail/search')) {
+      lastViewRef.current = location.pathname + location.search
+    }
+  }, [location])
+
+  function clearSearch() {
+    setSearch('')
+    if (location.pathname.startsWith('/mail/search')) {
+      navigate(lastViewRef.current)
+    }
+    inputRef.current?.focus()
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -126,7 +143,7 @@ export function MailSearch() {
           ref={inputRef}
           id="mail-search"
           name="mail-search"
-          type="search"
+          type="text"
           autoComplete="off"
           value={search}
           onChange={(e) => setSearch(e.currentTarget.value)}
@@ -137,7 +154,7 @@ export function MailSearch() {
         {search ? (
           <button
             type="button"
-            onClick={() => setSearch('')}
+            onClick={clearSearch}
             className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground"
             aria-label={t('filter.clear')}
           >

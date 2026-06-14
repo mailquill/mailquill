@@ -61,6 +61,24 @@ impl IdMap {
         Ok(uid)
     }
 
+    /// Store a specific (folder, uid) → remote_id mapping. Unlike [`assign`],
+    /// the uid is given by the caller (the IMAP uid), not auto-incremented —
+    /// used by the Gmail-over-IMAP hybrid to bind IMAP uids to Gmail message ids
+    /// (hex X-GM-MSGID). Overwrites any prior remote_id for that uid.
+    pub async fn set(&self, folder: &str, uid: u32, remote_id: &str) -> Result<(), ProviderError> {
+        sqlx::query(
+            "INSERT INTO remote_message_ids (account_id, folder_path, uid, remote_id) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET remote_id = excluded.remote_id",
+        )
+        .bind(&self.account_id)
+        .bind(folder)
+        .bind(uid as i64)
+        .bind(remote_id)
+        .execute(&self.db)
+        .await
+        .map_err(wrap)?;
+        Ok(())
+    }
+
     pub async fn remote_id(&self, folder: &str, uid: u32) -> Result<String, ProviderError> {
         let id: Option<String> = sqlx::query_scalar(
             "SELECT remote_id FROM remote_message_ids WHERE account_id = ? AND folder_path = ? AND uid = ?",

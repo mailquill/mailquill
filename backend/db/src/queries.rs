@@ -69,19 +69,25 @@ pub fn view_filter(view: Option<&str>) -> &'static str {
 
 const LIST_COLUMNS: &str = "m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path";
 
-/// Cross-account unified inbox/view page, newest first.
+/// Cross-account unified inbox/view page, newest first. Pass `account_id` to
+/// scope the same view to a single mailbox (e.g. that account's starred list).
 pub async fn unified_page(
     db: &SqlitePool,
     view: Option<&str>,
+    account_id: Option<&str>,
     cursor: Option<&str>,
     limit: i64,
 ) -> Result<Page, sqlx::Error> {
     let filter = view_filter(view);
+    let account_clause = if account_id.is_some() { "AND m.account_id = ?" } else { "" };
     let cursor_clause = if cursor.is_some() { "AND m.internal_date < ?" } else { "" };
     let sql = format!(
-        "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0 {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
+        "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0 {account_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
     );
     let mut q = sqlx::query_as::<_, RawRow>(&sql);
+    if let Some(a) = account_id {
+        q = q.bind(a);
+    }
     if let Some(c) = cursor {
         q = q.bind(c);
     }
@@ -90,7 +96,7 @@ pub async fn unified_page(
     let next_cursor = rows.last().map(|r| r.5.clone());
     let has_more = rows.len() as i64 == limit;
 
-    let total = view_total(db, view).await;
+    let total = view_total(db, view, account_id).await;
 
     let items = enrich_threads(db, rows).await?;
     Ok(Page {
@@ -108,14 +114,17 @@ pub async fn unified_page(
 /// the view's folders and sum per-folder counts: a `folder_id = ?` equality is
 /// served by the covering `idx_msg_folder_undeleted` deterministically, with no
 /// dependence on planner statistics.
-async fn view_total(db: &SqlitePool, view: Option<&str>) -> i64 {
+async fn view_total(db: &SqlitePool, view: Option<&str>, account_id: Option<&str>) -> i64 {
+    let account_clause = if account_id.is_some() { "AND account_id = ?" } else { "" };
     if view == Some("starred") {
-        return sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages WHERE is_flagged = 1 AND is_deleted = 0",
-        )
-        .fetch_one(db)
-        .await
-        .unwrap_or(0);
+        let sql = format!(
+            "SELECT COUNT(*) FROM messages WHERE is_flagged = 1 AND is_deleted = 0 {account_clause}",
+        );
+        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        if let Some(a) = account_id {
+            q = q.bind(a);
+        }
+        return q.fetch_one(db).await.unwrap_or(0);
     }
 
     let folder_type = match view.unwrap_or("inbox") {
@@ -127,12 +136,12 @@ async fn view_total(db: &SqlitePool, view: Option<&str>) -> i64 {
         _ => "INBOX",
     };
 
-    let folder_ids: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM folders WHERE folder_type = ?")
-            .bind(folder_type)
-            .fetch_all(db)
-            .await
-            .unwrap_or_default();
+    let folders_sql = format!("SELECT id FROM folders WHERE folder_type = ? {account_clause}");
+    let mut fq = sqlx::query_scalar::<_, String>(&folders_sql).bind(folder_type);
+    if let Some(a) = account_id {
+        fq = fq.bind(a);
+    }
+    let folder_ids: Vec<String> = fq.fetch_all(db).await.unwrap_or_default();
 
     let mut total = 0;
     for fid in folder_ids {
@@ -204,8 +213,11 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
         // IN (...)` list and otherwise full-scans the table (~1s on a 200k
         // mailbox set). Pinning the index keeps enrichment deterministic (~1ms)
         // regardless of statistics freshness.
+        // COUNT(DISTINCT …) so a message that lives in several folders (INBOX +
+        // Archive) counts once toward the thread size; COALESCE keeps rows that
+        // have no Message-ID distinct by their row id.
         let sql = format!(
-            "SELECT thread_id, COUNT(*), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 GROUP BY thread_id",
+            "SELECT thread_id, COUNT(DISTINCT COALESCE(message_id_header, id)), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 GROUP BY thread_id",
         );
         let mut q = sqlx::query_as::<_, (String, i64, i64)>(&sql);
         for id in &thread_ids {

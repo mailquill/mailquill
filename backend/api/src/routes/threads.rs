@@ -35,6 +35,18 @@ pub async fn get_thread(
         return Err(AppError::NotFound);
     }
 
+    // The same message can sit in several folders (e.g. INBOX + Archive); each
+    // is a separate row sharing one Message-ID. Collapse them so the thread
+    // shows each message once. Rows without a Message-ID are always kept.
+    let mut seen = std::collections::HashSet::new();
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|r| match &r.4 {
+            Some(header) => seen.insert(header.clone()),
+            None => true,
+        })
+        .collect();
+
     let total = rows.len();
     let messages: Vec<_> = rows
         .into_iter()

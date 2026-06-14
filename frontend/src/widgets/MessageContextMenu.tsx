@@ -12,6 +12,7 @@ import {
   useMoveMessage,
 } from '@/shared/hooks/useMessages'
 import { parseFromAddr } from '@/shared/lib/format'
+import { buildFolderTree, flattenFolderTree, folderLeafLabel, folderIcon } from '@/shared/lib/folders'
 import type { Message } from '@/shared/types'
 
 export interface ContextMenuState {
@@ -63,17 +64,22 @@ export function MessageContextMenu({ state, onClose }: { state: ContextMenuState
         </button>
         {submenu && folders.length > 0 && (
           <div className="absolute left-full top-0 ml-1 max-h-72 w-52 overflow-y-auto rounded-xl border border-border bg-popover p-1.5 shadow-2xl">
-            {folders
-              .filter((f) => f.id !== message.folder_id)
-              .map((f) => (
-                <button
-                  key={f.id}
-                  onClick={() => run(() => move.mutate({ id: message.id, folder_id: f.id }))}
-                  className="flex w-full items-center gap-2 truncate rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-secondary-foreground hover:bg-secondary"
-                >
-                  {f.name}
-                </button>
-              ))}
+            {flattenFolderTree(buildFolderTree(folders))
+              .filter((n) => n.folder.id !== message.folder_id)
+              .map((n) => {
+                const Icon = folderIcon(n.folder)
+                return (
+                  <button
+                    key={n.folder.id}
+                    onClick={() => run(() => move.mutate({ id: message.id, folder_id: n.folder.id }))}
+                    style={{ paddingLeft: `${10 + n.depth * 14}px` }}
+                    className="flex w-full items-center gap-2 rounded-md py-1.5 pr-2.5 text-left text-[12.5px] text-secondary-foreground hover:bg-secondary"
+                  >
+                    <Icon className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="flex-1 truncate">{folderLeafLabel(n.folder, t)}</span>
+                  </button>
+                )
+              })}
           </div>
         )}
       </div>

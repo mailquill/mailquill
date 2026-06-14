@@ -34,6 +34,13 @@ impl ImapProvider {
         }
         Ok(())
     }
+
+    /// Underlying IMAP session — lets the Gmail-over-IMAP hybrid issue the extra
+    /// `X-GM-MSGID` fetch on the same connection after a normal fetch selected
+    /// the folder.
+    pub(crate) fn session_mut(&mut self) -> &mut ImapSession {
+        &mut self.session
+    }
 }
 
 #[async_trait]
@@ -59,7 +66,7 @@ impl MailProvider for ImapProvider {
         &mut self,
         folder: &str,
         uid_set: &str,
-    ) -> Result<Vec<(u32, bool, bool)>, ProviderError> {
+    ) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError> {
         self.ensure_selected(folder).await?;
         Ok(session::fetch_flags(&mut self.session, uid_set).await?)
     }

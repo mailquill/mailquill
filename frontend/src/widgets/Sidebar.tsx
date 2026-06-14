@@ -30,6 +30,7 @@ import { useContacts } from '@/shared/hooks/useContacts'
 import { useCalendars } from '@/shared/hooks/useCalendar'
 import { useModuleNav } from '@/shared/hooks/useModuleNav'
 import { useUiPrefs } from '@/shared/hooks/useUiPrefs'
+import { buildFolderTree, folderLeafLabel, folderIcon, type FolderNode } from '@/shared/lib/folders'
 import { UNIFIED_VIEWS, isUnifiedView, type UnifiedView } from '@/shared/lib/unifiedViews'
 import type { Account, Folder } from '@/shared/types'
 
@@ -43,65 +44,35 @@ const UNIFIED_ICONS: Record<UnifiedView, ElementType> = {
   trash: Trash2,
 }
 
-const FOLDER_ICONS: Record<string, ElementType> = {
-  INBOX: Inbox,
-  STARRED: Star,
-  SENT: Send,
-  DRAFTS: FileText,
-  ARCHIVE: Archive,
-  SPAM: ShieldAlert,
-  JUNK: ShieldAlert,
-  TRASH: Trash2,
-  CUSTOM: FolderIcon,
-}
-
-// Standard folders pinned to the top in this order; everything else follows,
-// sorted alphabetically by path.
-const FOLDER_ORDER: Record<string, number> = {
-  INBOX: 0,
-  SENT: 1,
-  DRAFTS: 2,
-  SPAM: 3,
-  JUNK: 3,
-  TRASH: 4,
-}
-
-// Localised label per standard folder type; custom folders keep their IMAP name.
-const FOLDER_TYPE_LABEL: Record<string, string> = {
-  INBOX: 'sidebar.unifiedInbox',
-  SENT: 'sidebar.unifiedSent',
-  DRAFTS: 'sidebar.unifiedDrafts',
-  SPAM: 'sidebar.unifiedSpam',
-  JUNK: 'sidebar.unifiedSpam',
-  TRASH: 'sidebar.unifiedTrash',
-  ARCHIVE: 'sidebar.unifiedArchive',
-}
-
-function folderRank(folder: Folder): number {
-  return FOLDER_ORDER[folder.folder_type] ?? 5
-}
-
-function sortFolders(folders: Folder[]): Folder[] {
-  return [...folders].sort(
-    (a, b) => folderRank(a) - folderRank(b) || a.full_path.localeCompare(b.full_path),
-  )
-}
-
 type Module = 'mail' | 'contacts' | 'calendar'
 
-function FolderItem({ folder, accountId }: { folder: Folder; accountId: string }) {
+function FolderItem({
+  folder,
+  accountId,
+  depth = 0,
+  hasChildren = false,
+  expanded = false,
+  onToggle,
+}: {
+  folder: Folder
+  accountId: string
+  depth?: number
+  hasChildren?: boolean
+  expanded?: boolean
+  onToggle?: () => void
+}) {
   const { t } = useTranslation()
   const { accountId: paramAccount, folder: paramFolder } = useParams()
   const isActive = paramAccount === accountId && paramFolder === folder.full_path
-  const Icon = FOLDER_ICONS[folder.folder_type] ?? FolderIcon
-  const labelKey = FOLDER_TYPE_LABEL[folder.folder_type]
-  const label = labelKey ? t(labelKey) : folder.name
+  const Icon = folderIcon(folder)
+  const label = folderLeafLabel(folder, t)
   const move = useMoveMessage()
   const [dropOver, setDropOver] = useState(false)
 
   return (
     <Link
       to={`/mail/${accountId}/${encodeURIComponent(folder.full_path)}`}
+      style={{ marginLeft: `${24 + depth * 14}px` }}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes('application/x-mailtastic-message')) {
           e.preventDefault()
@@ -119,7 +90,7 @@ function FolderItem({ folder, accountId }: { folder: Folder; accountId: string }
         }
       }}
       className={cn(
-        'relative ml-6 flex items-center gap-2.5 rounded-md py-1.5 pl-3 pr-3 text-[12.5px] transition-colors',
+        'relative flex items-center gap-1.5 rounded-md py-1.5 pl-2 pr-3 text-[12.5px] transition-colors',
         dropOver
           ? 'bg-primary/30 ring-1 ring-primary'
           : isActive
@@ -128,6 +99,22 @@ function FolderItem({ folder, accountId }: { folder: Folder; accountId: string }
       )}
     >
       {isActive && <span className="absolute bottom-[18%] left-0 top-[18%] w-[3px] rounded-r-sm bg-primary" />}
+      {hasChildren ? (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            onToggle?.()
+          }}
+          aria-label={expanded ? 'Collapse' : 'Expand'}
+          className="flex size-4 shrink-0 items-center justify-center text-[#475569] hover:text-[#cbd5e1]"
+        >
+          {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        </button>
+      ) : (
+        <span className="size-4 shrink-0" />
+      )}
       <Icon className={cn('size-4 shrink-0', isActive ? 'text-[#f8fafc]' : 'text-[#64748b]')} />
       <span className="flex-1 truncate">{label}</span>
       {folder.unread_count > 0 && (
@@ -135,6 +122,56 @@ function FolderItem({ folder, accountId }: { folder: Folder; accountId: string }
           {folder.unread_count}
         </span>
       )}
+    </Link>
+  )
+}
+
+// One tree node + its (collapsible) descendants. Default expanded.
+function FolderTreeNode({ node, accountId }: { node: FolderNode; accountId: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const hasChildren = node.children.length > 0
+  return (
+    <>
+      <FolderItem
+        folder={node.folder}
+        accountId={accountId}
+        depth={node.depth}
+        hasChildren={hasChildren}
+        expanded={expanded}
+        onToggle={() => setExpanded((e) => !e)}
+      />
+      {hasChildren &&
+        expanded &&
+        node.children.map((child) => (
+          <FolderTreeNode key={child.folder.id} node={child} accountId={accountId} />
+        ))}
+    </>
+  )
+}
+
+// Per-account "starred" view: flagged mail of just this mailbox. A virtual
+// entry (not a real folder), so it never appears in the move-to context menu.
+function AccountStarredItem({ account }: { account: Account }) {
+  const { t } = useTranslation()
+  const location = useLocation()
+  const isActive =
+    location.pathname === '/mail/unified/starred' &&
+    new URLSearchParams(location.search).get('account') === account.id
+  return (
+    <Link
+      to={`/mail/unified/starred?account=${account.id}`}
+      style={{ marginLeft: '24px' }}
+      className={cn(
+        'relative flex items-center gap-1.5 rounded-md py-1.5 pl-2 pr-3 text-[12.5px] transition-colors',
+        isActive
+          ? 'bg-[#1e293b] font-semibold text-[#f8fafc]'
+          : 'font-medium text-[#94a3b8] hover:bg-white/5',
+      )}
+    >
+      {isActive && <span className="absolute bottom-[18%] left-0 top-[18%] w-[3px] rounded-r-sm bg-primary" />}
+      <span className="size-4 shrink-0" />
+      <Star className={cn('size-4 shrink-0', isActive ? 'text-[#f8fafc]' : 'text-[#64748b]')} />
+      <span className="flex-1 truncate">{t('sidebar.unifiedStarred')}</span>
     </Link>
   )
 }
@@ -183,8 +220,9 @@ function AccountSection({ account }: { account: Account }) {
       </button>
       {expanded && (
         <div className="mb-1.5 mt-0.5 space-y-0.5">
-          {sortFolders(folders ?? []).map((f) => (
-            <FolderItem key={f.id} folder={f} accountId={account.id} />
+          <AccountStarredItem account={account} />
+          {buildFolderTree(folders ?? []).map((node) => (
+            <FolderTreeNode key={node.folder.id} node={node} accountId={account.id} />
           ))}
         </div>
       )}

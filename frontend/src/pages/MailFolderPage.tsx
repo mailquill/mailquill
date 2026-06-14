@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next'
 import { MessageList } from '@/widgets/MessageList'
 import { ThreadDetail } from '@/widgets/ReadingPane'
 import { useFolderMessages } from '@/shared/hooks/useMessages'
+import { useFolders } from '@/shared/hooks/useAccounts'
+import { folderLeafLabel } from '@/shared/lib/folders'
 import { LIST_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
 import { PaneResizer } from '@/shared/components/PaneResizer'
 import type { Message } from '@/shared/types'
@@ -13,6 +15,12 @@ export function MailFolderPage() {
   const { accountId = '', folder = '', threadId = '' } = useParams()
   const folderName = decodeURIComponent(folder)
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useFolderMessages(accountId, folderName)
+  const { data: folders } = useFolders(accountId)
+  const current = folders?.find((f) => f.full_path === folderName)
+  // Decoded display name (server-provided); fall back to the raw leaf segment.
+  const folderTitle = current
+    ? folderLeafLabel(current, t)
+    : (folderName.split('/').pop() ?? folderName)
   const messages = data?.messages ?? []
   const listWidth = useUiPrefs((s) => s.listWidth)
   const setListWidth = useUiPrefs((s) => s.setListWidth)
@@ -26,7 +34,7 @@ export function MailFolderPage() {
       <div className="flex min-h-0 shrink-0 flex-col border-r border-border bg-card" style={{ width: listWidth }}>
         <header className="flex items-center justify-between border-b border-border px-4 py-3.5">
           <div className="min-w-0">
-            <h1 className="truncate text-[16px] font-bold tracking-tight">{folderName}</h1>
+            <h1 className="truncate text-[16px] font-bold tracking-tight">{folderTitle}</h1>
             <p className="text-xs text-muted-foreground">
               {t('mail.messageCount', { count: data?.total ?? messages.length })}
             </p>

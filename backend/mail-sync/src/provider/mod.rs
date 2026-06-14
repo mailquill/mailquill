@@ -14,6 +14,7 @@
 //!   type) — that mapping is the main open design question for those backends.
 
 mod gmail;
+mod gmail_imap;
 mod http;
 pub mod idmap;
 mod imap;
@@ -21,6 +22,7 @@ mod outlook;
 mod util;
 
 pub use gmail::GmailProvider;
+pub use gmail_imap::GmailImapProvider;
 pub use idmap::IdMap;
 pub use imap::ImapProvider;
 pub use outlook::OutlookProvider;
@@ -45,6 +47,8 @@ pub enum ProviderError {
 pub enum ProviderKind {
     #[default]
     Imap,
+    /// Gmail over IMAP/SMTP+XOAUTH2 for mail, Gmail API for label handling.
+    GmailImap,
     GmailApi,
     OutlookApi,
 }
@@ -52,6 +56,7 @@ pub enum ProviderKind {
 impl ProviderKind {
     pub fn parse(value: &str) -> Self {
         match value {
+            "gmail_imap" => Self::GmailImap,
             "gmail_api" => Self::GmailApi,
             "outlook_api" => Self::OutlookApi,
             _ => Self::Imap,
@@ -61,9 +66,21 @@ impl ProviderKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Imap => "imap",
+            Self::GmailImap => "gmail_imap",
             Self::GmailApi => "gmail_api",
             Self::OutlookApi => "outlook_api",
         }
+    }
+
+    /// Mailbox is synced over IMAP (so IMAP IDLE applies). True for plain IMAP
+    /// and the Gmail-over-IMAP hybrid.
+    pub fn syncs_over_imap(&self) -> bool {
+        matches!(self, Self::Imap | Self::GmailImap)
+    }
+
+    /// Outgoing mail goes through SMTP (vs. a provider send API).
+    pub fn sends_over_smtp(&self) -> bool {
+        matches!(self, Self::Imap | Self::GmailImap)
     }
 }
 
@@ -111,9 +128,10 @@ pub trait MailProvider: Send {
     /// sync windows.
     async fn highest_uid(&mut self, folder: &str) -> Result<Option<u32>, ProviderError>;
 
-    /// Read/flagged state for a uid set, to reconcile already-synced messages.
+    /// Read/flagged/deleted state for a uid set `(uid, seen, flagged, deleted)`,
+    /// to reconcile already-synced messages.
     async fn fetch_flags(&mut self, folder: &str, uid_set: &str)
-        -> Result<Vec<(u32, bool, bool)>, ProviderError>;
+        -> Result<Vec<(u32, bool, bool, bool)>, ProviderError>;
 
     /// Envelope + raw header block per message (lazy sync).
     async fn fetch_headers(&mut self, folder: &str, uid_set: &str)
@@ -158,6 +176,7 @@ pub async fn connect(
 ) -> Result<Box<dyn MailProvider>, ProviderError> {
     match kind {
         ProviderKind::Imap => Ok(Box::new(ImapProvider::connect(config).await?)),
+        ProviderKind::GmailImap => Ok(Box::new(GmailImapProvider::connect(config).await?)),
         ProviderKind::GmailApi => Ok(Box::new(GmailProvider::new(config)?)),
         ProviderKind::OutlookApi => Ok(Box::new(OutlookProvider::new(config)?)),
     }

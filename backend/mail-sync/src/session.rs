@@ -29,6 +29,9 @@ pub struct FetchedMessage {
     pub internal_date: String,
     pub is_seen: bool,
     pub is_flagged: bool,
+    /// Server has the `\Deleted` flag set (awaiting EXPUNGE) — import as hidden
+    /// so a message moved-by-copy doesn't linger as a live duplicate.
+    pub is_deleted: bool,
     pub body: Option<Vec<u8>>,
 }
 
@@ -184,6 +187,10 @@ fn special_use_type(attrs: &[async_imap::types::NameAttribute<'_>]) -> Option<&'
         A::Trash => Some("TRASH"),
         A::Junk => Some("SPAM"),
         A::Archive => Some("ARCHIVE"),
+        // Gmail has no \Archive; "All Mail" (\All) is where archived mail lives,
+        // so treat it as the archive target. Harmless on non-Gmail servers,
+        // which don't advertise \All.
+        A::All => Some("ARCHIVE"),
         A::Sent => Some("SENT"),
         A::Drafts => Some("DRAFTS"),
         _ => None,
@@ -239,13 +246,13 @@ pub async fn highest_uid(session: &mut ImapSession) -> Result<Option<u32>, Sessi
     Ok(msgs.iter().filter_map(|m| m.uid).max())
 }
 
-/// Fetch only FLAGS for a UID range, returning `(uid, is_seen, is_flagged)`.
-/// Used to reconcile read/flagged state of already-synced messages with the
-/// server, since header backfill only covers new UIDs.
+/// Fetch only FLAGS for a UID range, returning `(uid, is_seen, is_flagged,
+/// is_deleted)`. Used to reconcile read/flagged/deleted state of already-synced
+/// messages with the server, since header backfill only covers new UIDs.
 pub async fn fetch_flags(
     session: &mut ImapSession,
     uid_set: &str,
-) -> Result<Vec<(u32, bool, bool)>, SessionError> {
+) -> Result<Vec<(u32, bool, bool, bool)>, SessionError> {
     let msgs: Vec<_> = session
         .uid_fetch(uid_set, "(UID FLAGS)")
         .await?
@@ -261,7 +268,49 @@ pub async fn fetch_flags(
             let flagged = m
                 .flags()
                 .any(|f| matches!(f, async_imap::types::Flag::Flagged));
-            out.push((uid, seen, flagged));
+            let deleted = m
+                .flags()
+                .any(|f| matches!(f, async_imap::types::Flag::Deleted));
+            out.push((uid, seen, flagged, deleted));
+        }
+    }
+    Ok(out)
+}
+
+/// Fetch the Gmail `X-GM-MSGID` extension for a uid set, returning
+/// `(uid, gmail_message_id_hex)`. The hex form is exactly the Gmail API
+/// message id. Issued as a raw command because async-imap's typed `Fetch`
+/// doesn't expose the Gmail extension attributes; the response is fully drained
+/// up to the tagged completion so the session stays usable afterwards.
+pub async fn fetch_gmail_msgids(
+    session: &mut ImapSession,
+    uid_set: &str,
+) -> Result<Vec<(u32, String)>, SessionError> {
+    use async_imap::imap_proto::{types::AttributeValue, Response};
+
+    let id = session
+        .run_command(format!("UID FETCH {uid_set} (UID X-GM-MSGID)"))
+        .await?;
+    let mut out = Vec::new();
+    while let Some(resp) = session.read_response().await {
+        let resp = resp?;
+        match resp.parsed() {
+            Response::Fetch(_, attrs) => {
+                let mut uid = None;
+                let mut gm = None;
+                for a in attrs {
+                    match a {
+                        AttributeValue::Uid(u) => uid = Some(*u),
+                        AttributeValue::GmailMsgId(g) => gm = Some(*g),
+                        _ => {}
+                    }
+                }
+                if let (Some(u), Some(g)) = (uid, gm) {
+                    out.push((u, format!("{g:x}")));
+                }
+            }
+            Response::Done { tag, .. } if *tag == id => break,
+            _ => {}
         }
     }
     Ok(out)
@@ -329,12 +378,16 @@ fn parse_fetch(msg: &async_imap::types::Fetch, include_body: bool) -> Option<Fet
     let is_flagged = msg
         .flags()
         .any(|f| matches!(f, async_imap::types::Flag::Flagged));
+    let is_deleted = msg
+        .flags()
+        .any(|f| matches!(f, async_imap::types::Flag::Deleted));
 
     let mut fetched = FetchedMessage {
         uid,
         internal_date,
         is_seen,
         is_flagged,
+        is_deleted,
         ..Default::default()
     };
 

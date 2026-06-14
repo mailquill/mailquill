@@ -15,7 +15,6 @@ import {
   Plus,
   Trash2,
   ChevronDown,
-  Mail,
   ShieldCheck,
   Check,
   Monitor,
@@ -30,7 +29,6 @@ import { Select } from '@/shared/components/ui/select'
 import { Button } from '@/shared/components/ui/button'
 import { AddAccountForm } from '@/features/accounts'
 import { RulesSection } from '@/widgets/RulesSection'
-import { startOAuthRedirect } from '@/shared/lib/oauth'
 import { davDefaults } from '@/shared/lib/dav'
 import { useAccounts, useDeleteAccount, useUpdateAccount, useFolders, useSetFolderSync } from '@/shared/hooks/useAccounts'
 import { useThemeStore, type ThemePref } from '@/shared/hooks/useTheme'
@@ -144,10 +142,6 @@ function AccountsSection() {
   const [adding, setAdding] = useState(() => searchParams.get('add') === '1')
   const connected = searchParams.get('connected')
 
-  function startOAuth(provider: 'google' | 'microsoft') {
-    startOAuthRedirect(provider)
-  }
-
   function closeAdd() {
     setAdding(false)
     if (searchParams.get('add')) {
@@ -174,22 +168,14 @@ function AccountsSection() {
         </div>
       )}
 
-      <div className="mb-5 flex flex-wrap gap-2">
-        <Button type="button" variant="outline" onClick={() => startOAuth('google')}>
-          <Mail className="size-4" />
-          {t('settings.connectGmail')}
-        </Button>
-        <Button type="button" variant="outline" onClick={() => startOAuth('microsoft')}>
-          <ShieldCheck className="size-4" />
-          {t('settings.connectOutlook')}
-        </Button>
-        {!adding && (
+      {!adding && (
+        <div className="mb-5">
           <Button type="button" onClick={() => setAdding(true)}>
             <Plus className="size-4" />
-            {t('settings.addManually')}
+            {t('settings.addAccount')}
           </Button>
-        )}
-      </div>
+        </div>
+      )}
 
       {adding && <AddAccountForm onCancel={closeAdd} onCreated={closeAdd} />}
 

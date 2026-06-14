@@ -22,7 +22,6 @@ import { startOAuthRedirect } from '@/shared/lib/oauth'
 import {
   SETTINGS_EMAIL_RE,
   ACCT_COLORS,
-  deriveInitials,
   discoverServersAsync,
   serverDefaults,
   type DiscoverResult,
@@ -59,6 +58,7 @@ function emptyAccountForm(): AccountFormState {
     composeFormat: 'rich', hasJunk: true, signature: '',
     imapHost: '', imapPort: '', imapSecurity: 'ssl', imapUser: '', imapPass: '',
     smtpHost: '', smtpPort: '', smtpSecurity: 'starttls', smtpUser: '', smtpPass: '',
+    separateCreds: false,
     carddavUrl: '', caldavUrl: '',
   }
 }
@@ -74,12 +74,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
   const detectSeq = useRef(0)
 
   const set = <K extends keyof AccountFormState>(k: K, v: AccountFormState[K]) =>
-    setData((d) => {
-      const next = { ...d, [k]: v }
-      if ((k === 'name' || k === 'email') && !d.initialsTouched) next.initials = deriveInitials(next.name, next.email)
-      if (k === 'initials') next.initialsTouched = true
-      return next
-    })
+    setData((d) => ({ ...d, [k]: v }))
 
   const emailInvalid = !!data.email && !SETTINGS_EMAIL_RE.test(data.email)
   // Display name + short label are optional; only a valid email is required.
@@ -113,19 +108,25 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
     const authScheme = oauthOk ? 'xoauth2' : 'plain'
     const imapHost = data.imapHost || def.imapHost
     const smtpHost = data.smtpHost || def.smtpHost
+    const email = data.email.trim()
+    // IMAP credentials are the shared default; SMTP reuses them unless the user
+    // chose to enter separate credentials.
+    const imapUser = data.imapUser || email
+    const smtpUser = data.separateCreds ? data.smtpUser || email : imapUser
+    const smtpPass = data.separateCreds ? data.smtpPass : data.imapPass
     createAccount.mutate(
       {
-        display_name: data.name.trim() || data.email.trim(),
-        primary_email: data.email.trim(),
+        display_name: data.name.trim() || email,
+        primary_email: email,
         imap_host: imapHost,
         imap_port: Number(data.imapPort || def.imapPort),
-        imap_username: data.imapUser || data.email.trim(),
+        imap_username: imapUser,
         imap_password: data.imapPass,
         imap_auth_scheme: authScheme,
         smtp_host: smtpHost,
         smtp_port: Number(data.smtpPort || def.smtpPort),
-        smtp_username: data.smtpUser || data.email.trim(),
-        smtp_password: data.smtpPass,
+        smtp_username: smtpUser,
+        smtp_password: smtpPass,
         smtp_auth_scheme: authScheme,
         body_sync_mode: 'lazy',
         carddav_url: data.carddavUrl || undefined,
@@ -139,7 +140,9 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
     )
   }
 
-  const step3Valid = !!data.imapHost && !!data.smtpHost && !!data.imapPass && !!data.smtpPass
+  // Shared credentials need one password; separate mode needs both.
+  const credsValid = data.separateCreds ? !!data.imapPass && !!data.smtpPass : !!data.imapPass
+  const step3Valid = !!data.imapHost && !!data.smtpHost && credsValid
   const tlsCert = tlsCertFromError(createAccount.error)
 
   const secOpts: [Security, string][] = [
@@ -174,18 +177,6 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
             <div>
               <FieldLabel hint={`${t('settings.sidebar')} · ${t('settings.optional')}`}>{t('settings.shortLabel')}</FieldLabel>
               <Input value={data.short} onChange={(e) => set('short', e.currentTarget.value)} placeholder={data.email || 'Personal'} />
-            </div>
-            <div>
-              <FieldLabel>{t('settings.initials')}</FieldLabel>
-              <div className="flex items-center gap-2.5">
-                <span
-                  className="flex size-[38px] shrink-0 items-center justify-center rounded-lg text-[12.5px] font-extrabold text-white"
-                  style={{ backgroundColor: data.color }}
-                >
-                  {(data.initials || '?').slice(0, 2)}
-                </span>
-                <Input value={data.initials} onChange={(e) => set('initials', e.currentTarget.value.toUpperCase().slice(0, 2))} placeholder="FG" />
-              </div>
             </div>
             <div className="md:col-span-2">
               <FieldLabel>{t('settings.accountColor')}</FieldLabel>
@@ -254,6 +245,42 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
             </div>
           )}
 
+          {/* Credentials — shared for IMAP+SMTP by default; OAuth providers sign
+              in via redirect and need none. */}
+          {phase === 'done' && !oauthProvider && (
+            <div className="mt-4 flex flex-col gap-3">
+              {data.separateCreds && (
+                <div className="text-[11.5px] font-bold uppercase tracking-wide text-muted-foreground">{t('settings.imap')}</div>
+              )}
+              <SrvField label={t('settings.username')}>
+                <Input className="font-mono" value={data.imapUser} placeholder={data.email} onChange={(e) => set('imapUser', e.currentTarget.value)} />
+              </SrvField>
+              <SrvField label={t('settings.password')}>
+                <Input type="password" autoComplete="new-password" value={data.imapPass} onChange={(e) => set('imapPass', e.currentTarget.value)} />
+              </SrvField>
+              <label className="flex cursor-pointer items-center gap-2.5 text-[12.5px] text-secondary-foreground">
+                <input
+                  type="checkbox"
+                  className="size-4 accent-[#2563eb]"
+                  checked={!!data.separateCreds}
+                  onChange={(e) => set('separateCreds', e.currentTarget.checked)}
+                />
+                {t('wiz.separateCreds')}
+              </label>
+              {data.separateCreds && (
+                <div className="flex flex-col gap-3 rounded-[9px] border border-border p-3.5">
+                  <div className="text-[11.5px] font-bold uppercase tracking-wide text-muted-foreground">{t('settings.smtp')}</div>
+                  <SrvField label={t('settings.username')}>
+                    <Input className="font-mono" value={data.smtpUser} placeholder={data.email} onChange={(e) => set('smtpUser', e.currentTarget.value)} />
+                  </SrvField>
+                  <SrvField label={t('settings.password')}>
+                    <Input type="password" autoComplete="new-password" value={data.smtpPass} onChange={(e) => set('smtpPass', e.currentTarget.value)} />
+                  </SrvField>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="mt-5 flex items-center gap-2.5">
             <Button type="button" variant="outline" onClick={() => setStep(1)}>
               <ChevronLeft className="size-4" />
@@ -289,12 +316,6 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
                   </Select>
                 </SrvField>
               </div>
-              <SrvField label={t('settings.username')}>
-                <Input className="font-mono" value={data.imapUser} onChange={(e) => set('imapUser', e.currentTarget.value)} />
-              </SrvField>
-              <SrvField label={t('settings.password')}>
-                <Input type="password" autoComplete="new-password" value={data.imapPass} onChange={(e) => set('imapPass', e.currentTarget.value)} />
-              </SrvField>
             </ServerGroup>
 
             <ServerGroup title={t('settings.smtp')} icon={Send}>
@@ -311,12 +332,6 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
                   </Select>
                 </SrvField>
               </div>
-              <SrvField label={t('settings.username')}>
-                <Input className="font-mono" value={data.smtpUser} onChange={(e) => set('smtpUser', e.currentTarget.value)} />
-              </SrvField>
-              <SrvField label={t('settings.password')}>
-                <Input type="password" autoComplete="new-password" value={data.smtpPass} onChange={(e) => set('smtpPass', e.currentTarget.value)} />
-              </SrvField>
             </ServerGroup>
 
             <ServerGroup title={t('settings.carddav')} icon={Users}>

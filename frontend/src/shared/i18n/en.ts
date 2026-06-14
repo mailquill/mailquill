@@ -1,5 +1,18 @@
 export const en = {
   nav: { mail: 'Mail', contacts: 'Contacts', calendar: 'Calendar' },
+  phishingCheck: {
+    dmarc_fail: 'DMARC validation failed',
+    spf_fail: 'SPF validation failed',
+    dkim_fail: 'DKIM signature invalid',
+    reply_to_mismatch: 'Reply-To domain ({{replyTo}}) differs from sender domain ({{from}})',
+    return_path_mismatch: 'Return-Path domain ({{returnPath}}) differs from sender domain ({{from}})',
+    display_name_spoof: 'Display name claims "{{brand}}" but the message was sent from {{from}} (expected {{expected}})',
+    domain_lookalike: 'Sender domain {{from}} looks like {{brand}}',
+    idn_homograph: 'Sender domain {{from}} uses internationalized (Punycode) characters',
+    link_mismatch: 'Link text shows {{text}} but points to {{href}}',
+    openphish_url: 'Link {{href}} is listed in the OpenPhish phishing feed',
+    openphish_domain: 'Link domain {{domain}} is listed in the OpenPhish phishing feed',
+  },
   auth: {
     signInTitle: 'Sign in to your account',
     signIn: 'Sign in',
@@ -419,6 +432,7 @@ export const en = {
     notFound: 'No provider match',
     notFoundSub: "We couldn't detect settings automatically — enter them manually next.",
     oauthNeeded: 'This provider requires OAuth sign-in instead of a password.',
+    separateCreds: 'Separate credentials for IMAP and SMTP',
     incoming: 'Incoming',
     outgoing: 'Outgoing',
   },

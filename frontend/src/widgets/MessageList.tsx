@@ -9,6 +9,7 @@ import {
   useMarkRead,
   useArchiveMessage,
   useDeleteMessage,
+  useDeleteThread,
   useToggleFlag,
   useBulkAction,
   type BulkScope,
@@ -24,6 +25,7 @@ interface MessageRowProps {
   checked: boolean
   onClick: () => void
   onToggleCheck: (id: string) => void
+  onToggleFlag: (message: Message) => void
   onContextMenu: (event: React.MouseEvent, message: Message) => void
   onRowMouseDown: (index: number, id: string) => void
   onRowMouseEnter: (index: number) => void
@@ -55,6 +57,7 @@ export function MessageRow({
   checked,
   onClick,
   onToggleCheck,
+  onToggleFlag,
   onContextMenu,
   onRowMouseDown,
   onRowMouseEnter,
@@ -127,12 +130,34 @@ export function MessageRow({
         >
           <Checkbox checked={checked} />
         </span>
-        <Star
-          className={cn(
-            'size-4 shrink-0',
-            message.is_flagged ? 'fill-primary text-primary' : 'text-input',
-          )}
-        />
+        <span
+          role="button"
+          aria-label={t('ml.flag')}
+          aria-pressed={message.is_flagged}
+          tabIndex={0}
+          onMouseDown={(e) => {
+            if (e.button !== 0) return
+            e.preventDefault()
+            e.stopPropagation()
+            onToggleFlag(message)
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === ' ' || e.key === 'Enter') {
+              e.preventDefault()
+              e.stopPropagation()
+              onToggleFlag(message)
+            }
+          }}
+          className="cursor-pointer"
+        >
+          <Star
+            className={cn(
+              'size-4 shrink-0',
+              message.is_flagged ? 'fill-primary text-primary' : 'text-input hover:text-primary',
+            )}
+          />
+        </span>
       </span>
 
       <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -278,8 +303,25 @@ export function MessageList({
   const markRead = useMarkRead()
   const archive = useArchiveMessage()
   const remove = useDeleteMessage()
+  const deleteThread = useDeleteThread()
   const toggleFlag = useToggleFlag()
   const bulkAction = useBulkAction()
+
+  // Delete/Entf deletes the open conversation (mirrors the reading-pane trash).
+  // Ignored while typing in a field so it doesn't eat text edits.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' || !activeId) return
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+      const msg = messages.find((m) => m.id === activeId || m.thread_id === activeId)
+      if (!msg) return
+      e.preventDefault()
+      deleteThread.mutate(msg.thread_id ?? msg.id)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [activeId, messages, deleteThread])
 
   // drag-to-select: paint a contiguous range from the press row; "additive"
   // mirrors the anchor's start state so dragging over selected rows deselects.
@@ -446,6 +488,7 @@ export function MessageList({
                   checked={checked.has(msg.id)}
                   onClick={() => onSelect(msg)}
                   onToggleCheck={toggleCheck}
+                  onToggleFlag={(m) => toggleFlag.mutate({ id: m.id, is_flagged: !m.is_flagged })}
                   onContextMenu={openMenu}
                   onRowMouseDown={onRowMouseDown}
                   onRowMouseEnter={onRowMouseEnter}

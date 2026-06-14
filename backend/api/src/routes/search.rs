@@ -37,12 +37,16 @@ pub async fn search(
     let mut conditions = vec!["m.is_deleted = 0".to_string()];
     let mut binds: Vec<String> = vec![];
 
-    // FTS full-text search
-    let fts_ids: Option<Vec<String>> = if let Some(ref fts_q) = q.q {
+    // FTS full-text search. `rowid` is an INTEGER, so it must be decoded as i64
+    // — decoding it as String silently failed (unwrap_or_default), which is why
+    // search always returned nothing.
+    let fts_ids: Option<Vec<i64>> = if let Some(ref fts_q) = q.q {
         if !fts_q.trim().is_empty() {
-            let fts_query = fts_q.replace('"', "\"\"");
-            let ids: Vec<String> = sqlx::query_scalar(
-                &format!("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT 1000"),
+            // Typo-tolerant: expand each query word with close vocabulary terms
+            // (e.g. "decatlon" → ("decatlon" OR "decathlon")).
+            let fts_query = expand_fuzzy_query(&user_db, fts_q).await;
+            let ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT 1000",
             )
             .bind(&fts_query)
             .fetch_all(&user_db)
@@ -60,9 +64,10 @@ pub async fn search(
         if ids.is_empty() {
             return Ok(Json(json!({ "items": [], "next_cursor": null })));
         }
-        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        conditions.push(format!("m.rowid IN ({placeholders})"));
-        binds.extend(ids.iter().cloned());
+        // Inline the rowids as integer literals: they come from our own DB, not
+        // user input, so there is nothing to escape.
+        let list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        conditions.push(format!("m.rowid IN ({list})"));
     }
 
     if let Some(ref from) = q.from {
@@ -162,4 +167,64 @@ pub async fn search(
         "items": items,
         "next_cursor": if has_more { next_cursor } else { None::<String> },
     })))
+}
+
+/// Max fuzzy alternatives added per query word (keeps the MATCH query bounded).
+const MAX_FUZZY_TERMS: usize = 8;
+
+/// Build a typo-tolerant FTS5 MATCH query from free-text input. Each word that
+/// is long enough is OR-expanded with the closest indexed terms (by Levenshtein
+/// distance) so small typos still match — "Decatlon" finds "Decathlon". Short
+/// or non-alphanumeric words are passed through verbatim (quoted).
+async fn expand_fuzzy_query(db: &sqlx::SqlitePool, raw: &str) -> String {
+    let mut groups: Vec<String> = Vec::new();
+    for word in raw.split_whitespace() {
+        let lower = word.to_lowercase();
+        // Only fuzz alphanumeric words of 4+ chars; shorter/odd tokens stay exact.
+        let fuzzable = lower.chars().all(|c| c.is_alphanumeric()) && lower.chars().count() >= 4;
+        if !fuzzable {
+            groups.push(quote_term(&lower));
+            continue;
+        }
+        let max_dist = if lower.chars().count() <= 6 { 1 } else { 2 };
+        let mut alts = nearest_terms(db, &lower, max_dist).await;
+        // Always keep the original word as an alternative.
+        if !alts.iter().any(|t| t == &lower) {
+            alts.insert(0, lower.clone());
+        }
+        let ored = alts.iter().map(|t| quote_term(t)).collect::<Vec<_>>().join(" OR ");
+        groups.push(format!("({ored})"));
+    }
+    // Space between groups = implicit AND in FTS5.
+    groups.join(" ")
+}
+
+/// Indexed terms within `max_dist` edits of `word`, closest first, capped.
+async fn nearest_terms(db: &sqlx::SqlitePool, word: &str, max_dist: usize) -> Vec<String> {
+    let len = word.chars().count() as i64;
+    let dist = max_dist as i64;
+    // Length window prunes the candidate set before the (cheap) edit-distance pass.
+    let candidates: Vec<String> = sqlx::query_scalar(
+        "SELECT term FROM messages_vocab WHERE length(term) BETWEEN ? AND ?",
+    )
+    .bind(len - dist)
+    .bind(len + dist)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let mut scored: Vec<(usize, String)> = candidates
+        .into_iter()
+        .filter_map(|term| {
+            let d = strsim::levenshtein(word, &term);
+            (d <= max_dist).then_some((d, term))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(MAX_FUZZY_TERMS).map(|(_, t)| t).collect()
+}
+
+/// Quote a bareword for an FTS5 query, escaping embedded double quotes.
+fn quote_term(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
 }

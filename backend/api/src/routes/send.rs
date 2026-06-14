@@ -142,7 +142,7 @@ pub async fn send_email(
     };
 
     let kind = mail_sync::provider::ProviderKind::parse(&provider_kind);
-    if kind != mail_sync::provider::ProviderKind::Imap {
+    if !kind.sends_over_smtp() {
         // API accounts (Gmail / Graph): build the MIME message locally, deliver
         // through the provider's send endpoint. The provider stores the sent
         // copy server-side — no IMAP APPEND needed.

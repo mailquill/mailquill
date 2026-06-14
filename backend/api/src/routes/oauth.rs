@@ -214,12 +214,12 @@ pub async fn oauth_callback(
         _ => return Err(AppError::NotFound),
     };
 
-    // OAuth accounts use the provider's native API (sync + send) instead of
-    // IMAP/SMTP. Host values are kept as a fallback for a manual switch back
-    // to provider_kind = 'imap' (XOAUTH2 works against them).
+    // OAuth accounts sync/send over IMAP/SMTP+XOAUTH2. Gmail additionally uses
+    // the Gmail API for label handling (move/archive/delete) via the
+    // gmail_imap hybrid; Outlook is plain IMAP.
     let provider_kind = match provider.as_str() {
-        PROVIDER_GOOGLE => "gmail_api",
-        PROVIDER_MICROSOFT => "outlook_api",
+        PROVIDER_GOOGLE => "gmail_imap",
+        PROVIDER_MICROSOFT => "imap",
         _ => return Err(AppError::NotFound),
     };
 

@@ -27,7 +27,12 @@ export interface Folder {
   id: string
   account_id: string
   name: string
+  /** Raw IMAP path (modified UTF-7), the identifier used for routing/commands. */
   full_path: string
+  /** Decoded leaf name for display, e.g. "Jülicher" (server-side decoded). */
+  folder_name: string
+  /** Raw leaf name as the server stores it. */
+  folder_name_server: string
   folder_type: string
   unread_count: number
   sync_enabled?: boolean
@@ -78,7 +83,10 @@ export interface MessageAttachment {
 export interface PhishingCheck {
   id: string
   points: number
+  /** English fallback; prefer the localized `phishingCheck.<id>` string. */
   detail: string
+  /** Interpolation values for the localized message. */
+  params?: Record<string, string | number>
 }
 
 export interface Thread {

@@ -1,6 +1,36 @@
 # Mailquill
 
-Mailquill is a self-hosted web mail client with local user accounts, encrypted IMAP/SMTP credentials, background sync, message threading, search, account privacy controls, and a React frontend.
+Mailquill is your own private email app that you run on your own server. Bring
+all your email accounts together in one inbox, search everything instantly, and
+get a heads-up when a message looks like phishing — your mail stays with you,
+not with a third party.
+
+## Features
+
+- **Multi-account unified inbox** — IMAP/SMTP accounts side by side, with
+  conversation threading, a collapsible folder tree, and per-account views.
+- **OAuth & plain IMAP** — connect Gmail and Outlook via OAuth2/XOAUTH2 or any
+  IMAP server manually, with automatic server autodiscovery. Gmail label
+  handling (archive/move) goes through the Gmail API; everything else is IMAP.
+- **Typo-tolerant search** — SQLite FTS5 full-text search with fuzzy matching,
+  so "Decatlon" still finds "Decathlon".
+- **Phishing detection** — SPF/DKIM/DMARC checks, display-name spoofing,
+  look-alike/typosquatted sender domains, and OpenPhish feed matching, surfaced
+  inline with localized explanations.
+- **Push & live updates** — IMAP IDLE for near-instant delivery, Web Push
+  notifications, and a server-sent-events stream to the UI.
+- **Contacts & calendar** — CardDAV address books and CalDAV calendars.
+- **Security by design** — local accounts with JWT sessions, account
+  credentials encrypted at rest (AES-256-GCM), per-user SQLite databases.
+- **Installable PWA** — responsive UI, dark mode, keyboard shortcuts, and
+  English/German localization.
+
+## Tech stack
+
+- **Backend:** Rust (Axum, SQLx/SQLite, async-imap), workspace split into
+  focused crates (api, mail-sync, phishing, smtp, contacts/calendar sync).
+- **Frontend:** React + TypeScript, Vite, TanStack Query, React Router,
+  i18next, served from the binary via rust-embed.
 
 ## Requirements
 
@@ -116,3 +146,22 @@ MAILQUILL_APP_URL=http://127.0.0.1:8080 \
 CHROME_PATH=/usr/bin/chromium \
 node scripts/e2e/csp-console-check.mjs
 ```
+
+## License
+
+Copyright (C) 2026 Frank Gehann
+
+Mailquill is free software: you can redistribute it and/or modify it under the
+terms of the **GNU Affero General Public License** as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version (`AGPL-3.0-or-later`).
+
+It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the GNU Affero General Public License for more details.
+
+Because Mailquill is typically run as a network service, the AGPL's §13 applies:
+if you run a modified version and let users interact with it over a network, you
+must offer those users the corresponding source of your modified version.
+
+The full license text is in [LICENSE](LICENSE).

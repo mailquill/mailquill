@@ -45,7 +45,7 @@ fn mail_list(c: &mut Criterion) {
     group.bench_function("unified_inbox_page50", |b| {
         b.iter(|| {
             rt.block_on(async {
-                db::queries::unified_page(&db, Some("inbox"), None, None, 50)
+                db::queries::unified_page(&db, Some("inbox"), None, None, 50, false)
                     .await
                     .unwrap()
             })
@@ -55,14 +55,14 @@ fn mail_list(c: &mut Criterion) {
     group.bench_function("unified_inbox_page50_cursor", |b| {
         // Page deep into the list to exercise the cursor path.
         let cursor = rt.block_on(async {
-            let p = db::queries::unified_page(&db, Some("inbox"), None, None, 50)
+            let p = db::queries::unified_page(&db, Some("inbox"), None, None, 50, false)
                 .await
                 .unwrap();
             p.next_cursor
         });
         b.iter(|| {
             rt.block_on(async {
-                db::queries::unified_page(&db, Some("inbox"), None, cursor.as_deref(), 50)
+                db::queries::unified_page(&db, Some("inbox"), None, cursor.as_deref(), 50, false)
                     .await
                     .unwrap()
             })

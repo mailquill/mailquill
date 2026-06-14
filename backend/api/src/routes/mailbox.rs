@@ -21,6 +21,8 @@ pub struct PaginationQuery {
     view: Option<String>,
     /// Optional: scope the view to a single account (per-mailbox starred list).
     account_id: Option<String>,
+    /// When true, return only unread messages (server-side Ungelesen filter).
+    unread: Option<bool>,
 }
 
 pub async fn unified_inbox(
@@ -37,6 +39,7 @@ pub async fn unified_inbox(
         q.account_id.as_deref(),
         q.cursor.as_deref(),
         limit,
+        q.unread.unwrap_or(false),
     )
     .await?;
 
@@ -346,7 +349,7 @@ pub async fn list_folder_messages(
         .ok_or(AppError::NotFound)?,
     };
 
-    let page = db::queries::folder_page(&user_db, &folder_id, q.cursor.as_deref(), limit).await?;
+    let page = db::queries::folder_page(&user_db, &folder_id, q.cursor.as_deref(), limit, q.unread.unwrap_or(false)).await?;
 
     Ok(Json(json!({
         "account_id": account_id,

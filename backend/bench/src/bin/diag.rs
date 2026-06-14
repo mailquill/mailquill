@@ -59,7 +59,7 @@ async fn report(db: &SqlitePool, label: &str) {
     println!(
         "  unified_page       : {:.2} ms",
         avg(n, || async {
-            db::queries::unified_page(db, Some("inbox"), None, None, 50).await.unwrap();
+            db::queries::unified_page(db, Some("inbox"), None, None, 50, false).await.unwrap();
         })
         .await
     );

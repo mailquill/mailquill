@@ -23,6 +23,13 @@ pub struct SendRequest {
     body_text: Option<String>,
     /// HTML body
     body_html: Option<String>,
+    /// PGP/MIME wrapper to build around the body.
+    pgp_mime_mode: Option<String>,
+    /// Detached armored signature for multipart/signed messages.
+    pgp_signature: Option<String>,
+    /// Optional iCalendar MIME method/body, used for meeting invitations and RSVP.
+    calendar_method: Option<String>,
+    calendar_ics: Option<String>,
     /// in_reply_to for replies (message_id_header of original)
     in_reply_to: Option<String>,
     /// references chain for replies/forwards
@@ -59,8 +66,17 @@ pub async fn send_email(
     .fetch_optional(&user_db)
     .await?;
 
-    let (account_id, primary_email, creds_enc, smtp_host, smtp_port, smtp_auth_scheme, smtp_tls_cert, imap_tls_cert, provider_kind) =
-        account.ok_or(AppError::NotFound)?;
+    let (
+        account_id,
+        primary_email,
+        creds_enc,
+        smtp_host,
+        smtp_port,
+        smtp_auth_scheme,
+        smtp_tls_cert,
+        imap_tls_cert,
+        provider_kind,
+    ) = account.ok_or(AppError::NotFound)?;
 
     // Verify from is primary or an alias
     let is_primary = req.from.to_lowercase() == primary_email.to_lowercase();
@@ -121,17 +137,25 @@ pub async fn send_email(
         subject: req.subject.clone(),
         body_text: req.body_text.clone(),
         body_html: req.body_html.clone(),
+        pgp_mime_mode: req.pgp_mime_mode.clone(),
+        pgp_signature: req.pgp_signature.clone(),
+        calendar_method: req.calendar_method.clone(),
+        calendar_ics: req.calendar_ics.clone(),
         in_reply_to: req.in_reply_to.clone(),
         references: req.references.clone(),
-        attachments: req.attachments.as_ref().map(|a| {
-            a.iter()
-                .map(|att| smtp::AttachmentData {
-                    filename: att.filename.clone(),
-                    content_type: att.content_type.clone(),
-                    data: att.data.clone(),
-                })
-                .collect()
-        }).unwrap_or_default(),
+        attachments: req
+            .attachments
+            .as_ref()
+            .map(|a| {
+                a.iter()
+                    .map(|att| smtp::AttachmentData {
+                        filename: att.filename.clone(),
+                        content_type: att.content_type.clone(),
+                        data: att.data.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         smtp_host: smtp_host.clone(),
         smtp_port: smtp_port as u16,
         smtp_user: smtp_user.clone(),
@@ -173,21 +197,19 @@ pub async fn send_email(
         .map_err(|e| AppError::BadGateway(format!("SMTP send failed: {e}")))?;
 
     // Append sent message to IMAP Sent folder (task 7.4)
-    let imap_host: Option<String> = sqlx::query_scalar(
-        "SELECT imap_host FROM email_accounts WHERE id = ?",
-    )
-    .bind(&account_id)
-    .fetch_optional(&user_db)
-    .await?;
+    let imap_host: Option<String> =
+        sqlx::query_scalar("SELECT imap_host FROM email_accounts WHERE id = ?")
+            .bind(&account_id)
+            .fetch_optional(&user_db)
+            .await?;
 
     if let Some(host) = imap_host {
-        let imap_port: i64 = sqlx::query_scalar(
-            "SELECT imap_port FROM email_accounts WHERE id = ?",
-        )
-        .bind(&account_id)
-        .fetch_one(&user_db)
-        .await
-        .unwrap_or(993);
+        let imap_port: i64 =
+            sqlx::query_scalar("SELECT imap_port FROM email_accounts WHERE id = ?")
+                .bind(&account_id)
+                .fetch_one(&user_db)
+                .await
+                .unwrap_or(993);
 
         let imap_user = creds["imap_username"].as_str().unwrap_or("").to_owned();
         let imap_pass = creds["imap_password"].as_str().unwrap_or("").to_owned();

@@ -46,15 +46,14 @@ pub async fn run_sync_task(
     // and the periodic ticker is disabled. In 'interval' mode there is no IDLE
     // and the ticker polls every sync_interval_secs. IDLE is IMAP-only — Gmail/
     // Outlook API accounts always use the interval path regardless of sync_mode.
-    let (provider_kind, sync_mode): (String, String) = sqlx::query_as(
-        "SELECT provider_kind, sync_mode FROM email_accounts WHERE id = ?",
-    )
-    .bind(&account_id)
-    .fetch_optional(&db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| ("imap".into(), "idle".into()));
+    let (provider_kind, sync_mode): (String, String) =
+        sqlx::query_as("SELECT provider_kind, sync_mode FROM email_accounts WHERE id = ?")
+            .bind(&account_id)
+            .fetch_optional(&db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| ("imap".into(), "idle".into()));
 
     let idle_mode = sync_mode == "idle" && ProviderKind::parse(&provider_kind).syncs_over_imap();
     // The guard aborts the IDLE child when this sync task shuts down or is dropped.
@@ -177,8 +176,10 @@ async fn sync_account(
     .unwrap_or_default()
     .into_iter()
     .collect();
-    let synced_folders: Vec<&crate::session::FolderInfo> =
-        folders.iter().filter(|f| enabled.contains(&f.full_path)).collect();
+    let synced_folders: Vec<&crate::session::FolderInfo> = folders
+        .iter()
+        .filter(|f| enabled.contains(&f.full_path))
+        .collect();
 
     // Progress total: sum of server-reported message counts across synced
     // folders. A cheap status pre-pass gives a stable denominator before the
@@ -313,7 +314,9 @@ async fn run_idle_task(
                 return;
             }
             Err(e) => {
-                warn!("idle: account={account_id} connection error: {e}; reconnecting in {backoff:?}");
+                warn!(
+                    "idle: account={account_id} connection error: {e}; reconnecting in {backoff:?}"
+                );
                 time::sleep(backoff).await;
                 backoff = (backoff * 2).min(time::Duration::from_secs(300));
                 catch_up = true;
@@ -569,11 +572,8 @@ async fn sync_folder(
                     let blob = bytes::Bytes::from(compressed.clone());
 
                     let internal_date = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
-                    let blob_key = mailquill_core::blob::blob_key_body(
-                        account_id,
-                        msg.uid,
-                        internal_date,
-                    );
+                    let blob_key =
+                        mailquill_core::blob::blob_key_body(account_id, msg.uid, internal_date);
 
                     if let Ok(()) = app.blob_store().put(&blob_key, blob).await {
                         let _ = sqlx::query(
@@ -611,6 +611,10 @@ async fn sync_folder(
                         }
                     }
 
+                    if parsed.has_calendar {
+                        process_calendar_parts(db, &msg_db_id, &parsed.calendar_parts).await;
+                    }
+
                     // FTS index (task 4.9)
                     let body_text = parsed.text.as_deref().unwrap_or("");
                     // FTS5 rejects ON CONFLICT/UPSERT on a virtual table, so use
@@ -624,7 +628,6 @@ async fn sync_folder(
                 .bind(body_text)
                 .execute(db)
                 .await;
-
                 }
             }
 
@@ -650,7 +653,13 @@ async fn sync_folder(
             .await;
             }
 
-            if is_new_message && notify_allowed && !msg.is_deleted && !initial_sync {
+            let should_notify = is_new_message
+                && notify_allowed
+                && !msg.is_seen
+                && !msg.is_deleted
+                && !initial_sync;
+
+            if should_notify {
                 let notification = NewMessageNotification {
                     message_id: msg_db_id,
                     account_id: account_id.to_owned(),
@@ -704,6 +713,92 @@ async fn sync_folder(
     Ok(())
 }
 
+async fn process_calendar_parts(db: &sqlx::SqlitePool, message_id: &str, parts: &[String]) {
+    for raw_ical in parts {
+        let method = calendar_sync::parse_method(raw_ical).unwrap_or_else(|| "PUBLISH".to_owned());
+        let events = calendar_sync::parse_icalendar_events(raw_ical);
+        for event in events {
+            if event.uid.is_empty() {
+                continue;
+            }
+            let attendees = event
+                .attendees_json
+                .clone()
+                .unwrap_or_else(|| "[]".to_owned());
+            match method.as_str() {
+                "REQUEST" => {
+                    let _ = sqlx::query(
+                        "DELETE FROM meeting_invitations WHERE message_id = ? AND uid = ?",
+                    )
+                    .bind(message_id)
+                    .bind(&event.uid)
+                    .execute(db)
+                    .await;
+                    let _ = sqlx::query(
+                        "INSERT INTO meeting_invitations \
+                         (message_id, method, uid, summary, start_dt, end_dt, organizer_email, attendees, user_rsvp_status, raw_ical, ms_teams_url, updated_at) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, datetime('now'))",
+                    )
+                    .bind(message_id)
+                    .bind(&method)
+                    .bind(&event.uid)
+                    .bind(&event.title)
+                    .bind(&event.starts_at)
+                    .bind(&event.ends_at)
+                    .bind(&event.organizer_email)
+                    .bind(&attendees)
+                    .bind(raw_ical)
+                    .bind(&event.ms_teams_url)
+                    .execute(db)
+                    .await;
+                }
+                "CANCEL" => {
+                    let _ = sqlx::query(
+                        "UPDATE calendar_events SET status = 'cancelled', updated_at = datetime('now') WHERE uid = ?",
+                    )
+                    .bind(&event.uid)
+                    .execute(db)
+                    .await;
+                    let _ = sqlx::query(
+                        "DELETE FROM meeting_invitations WHERE message_id = ? AND uid = ?",
+                    )
+                    .bind(message_id)
+                    .bind(&event.uid)
+                    .execute(db)
+                    .await;
+                    let _ = sqlx::query(
+                        "INSERT INTO meeting_invitations \
+                         (message_id, method, uid, summary, start_dt, end_dt, organizer_email, attendees, user_rsvp_status, raw_ical, ms_teams_url, updated_at) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'cancelled', ?, ?, datetime('now'))",
+                    )
+                    .bind(message_id)
+                    .bind(&method)
+                    .bind(&event.uid)
+                    .bind(&event.title)
+                    .bind(&event.starts_at)
+                    .bind(&event.ends_at)
+                    .bind(&event.organizer_email)
+                    .bind(&attendees)
+                    .bind(raw_ical)
+                    .bind(&event.ms_teams_url)
+                    .execute(db)
+                    .await;
+                }
+                "REPLY" => {
+                    let _ = sqlx::query(
+                        "UPDATE calendar_events SET attendees = ?, updated_at = datetime('now') WHERE uid = ?",
+                    )
+                    .bind(&attendees)
+                    .bind(&event.uid)
+                    .execute(db)
+                    .await;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Reconcile read/flagged state of stored messages (UIDs `1..=up_to_uid`) with
 /// the server by fetching FLAGS in chunks and updating rows that exist locally.
 async fn reconcile_flags(
@@ -720,6 +815,7 @@ async fn reconcile_flags(
         let flags = provider
             .fetch_flags(folder_path, &format!("{}:{}", start, end))
             .await?;
+        let mut tx = db.begin().await?;
         for (uid, seen, flagged, deleted) in flags {
             // Hide messages the server has marked \Deleted (e.g. left behind by a
             // copy-then-flag move) without un-hiding a locally deleted row.
@@ -731,9 +827,10 @@ async fn reconcile_flags(
             .bind(deleted as i64)
             .bind(folder_id)
             .bind(uid as i64)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         if end >= up_to_uid {
             break;
         }

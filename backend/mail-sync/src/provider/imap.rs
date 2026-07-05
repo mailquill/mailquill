@@ -24,7 +24,10 @@ impl ImapProvider {
             config.trusted_cert_der.as_deref(),
         )
         .await?;
-        Ok(Self { session, selected: None })
+        Ok(Self {
+            session,
+            selected: None,
+        })
     }
 
     async fn ensure_selected(&mut self, folder: &str) -> Result<(), ProviderError> {
@@ -54,7 +57,10 @@ impl MailProvider for ImapProvider {
         // current state, not a cached selection.
         let (uidvalidity, exists) = session::select_folder(&mut self.session, folder).await?;
         self.selected = Some(folder.to_owned());
-        Ok(FolderStatus { uidvalidity, exists })
+        Ok(FolderStatus {
+            uidvalidity,
+            exists,
+        })
     }
 
     async fn highest_uid(&mut self, folder: &str) -> Result<Option<u32>, ProviderError> {

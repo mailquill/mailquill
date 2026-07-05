@@ -40,13 +40,27 @@ pub struct Settings {
     pub openphish_feed_url: String,
 }
 
-fn default_data_dir() -> String { "./data".into() }
-fn default_host() -> String { "0.0.0.0".into() }
-fn default_port() -> u16 { 8080 }
-fn default_base_url() -> String { "http://localhost:8080".into() }
-fn default_true() -> bool { true }
-fn default_vapid_subject() -> String { "mailto:admin@example.com".into() }
-fn default_openphish_feed_url() -> String { "https://openphish.com/feed.txt".into() }
+fn default_data_dir() -> String {
+    "./data".into()
+}
+fn default_host() -> String {
+    "0.0.0.0".into()
+}
+fn default_port() -> u16 {
+    8080
+}
+fn default_base_url() -> String {
+    "http://localhost:8080".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_vapid_subject() -> String {
+    "mailto:admin@example.com".into()
+}
+fn default_openphish_feed_url() -> String {
+    "https://openphish.com/feed.txt".into()
+}
 
 impl Settings {
     /// Load configuration (later sources win):

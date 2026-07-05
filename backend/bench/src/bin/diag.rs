@@ -30,7 +30,11 @@ async fn page_thread_ids(db: &SqlitePool) -> Vec<String> {
 
 async fn enrich(db: &SqlitePool, ids: &[String], indexed_by: bool) {
     let ph = vec!["?"; ids.len()].join(",");
-    let hint = if indexed_by { "INDEXED BY idx_msg_thread" } else { "" };
+    let hint = if indexed_by {
+        "INDEXED BY idx_msg_thread"
+    } else {
+        ""
+    };
     let sql_c = format!(
         "SELECT thread_id, COUNT(*), SUM(CASE WHEN is_read=0 THEN 1 ELSE 0 END) FROM messages {hint} WHERE thread_id IN ({ph}) AND is_deleted=0 GROUP BY thread_id",
     );
@@ -54,12 +58,20 @@ async fn report(db: &SqlitePool, label: &str) {
     let n = 10;
     let ids = page_thread_ids(db).await;
     println!("== {label} ==");
-    println!("  enrich (IN)        : {:.2} ms", avg(n, || enrich(db, &ids, false)).await);
-    println!("  enrich (INDEXED BY): {:.2} ms", avg(n, || enrich(db, &ids, true)).await);
+    println!(
+        "  enrich (IN)        : {:.2} ms",
+        avg(n, || enrich(db, &ids, false)).await
+    );
+    println!(
+        "  enrich (INDEXED BY): {:.2} ms",
+        avg(n, || enrich(db, &ids, true)).await
+    );
     println!(
         "  unified_page       : {:.2} ms",
         avg(n, || async {
-            db::queries::unified_page(db, Some("inbox"), None, None, 50, false).await.unwrap();
+            db::queries::unified_page(db, Some("inbox"), None, None, 50, false)
+                .await
+                .unwrap();
         })
         .await
     );

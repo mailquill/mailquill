@@ -63,10 +63,17 @@ pub fn email(field: &str, value: &str) -> Result<(), AppError> {
     if local.is_empty() || domain.is_empty() {
         return Err(reject(field, "must be a valid email address"));
     }
-    if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') || domain.starts_with('-') {
+    if !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.starts_with('-')
+    {
         return Err(reject(field, "must have a valid domain"));
     }
-    if !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+    if !domain
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
         return Err(reject(field, "domain contains invalid characters"));
     }
     Ok(())
@@ -79,7 +86,10 @@ pub fn host(field: &str, value: &str) -> Result<(), AppError> {
     if value.is_empty() || value.len() > 255 {
         return Err(reject(field, "must be 1-255 characters"));
     }
-    if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
         return Err(reject(field, "must be a valid hostname"));
     }
     if value.starts_with('.') || value.ends_with('.') || value.starts_with('-') {
@@ -99,7 +109,10 @@ pub fn port(field: &str, value: u16) -> Result<(), AppError> {
 /// Value must be a member of an allow-list.
 pub fn one_of(field: &str, value: &str, allowed: &[&str]) -> Result<(), AppError> {
     if !allowed.contains(&value) {
-        return Err(reject(field, &format!("must be one of: {}", allowed.join(", "))));
+        return Err(reject(
+            field,
+            &format!("must be one of: {}", allowed.join(", ")),
+        ));
     }
     Ok(())
 }
@@ -123,7 +136,10 @@ pub fn http_url(field: &str, value: &str) -> Result<(), AppError> {
 pub fn b64_cert(field: &str, value: &str) -> Result<Vec<u8>, AppError> {
     use base64::Engine;
     if value.is_empty() || value.len() > 32_768 {
-        return Err(reject(field, "must be a base64 certificate up to 32768 characters"));
+        return Err(reject(
+            field,
+            "must be a base64 certificate up to 32768 characters",
+        ));
     }
     let der = base64::engine::general_purpose::STANDARD
         .decode(value.trim())

@@ -45,7 +45,10 @@ pub fn decode(input: &str) -> String {
 
 /// Decode one modified-BASE64 run (UTF-16BE; '/' is written as ',').
 fn decode_run(chunk: &str) -> Option<String> {
-    let std: String = chunk.chars().map(|c| if c == ',' { '/' } else { c }).collect();
+    let std: String = chunk
+        .chars()
+        .map(|c| if c == ',' { '/' } else { c })
+        .collect();
     let bytes = STANDARD_NO_PAD.decode(std.as_bytes()).ok()?;
     if bytes.len() % 2 != 0 {
         return None;

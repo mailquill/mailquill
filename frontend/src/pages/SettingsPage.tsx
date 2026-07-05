@@ -16,6 +16,7 @@ import {
   Trash2,
   ChevronDown,
   ShieldCheck,
+  CalendarDays,
   Check,
   Monitor,
   Sun,
@@ -29,18 +30,23 @@ import { Select } from '@/shared/components/ui/select'
 import { Button } from '@/shared/components/ui/button'
 import { AddAccountForm } from '@/features/accounts'
 import { RulesSection } from '@/widgets/RulesSection'
+import { PgpKeyManagement } from '@/widgets/PgpKeyManagement'
 import { davDefaults } from '@/shared/lib/dav'
 import { useAccounts, useDeleteAccount, useUpdateAccount, useFolders, useSetFolderSync } from '@/shared/hooks/useAccounts'
 import { useThemeStore, type ThemePref } from '@/shared/hooks/useTheme'
 import { useUiPrefs, type Density, type AccountMarker, type CalendarGrouping } from '@/shared/hooks/useUiPrefs'
 import { getLangPref, setLangPref, type LangPref } from '@/shared/i18n'
 import {
+  useAddBrandEntry,
+  useBrandEntries,
+  useDeleteBrandEntry,
   useImageAllowlist,
   useRemoveAllowedImageSender,
   useResetPhishingAnalysis,
   useSettings,
   useUpdateSettings,
 } from '@/shared/hooks/useSettings'
+import { useCalendars } from '@/shared/hooks/useCalendar'
 import {
   pushNotificationsSupported,
   useDisablePushNotifications,
@@ -49,10 +55,11 @@ import {
 } from '@/shared/hooks/usePushNotifications'
 import type { Account } from '@/shared/types'
 
-type Section = 'accounts' | 'appearance' | 'composing' | 'notifications' | 'rules' | 'privacy'
+type Section = 'accounts' | 'calendar' | 'appearance' | 'composing' | 'notifications' | 'rules' | 'privacy'
 
 const NAV: { id: Section; icon: typeof Users }[] = [
   { id: 'accounts', icon: Users },
+  { id: 'calendar', icon: CalendarDays },
   { id: 'appearance', icon: Palette },
   { id: 'composing', icon: PenLine },
   { id: 'rules', icon: Filter },
@@ -114,6 +121,7 @@ export function SettingsPage() {
         <div className="min-h-0 overflow-y-auto">
           <div className="mx-auto max-w-[1180px] p-6">
             {section === 'accounts' && <AccountsSection />}
+            {section === 'calendar' && <CalendarSettingsSection />}
             {section === 'appearance' && <AppearanceSection />}
             {section === 'composing' && <ComposingSection />}
             {section === 'rules' && <RulesSection />}
@@ -121,6 +129,34 @@ export function SettingsPage() {
             {section === 'privacy' && <PrivacySection />}
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function CalendarSettingsSection() {
+  const { t } = useTranslation()
+  const { data: calendars = [] } = useCalendars()
+  const { data: settings } = useSettings()
+  const updateSettings = useUpdateSettings()
+  return (
+    <div>
+      <SectionHeader title={t('settings.calendar')} description={t('settings.calendarDesc')} />
+      <div className="max-w-md rounded-lg border border-border bg-card p-4">
+        <Field id="default-calendar" label={t('settings.defaultCalendar')}>
+          <Select
+            id="default-calendar"
+            value={settings?.default_calendar_id ?? ''}
+            onChange={(event) => updateSettings.mutate({ default_calendar_id: event.currentTarget.value || null })}
+          >
+            <option value="">{t('settings.noDefaultCalendar')}</option>
+            {calendars.map((calendar) => (
+              <option key={calendar.id} value={calendar.id}>
+                {calendar.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
       </div>
     </div>
   )
@@ -636,7 +672,7 @@ function PrivacySection() {
           onChange={(c) => updateSettings.mutate({ load_external_images: c })}
         />
         <ImageAllowlist />
-        <PhishingResetRow />
+        <CustomBrandsSettings />
         <Toggle
           label={t('settings.pgpWkd')}
           hint={t('settings.pgpHint')}
@@ -651,34 +687,95 @@ function PrivacySection() {
           disabled={!settings || updateSettings.isPending}
           onChange={(c) => updateSettings.mutate({ pgp_discovery_keyserver_enabled: c })}
         />
+        <PgpKeyManagement />
       </div>
     </div>
   )
 }
 
-function PhishingResetRow() {
+function CustomBrandsSettings() {
   const { t } = useTranslation()
+  const { data: brands = [] } = useBrandEntries()
+  const addBrand = useAddBrandEntry()
+  const deleteBrand = useDeleteBrandEntry()
   const resetPhishing = useResetPhishingAnalysis()
+  const [brandName, setBrandName] = useState('')
+  const [domain, setDomain] = useState('')
+
+  function submit() {
+    if (!brandName.trim() || !domain.trim()) return
+    addBrand.mutate(
+      { brand_name: brandName.trim(), domain: domain.trim() },
+      {
+        onSuccess: () => {
+          setBrandName('')
+          setDomain('')
+        },
+      },
+    )
+  }
 
   return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-3.5 text-sm">
-      <span>
-        <span className="block font-semibold">{t('settings.phishingReset')}</span>
-        <span className="block text-[12.5px] text-muted-foreground">{t('settings.phishingResetHint')}</span>
-      </span>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => resetPhishing.mutate()}
-        disabled={resetPhishing.isPending}
-      >
-        {resetPhishing.isPending
-          ? t('settings.phishingResetting')
-          : resetPhishing.isSuccess
-            ? t('settings.phishingResetDone')
-            : t('settings.phishingResetAction')}
-      </Button>
+    <div className="rounded-lg border border-border bg-card p-3.5">
+      <div className="text-sm font-semibold">{t('settings.customBrands')}</div>
+      <p className="mb-3 mt-0.5 text-[12.5px] text-muted-foreground">{t('settings.customBrandsHint')}</p>
+      <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+        <Input
+          value={brandName}
+          onChange={(event) => setBrandName(event.currentTarget.value)}
+          placeholder={t('settings.brandName')}
+        />
+        <Input
+          value={domain}
+          onChange={(event) => setDomain(event.currentTarget.value)}
+          placeholder={t('settings.brandDomain')}
+        />
+        <Button type="button" onClick={submit} disabled={addBrand.isPending || !brandName.trim() || !domain.trim()}>
+          <Plus className="size-4" />
+          {t('settings.add')}
+        </Button>
+      </div>
+      {brands.length > 0 && (
+        <div className="mt-3 divide-y divide-border rounded-md border border-border">
+          {brands.map((brand) => (
+            <div key={brand.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium">{brand.brand_name}</span>
+                <span className="block truncate font-mono text-xs text-muted-foreground">{brand.domain}</span>
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => deleteBrand.mutate(brand.id)}
+                disabled={deleteBrand.isPending}
+                title={t('action.delete')}
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 flex items-center justify-between gap-3 rounded-md bg-secondary/40 p-3 text-sm">
+        <span>
+          <span className="block font-semibold">{t('settings.phishingReset')}</span>
+          <span className="block text-[12.5px] text-muted-foreground">{t('settings.phishingResetHint')}</span>
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => resetPhishing.mutate()}
+          disabled={resetPhishing.isPending}
+        >
+          {resetPhishing.isPending
+            ? t('settings.phishingResetting')
+            : resetPhishing.isSuccess
+              ? t('settings.phishingResetDone')
+              : t('settings.phishingResetAction')}
+        </Button>
+      </div>
     </div>
   )
 }

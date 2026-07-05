@@ -10,6 +10,7 @@
 
 use mailparse::MailHeaderMap;
 use regex::Regex;
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -138,7 +139,11 @@ fn load_brands(dir: &Path) -> Vec<(String, String)> {
     // 1. Operator override in the data dir wins.
     let override_path = dir.join(BRANDS_FILE);
     if let Some(brands) = read_brands_file(&override_path) {
-        info!("phishing: loaded {} brands from {}", brands.len(), override_path.display());
+        info!(
+            "phishing: loaded {} brands from {}",
+            brands.len(),
+            override_path.display()
+        );
         return brands;
     }
 
@@ -226,7 +231,10 @@ fn domain_of(addr: &str) -> Option<String> {
 
 /// Domain without its last (TLD) label, for lookalike comparison.
 fn sans_tld(domain: &str) -> &str {
-    domain.rsplit_once('.').map(|(head, _)| head).unwrap_or(domain)
+    domain
+        .rsplit_once('.')
+        .map(|(head, _)| head)
+        .unwrap_or(domain)
 }
 
 /// Registrable domain (eTLD+1-ish): `psrp.animexx.de` → `animexx.de`.
@@ -234,9 +242,9 @@ fn sans_tld(domain: &str) -> &str {
 /// of common multi-part public suffixes instead of the full PSL.
 fn registrable_domain(domain: &str) -> String {
     const MULTI_PART_SUFFIXES: &[&str] = &[
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "com.au", "net.au", "org.au",
-        "co.nz", "com.br", "com.mx", "com.ar", "co.jp", "or.jp", "ne.jp", "co.kr",
-        "com.tr", "com.pl", "com.cn", "com.hk", "com.sg", "com.tw", "co.in", "co.za",
+        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "com.au", "net.au", "org.au", "co.nz",
+        "com.br", "com.mx", "com.ar", "co.jp", "or.jp", "ne.jp", "co.kr", "com.tr", "com.pl",
+        "com.cn", "com.hk", "com.sg", "com.tw", "co.in", "co.za",
     ];
     let labels: Vec<&str> = domain.split('.').collect();
     if labels.len() <= 2 {
@@ -263,7 +271,11 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
     let parsed = match mailparse::parse_mail(raw) {
         Ok(p) => p,
         Err(_) => {
-            return Report { score: 0, verdict: VERDICT_CLEAN, checks }
+            return Report {
+                score: 0,
+                verdict: VERDICT_CLEAN,
+                checks,
+            }
         }
     };
     let headers = parsed.get_headers();
@@ -272,13 +284,28 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
     if let Some(auth) = headers.get_first_value("Authentication-Results") {
         let auth = auth.to_lowercase();
         if auth.contains("dmarc=fail") {
-            checks.push(Check { id: "dmarc_fail", points: 40, detail: "DMARC validation failed".into(), params: json!({}) });
+            checks.push(Check {
+                id: "dmarc_fail",
+                points: 40,
+                detail: "DMARC validation failed".into(),
+                params: json!({}),
+            });
         }
         if auth.contains("spf=fail") {
-            checks.push(Check { id: "spf_fail", points: 30, detail: "SPF validation failed".into(), params: json!({}) });
+            checks.push(Check {
+                id: "spf_fail",
+                points: 30,
+                detail: "SPF validation failed".into(),
+                params: json!({}),
+            });
         }
         if auth.contains("dkim=fail") {
-            checks.push(Check { id: "dkim_fail", points: 25, detail: "DKIM signature invalid".into(), params: json!({}) });
+            checks.push(Check {
+                id: "dkim_fail",
+                points: 25,
+                detail: "DKIM signature invalid".into(),
+                params: json!({}),
+            });
         }
     }
 
@@ -303,7 +330,9 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                     checks.push(Check {
                         id: "reply_to_mismatch",
                         points: 20,
-                        detail: format!("Reply-To domain ({rd}) differs from sender domain ({from_domain})"),
+                        detail: format!(
+                            "Reply-To domain ({rd}) differs from sender domain ({from_domain})"
+                        ),
                         params: json!({ "replyTo": rd, "from": from_domain }),
                     });
                 }
@@ -315,7 +344,9 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                     checks.push(Check {
                         id: "return_path_mismatch",
                         points: 20,
-                        detail: format!("Return-Path domain ({rd}) differs from sender domain ({from_domain})"),
+                        detail: format!(
+                            "Return-Path domain ({rd}) differs from sender domain ({from_domain})"
+                        ),
                         params: json!({ "returnPath": rd, "from": from_domain }),
                     });
                 }
@@ -343,7 +374,8 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
             .push(brand_domain.to_lowercase());
     }
 
-    let on_domain = |domain: &str| from_domain == domain || from_domain.ends_with(&format!(".{domain}"));
+    let on_domain =
+        |domain: &str| from_domain == domain || from_domain.ends_with(&format!(".{domain}"));
 
     for (brand_name_lower, brand_domains) in &domains_by_brand {
         // Sender legitimately on one of this brand's domains — never a spoof.
@@ -352,7 +384,9 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
         }
 
         let claims_brand = if brand_name_lower.contains(' ') {
-            display_name.to_lowercase().contains(brand_name_lower.as_str())
+            display_name
+                .to_lowercase()
+                .contains(brand_name_lower.as_str())
         } else {
             // Token match avoids substring false positives ("ing" in "Marketing").
             name_tokens.iter().any(|t| t == brand_name_lower)
@@ -398,12 +432,15 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
     dedup_by_id(&mut checks, "domain_lookalike");
 
     // ── IDN / Punycode homograph ─────────────────────────────────────────────
-    if from_domain.contains("xn--") {
+    let (decoded_domain, idn_result) = idna::domain_to_unicode(&from_domain);
+    if from_domain.contains("xn--") || (idn_result.is_ok() && decoded_domain != from_domain) {
         checks.push(Check {
             id: "idn_homograph",
             points: 35,
-            detail: format!("Sender domain {from_domain} uses internationalized (Punycode) characters"),
-            params: json!({ "from": from_domain }),
+            detail: format!(
+                "Sender domain {from_domain} uses internationalized (Punycode) characters"
+            ),
+            params: json!({ "from": from_domain, "decoded": decoded_domain }),
         });
     }
 
@@ -442,7 +479,9 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
                         checks.push(Check {
                             id: "openphish_domain",
                             points: 50,
-                            detail: format!("Link domain {domain} is listed in the OpenPhish phishing feed"),
+                            detail: format!(
+                                "Link domain {domain} is listed in the OpenPhish phishing feed"
+                            ),
                             params: json!({ "domain": domain }),
                         });
                     }
@@ -454,7 +493,11 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
     }
 
     let score: i32 = checks.iter().map(|c| c.points).sum();
-    Report { score, verdict: verdict_for(score), checks }
+    Report {
+        score,
+        verdict: verdict_for(score),
+        checks,
+    }
 }
 
 fn dedup_by_id(checks: &mut Vec<Check>, id: &str) {
@@ -485,13 +528,7 @@ fn extract_html(parsed: &mailparse::ParsedMail) -> Option<String> {
 /// Find anchors whose display text is itself a URL/domain that differs from
 /// the href domain — the classic "shows paypal.com, goes to evil.com" trick.
 fn mismatched_links(html: &str) -> Vec<(String, String)> {
-    static ANCHOR: OnceLock<Regex> = OnceLock::new();
-    static TAGS: OnceLock<Regex> = OnceLock::new();
     static TEXT_URL: OnceLock<Regex> = OnceLock::new();
-    let anchor = ANCHOR.get_or_init(|| {
-        Regex::new(r#"(?is)<a\b[^>]*?href\s*=\s*["']?(https?://[^"'\s>]+)["']?[^>]*>(.*?)</a>"#).unwrap()
-    });
-    let tags = TAGS.get_or_init(|| Regex::new(r"(?s)<[^>]*>").unwrap());
     // The visible text only counts as a navigable domain when it is presented
     // like a link — an explicit http(s):// scheme or a www. prefix. A bare
     // dotted token (Instagram handles like `hebamme.aachen`, filenames, …) is
@@ -499,16 +536,24 @@ fn mismatched_links(html: &str) -> Vec<(String, String)> {
     let text_url = TEXT_URL.get_or_init(|| {
         Regex::new(r"(?i)(?:https?://|www\.)((?:[a-z0-9-]+\.)+[a-z]{2,})").unwrap()
     });
+    let document = Html::parse_fragment(html);
+    let selector = Selector::parse("a[href]").expect("static selector is valid");
 
     let mut out = Vec::new();
-    for cap in anchor.captures_iter(html) {
-        let href = &cap[1];
-        let text = tags.replace_all(&cap[2], "");
+    for anchor in document.select(&selector) {
+        let Some(href) = anchor.value().attr("href") else {
+            continue;
+        };
+        let text = anchor.text().collect::<Vec<_>>().join(" ");
         let text = text.trim();
 
-        let Some(href_domain) = url_domain(href) else { continue };
+        let Some(href_domain) = url_domain(href) else {
+            continue;
+        };
         // Only flag when the visible text itself names a domain.
-        let Some(m) = text_url.captures(text) else { continue };
+        let Some(m) = text_url.captures(text) else {
+            continue;
+        };
         let text_domain = m[1].to_lowercase();
 
         // Same organisation (registrable domain) is not a mismatch —
@@ -522,11 +567,14 @@ fn mismatched_links(html: &str) -> Vec<(String, String)> {
 
 /// All anchor hrefs in the HTML, for feed lookups.
 fn all_hrefs(html: &str) -> Vec<String> {
-    static HREF: OnceLock<Regex> = OnceLock::new();
-    let href = HREF.get_or_init(|| {
-        Regex::new(r#"(?i)<a\b[^>]*?href\s*=\s*["']?(https?://[^"'\s>]+)"#).unwrap()
-    });
-    href.captures_iter(html).map(|c| c[1].to_string()).collect()
+    let document = Html::parse_fragment(html);
+    let selector = Selector::parse("a[href]").expect("static selector is valid");
+    document
+        .select(&selector)
+        .filter_map(|anchor| anchor.value().attr("href"))
+        .filter(|href| href.starts_with("http://") || href.starts_with("https://"))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn url_domain(url: &str) -> Option<String> {

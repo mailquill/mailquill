@@ -11,7 +11,6 @@ import {
   ChevronDown,
   RefreshCw,
   Plus,
-  FolderIcon,
   Pencil,
   Star,
   FileText,
@@ -26,8 +25,9 @@ import { formatDate } from '@/shared/lib/format'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { useAccounts, useFolders, useSyncStatus } from '@/shared/hooks/useAccounts'
 import { useMoveMessage, useUnifiedCounts } from '@/shared/hooks/useMessages'
-import { useContacts } from '@/shared/hooks/useContacts'
-import { useCalendars, useCreateCalendar, useUpdateCalendar, useDeleteCalendar } from '@/shared/hooks/useCalendar'
+import { useContactAccounts, useContacts } from '@/shared/hooks/useContacts'
+import { useCalendars, useUpdateCalendar, useDeleteCalendar } from '@/shared/hooks/useCalendar'
+import { AddCalendarDialog } from '@/widgets/AddCalendarDialog'
 import { useModuleNav } from '@/shared/hooks/useModuleNav'
 import { useUiPrefs } from '@/shared/hooks/useUiPrefs'
 import { buildFolderTree, folderLeafLabel, folderIcon, type FolderNode } from '@/shared/lib/folders'
@@ -320,9 +320,7 @@ function ContactsNav() {
   const { t } = useTranslation()
   const { contactGroup, setContactGroup } = useModuleNav()
   const { data: contacts = [] } = useContacts()
-  const groups = Array.from(
-    new Set(contacts.map((c) => c.group_name).filter((g): g is string => Boolean(g))),
-  ).sort()
+  const { data: accounts = [] } = useContactAccounts()
 
   return (
     <>
@@ -333,18 +331,15 @@ function ContactsNav() {
           <span className="flex-1">{t('sidebar.allContacts')}</span>
           <span className="text-[11px] font-bold text-[#475569]">{contacts.length}</span>
         </SbRow>
-        <SbRow active={contactGroup === 'fav'} onClick={() => setContactGroup('fav')}>
-          <Star className={cn('size-4', contactGroup === 'fav' ? 'text-[#f8fafc]' : 'text-[#94a3b8]')} />
-          <span className="flex-1">{t('sidebar.favourites')}</span>
-          <span className="text-[11px] font-bold text-[#475569]">{contacts.filter((c) => c.favorite).length}</span>
-        </SbRow>
-        {groups.length > 0 && <div className={CAP}>{t('sidebar.groups')}</div>}
-        {groups.map((g) => (
-          <SbRow key={g} active={contactGroup === g} onClick={() => setContactGroup(g)}>
-            <span className="size-4 text-center text-[#94a3b8]">#</span>
-            <span className="flex-1 truncate">{g}</span>
+        {accounts.length > 0 && <div className={CAP}>{t('sidebar.accounts')}</div>}
+        {accounts.map((account) => (
+          <SbRow key={account.id} active={contactGroup === account.id} onClick={() => setContactGroup(account.id)}>
+            <span className="size-4 text-center text-[#94a3b8]">
+              {account.type === 'google' ? 'G' : account.type === 'graph' ? 'M' : 'C'}
+            </span>
+            <span className="flex-1 truncate">{account.display_name}</span>
             <span className="text-[11px] font-bold text-[#475569]">
-              {contacts.filter((c) => c.group_name === g).length}
+              {contacts.filter((c) => c.account_id === account.id).length}
             </span>
           </SbRow>
         ))}
@@ -359,13 +354,8 @@ function CalendarNav() {
   const { data: calendars = [] } = useCalendars()
   const { data: accounts = [] } = useAccounts()
   const { hiddenCalendars, toggleCalendar } = useModuleNav()
-  const createCalendar = useCreateCalendar()
   const grouping = useUiPrefs((s) => s.calendarGrouping)
-
-  function addCalendar() {
-    const name = window.prompt(t('sidebar.newCalendar'))?.trim()
-    if (name) createCalendar.mutate({ name, color: '#2563EB' })
-  }
+  const [addOpen, setAddOpen] = useState(false)
 
   const row = (c: Calendar) => (
     <CalendarRow key={c.id} calendar={c} shown={!hiddenCalendars.includes(c.id)} onToggle={() => toggleCalendar(c.id)} />
@@ -393,7 +383,7 @@ function CalendarNav() {
         <div className="flex items-center justify-between pr-2">
           <span className={CAP}>{t('sidebar.myCalendars')}</span>
           <button
-            onClick={addCalendar}
+            onClick={() => setAddOpen(true)}
             title={t('sidebar.newCalendar')}
             className="rounded p-1 text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-white"
           >
@@ -414,7 +404,7 @@ function CalendarNav() {
 
         {!calendars.length && (
           <button
-            onClick={addCalendar}
+            onClick={() => setAddOpen(true)}
             className="mx-1 mt-1 flex w-[calc(100%-0.5rem)] items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-[#94a3b8] transition-colors hover:bg-white/5 hover:text-white"
           >
             <Plus className="size-4" />
@@ -422,6 +412,7 @@ function CalendarNav() {
           </button>
         )}
       </nav>
+      <AddCalendarDialog open={addOpen} onClose={() => setAddOpen(false)} />
     </>
   )
 }

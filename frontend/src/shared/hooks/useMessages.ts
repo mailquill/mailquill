@@ -249,6 +249,31 @@ export function useMoveMessage() {
   })
 }
 
+export function useNotSpamMessage() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => apiPost(`/messages/${id}/not-spam`),
+    onMutate: (id) => removeFromMailLists(qc, (m) => m.id === id),
+    onError: (_e, _id, restore) => restore?.(),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['thread'] })
+      invalidateMailLists(qc)
+    },
+  })
+}
+
+export function useReanalyseMessage() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => apiPost(`/messages/${id}/reanalyse`),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: ['message', id] })
+      qc.invalidateQueries({ queryKey: ['thread'] })
+      invalidateMailLists(qc)
+    },
+  })
+}
+
 export function useDeleteMessage() {
   const qc = useQueryClient()
   return useMutation({

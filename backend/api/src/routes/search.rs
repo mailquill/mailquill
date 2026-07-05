@@ -66,7 +66,11 @@ pub async fn search(
         }
         // Inline the rowids as integer literals: they come from our own DB, not
         // user input, so there is nothing to escape.
-        let list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        let list = ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         conditions.push(format!("m.rowid IN ({list})"));
     }
 
@@ -86,7 +90,8 @@ pub async fn search(
     if let Some(ref not) = q.not {
         if !not.trim().is_empty() {
             conditions.push(
-                "(m.subject NOT LIKE ? AND m.from_addr NOT LIKE ? AND m.snippet NOT LIKE ?)".to_string(),
+                "(m.subject NOT LIKE ? AND m.from_addr NOT LIKE ? AND m.snippet NOT LIKE ?)"
+                    .to_string(),
             );
             let pat = format!("%{not}%");
             binds.push(pat.clone());
@@ -112,19 +117,31 @@ pub async fn search(
     }
     if let Some(is_read) = q.is_read {
         conditions.push("m.is_read = ?".to_string());
-        binds.push(if is_read { "1".to_string() } else { "0".to_string() });
+        binds.push(if is_read {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        });
     }
     if let Some(is_flagged) = q.is_flagged {
         conditions.push("m.is_flagged = ?".to_string());
-        binds.push(if is_flagged { "1".to_string() } else { "0".to_string() });
+        binds.push(if is_flagged {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        });
     }
     if q.has_attachment == Some(true) {
-        conditions.push("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)".to_string());
+        conditions
+            .push("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)".to_string());
     }
 
     // Cursor-based pagination
     if let Some(ref cursor) = q.cursor {
-        conditions.push(format!("m.internal_date < '{}'", cursor.replace('\'', "''")));
+        conditions.push(format!(
+            "m.internal_date < '{}'",
+            cursor.replace('\'', "''")
+        ));
     }
 
     let where_clause = conditions.join(" AND ");
@@ -132,7 +149,23 @@ pub async fn search(
         "SELECT m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, f.full_path FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE {where_clause} ORDER BY m.internal_date DESC LIMIT ?",
     );
 
-    let mut query = sqlx::query_as::<_, (String, Option<String>, String, String, String, String, bool, bool, String, String, Option<String>, Option<String>)>(&sql);
+    let mut query = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            bool,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(&sql);
     for b in &binds {
         query = query.bind(b);
     }
@@ -145,22 +178,37 @@ pub async fn search(
 
     let items: Vec<_> = rows
         .into_iter()
-        .map(|(id, thread_id, subject, from_addr, snippet, internal_date, is_read, is_flagged, account_id, folder_id, list_id, folder_path)| {
-            json!({
-                "id": id,
-                "thread_id": thread_id,
-                "subject": subject,
-                "from_addr": from_addr,
-                "snippet": snippet,
-                "internal_date": internal_date,
-                "is_read": is_read,
-                "is_flagged": is_flagged,
-                "account_id": account_id,
-                "folder_id": folder_id,
-                "folder_path": folder_path,
-                "list_id": list_id,
-            })
-        })
+        .map(
+            |(
+                id,
+                thread_id,
+                subject,
+                from_addr,
+                snippet,
+                internal_date,
+                is_read,
+                is_flagged,
+                account_id,
+                folder_id,
+                list_id,
+                folder_path,
+            )| {
+                json!({
+                    "id": id,
+                    "thread_id": thread_id,
+                    "subject": subject,
+                    "from_addr": from_addr,
+                    "snippet": snippet,
+                    "internal_date": internal_date,
+                    "is_read": is_read,
+                    "is_flagged": is_flagged,
+                    "account_id": account_id,
+                    "folder_id": folder_id,
+                    "folder_path": folder_path,
+                    "list_id": list_id,
+                })
+            },
+        )
         .collect();
 
     Ok(Json(json!({
@@ -192,7 +240,11 @@ async fn expand_fuzzy_query(db: &sqlx::SqlitePool, raw: &str) -> String {
         if !alts.iter().any(|t| t == &lower) {
             alts.insert(0, lower.clone());
         }
-        let ored = alts.iter().map(|t| quote_term(t)).collect::<Vec<_>>().join(" OR ");
+        let ored = alts
+            .iter()
+            .map(|t| quote_term(t))
+            .collect::<Vec<_>>()
+            .join(" OR ");
         groups.push(format!("({ored})"));
     }
     // Space between groups = implicit AND in FTS5.
@@ -204,14 +256,13 @@ async fn nearest_terms(db: &sqlx::SqlitePool, word: &str, max_dist: usize) -> Ve
     let len = word.chars().count() as i64;
     let dist = max_dist as i64;
     // Length window prunes the candidate set before the (cheap) edit-distance pass.
-    let candidates: Vec<String> = sqlx::query_scalar(
-        "SELECT term FROM messages_vocab WHERE length(term) BETWEEN ? AND ?",
-    )
-    .bind(len - dist)
-    .bind(len + dist)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    let candidates: Vec<String> =
+        sqlx::query_scalar("SELECT term FROM messages_vocab WHERE length(term) BETWEEN ? AND ?")
+            .bind(len - dist)
+            .bind(len + dist)
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
 
     let mut scored: Vec<(usize, String)> = candidates
         .into_iter()
@@ -221,7 +272,11 @@ async fn nearest_terms(db: &sqlx::SqlitePool, word: &str, max_dist: usize) -> Ve
         })
         .collect();
     scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    scored.into_iter().take(MAX_FUZZY_TERMS).map(|(_, t)| t).collect()
+    scored
+        .into_iter()
+        .take(MAX_FUZZY_TERMS)
+        .map(|(_, t)| t)
+        .collect()
 }
 
 /// Quote a bareword for an FTS5 query, escaping embedded double quotes.

@@ -57,7 +57,9 @@ impl UserDbPool {
 
     async fn open_user_pool(&self, user_id: &str) -> Result<SqlitePool, PoolError> {
         let dir = self.data_dir.join("users").join(user_id);
-        tokio::fs::create_dir_all(&dir).await.map_err(PoolError::Io)?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(PoolError::Io)?;
 
         let db_path = dir.join("mail.db");
         let opts = SqliteConnectOptions::new()

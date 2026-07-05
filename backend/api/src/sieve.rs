@@ -60,7 +60,10 @@ fn sieve_test(c: &Cond) -> String {
 
 fn sieve_action(a: &Act) -> Option<String> {
     Some(match a.kind.as_str() {
-        "move" => format!("    fileinto {};", quote(a.value.as_deref().unwrap_or("INBOX"))),
+        "move" => format!(
+            "    fileinto {};",
+            quote(a.value.as_deref().unwrap_or("INBOX"))
+        ),
         "markRead" => "    setflag \"\\\\Seen\";".to_owned(),
         "star" => "    setflag \"\\\\Flagged\";".to_owned(),
         "delete" => "    discard;".to_owned(),
@@ -126,28 +129,37 @@ pub async fn upload_script(
     name: &str,
     script: &str,
 ) -> Result<(), String> {
-    let mut tcp = TcpStream::connect((host, port)).await.map_err(|e| e.to_string())?;
+    let mut tcp = TcpStream::connect((host, port))
+        .await
+        .map_err(|e| e.to_string())?;
     read_status(&mut tcp).await?; // server greeting + capabilities
 
-    tcp.write_all(b"STARTTLS\r\n").await.map_err(|e| e.to_string())?;
+    tcp.write_all(b"STARTTLS\r\n")
+        .await
+        .map_err(|e| e.to_string())?;
     read_status(&mut tcp).await?;
 
     let connector = native_tls::TlsConnector::builder()
         .build()
         .map_err(|e| e.to_string())?;
     let connector = tokio_native_tls::TlsConnector::from(connector);
-    let mut tls = connector.connect(host, tcp).await.map_err(|e| e.to_string())?;
+    let mut tls = connector
+        .connect(host, tcp)
+        .await
+        .map_err(|e| e.to_string())?;
     read_status(&mut tls).await?; // post-TLS capabilities
 
-    let sasl = base64::engine::general_purpose::STANDARD
-        .encode(format!("\0{username}\0{password}"));
+    let sasl =
+        base64::engine::general_purpose::STANDARD.encode(format!("\0{username}\0{password}"));
     tls.write_all(format!("AUTHENTICATE \"PLAIN\" \"{sasl}\"\r\n").as_bytes())
         .await
         .map_err(|e| e.to_string())?;
     read_status(&mut tls).await?;
 
     let put = format!("PUTSCRIPT \"{name}\" {{{}+}}\r\n{script}\r\n", script.len());
-    tls.write_all(put.as_bytes()).await.map_err(|e| e.to_string())?;
+    tls.write_all(put.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     read_status(&mut tls).await?;
 
     tls.write_all(format!("SETACTIVE \"{name}\"\r\n").as_bytes())

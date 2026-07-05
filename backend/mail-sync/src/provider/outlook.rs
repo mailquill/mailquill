@@ -32,11 +32,12 @@ impl OutlookProvider {
         let token = config
             .oauth_access_token
             .clone()
-            .ok_or(ProviderError::Other("outlook api requires an OAuth access token".into()))?;
-        let db = config
-            .db
-            .clone()
-            .ok_or(ProviderError::Other("outlook api requires a user db handle".into()))?;
+            .ok_or(ProviderError::Other(
+                "outlook api requires an OAuth access token".into(),
+            ))?;
+        let db = config.db.clone().ok_or(ProviderError::Other(
+            "outlook api requires a user db handle".into(),
+        ))?;
         Ok(Self {
             rest: Rest::new(token),
             ids: IdMap::new(db, config.account_id.clone()),
@@ -71,7 +72,11 @@ impl OutlookProvider {
         Ok(new_ids)
     }
 
-    async fn fetch_metadata(&self, uid: u32, remote_id: &str) -> Result<FetchedMessage, ProviderError> {
+    async fn fetch_metadata(
+        &self,
+        uid: u32,
+        remote_id: &str,
+    ) -> Result<FetchedMessage, ProviderError> {
         let res = self
             .rest
             .get_json(&format!(
@@ -82,11 +87,20 @@ impl OutlookProvider {
         let (is_seen, is_flagged, internal_date) = Self::state_of(&res);
         let empty = Vec::new();
         let headers = res["internetMessageHeaders"].as_array().unwrap_or(&empty);
-        let block = header_block_from_pairs(headers.iter().filter_map(|h| {
-            Some((h["name"].as_str()?, h["value"].as_str()?))
-        }));
+        let block = header_block_from_pairs(
+            headers
+                .iter()
+                .filter_map(|h| Some((h["name"].as_str()?, h["value"].as_str()?))),
+        );
 
-        Ok(fetched_from_raw(uid, &block, internal_date, is_seen, is_flagged, false))
+        Ok(fetched_from_raw(
+            uid,
+            &block,
+            internal_date,
+            is_seen,
+            is_flagged,
+            false,
+        ))
     }
 
     fn state_of(message: &Value) -> (bool, bool, String) {
@@ -105,7 +119,9 @@ impl MailProvider for OutlookProvider {
     async fn list_folders(&mut self) -> Result<Vec<FolderInfo>, ProviderError> {
         let res = self
             .rest
-            .get_json(&format!("{BASE}/mailFolders?$top=200&$select=id,displayName,wellKnownName"))
+            .get_json(&format!(
+                "{BASE}/mailFolders?$top=200&$select=id,displayName,wellKnownName"
+            ))
             .await?;
 
         let mut folders = Vec::new();
@@ -120,9 +136,16 @@ impl MailProvider for OutlookProvider {
                 "junkemail" => "SPAM",
                 "deleteditems" => "TRASH",
                 // Internal folders that are not user mailboxes.
-                "outbox" | "conversationhistory" | "recoverableitemsdeletions" | "scheduled"
-                | "searchfolders" | "serverfailures" | "syncissues" | "conflicts"
-                | "localfailures" | "clutter" => continue,
+                "outbox"
+                | "conversationhistory"
+                | "recoverableitemsdeletions"
+                | "scheduled"
+                | "searchfolders"
+                | "serverfailures"
+                | "syncissues"
+                | "conflicts"
+                | "localfailures"
+                | "clutter" => continue,
                 _ => "CUSTOM",
             };
             folders.push(FolderInfo {
@@ -137,7 +160,9 @@ impl MailProvider for OutlookProvider {
     async fn folder_status(&mut self, folder: &str) -> Result<FolderStatus, ProviderError> {
         let res = self
             .rest
-            .get_json(&format!("{BASE}/mailFolders/{folder}?$select=totalItemCount"))
+            .get_json(&format!(
+                "{BASE}/mailFolders/{folder}?$select=totalItemCount"
+            ))
             .await?;
         Ok(FolderStatus {
             uidvalidity: 1,
@@ -203,13 +228,25 @@ impl MailProvider for OutlookProvider {
         for (uid, remote_id) in self.ids.resolve_set(folder, uid_set).await? {
             let meta = self
                 .rest
-                .get_json(&format!("{BASE}/messages/{remote_id}?$select=isRead,flag,receivedDateTime"))
+                .get_json(&format!(
+                    "{BASE}/messages/{remote_id}?$select=isRead,flag,receivedDateTime"
+                ))
                 .await;
-            let raw = self.rest.get_bytes(&format!("{BASE}/messages/{remote_id}/$value")).await;
+            let raw = self
+                .rest
+                .get_bytes(&format!("{BASE}/messages/{remote_id}/$value"))
+                .await;
             match (meta, raw) {
                 (Ok(meta), Ok(raw)) => {
                     let (is_seen, is_flagged, internal_date) = Self::state_of(&meta);
-                    out.push(fetched_from_raw(uid, &raw, internal_date, is_seen, is_flagged, true));
+                    out.push(fetched_from_raw(
+                        uid,
+                        &raw,
+                        internal_date,
+                        is_seen,
+                        is_flagged,
+                        true,
+                    ));
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     tracing::warn!("outlook: full fetch failed for {remote_id}: {e}");
@@ -221,7 +258,9 @@ impl MailProvider for OutlookProvider {
 
     async fn fetch_raw(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>, ProviderError> {
         let remote_id = self.ids.remote_id(folder, uid).await?;
-        self.rest.get_bytes(&format!("{BASE}/messages/{remote_id}/$value")).await
+        self.rest
+            .get_bytes(&format!("{BASE}/messages/{remote_id}/$value"))
+            .await
     }
 
     async fn set_flag(
@@ -234,10 +273,16 @@ impl MailProvider for OutlookProvider {
         let remote_id = self.ids.remote_id(folder, uid).await?;
         let url = format!("{BASE}/messages/{remote_id}");
         match flag {
-            "seen" => self.rest.patch_json(&url, &json!({ "isRead": value })).await,
+            "seen" => {
+                self.rest
+                    .patch_json(&url, &json!({ "isRead": value }))
+                    .await
+            }
             "flagged" => {
                 let status = if value { "flagged" } else { "notFlagged" };
-                self.rest.patch_json(&url, &json!({ "flag": { "flagStatus": status } })).await
+                self.rest
+                    .patch_json(&url, &json!({ "flag": { "flagStatus": status } }))
+                    .await
             }
             "deleted" => {
                 if value {
@@ -276,7 +321,9 @@ impl MailProvider for OutlookProvider {
 
     async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError> {
         let remote_id = self.ids.remote_id(folder, uid).await?;
-        self.rest.delete(&format!("{BASE}/messages/{remote_id}")).await?;
+        self.rest
+            .delete(&format!("{BASE}/messages/{remote_id}"))
+            .await?;
         self.ids.remove(folder, uid).await
     }
 

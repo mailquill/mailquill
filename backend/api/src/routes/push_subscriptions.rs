@@ -36,7 +36,11 @@ pub async fn vapid_public_key(State(state): State<AppState>) -> impl IntoRespons
     // (HTTP 200) instead of an error. The client treats a missing key as
     // "push unavailable" and disables the toggle — no need to log a 500.
     Json(VapidPublicKeyResponse {
-        public_key: state.vapid.as_ref().map(|v| v.public_key.clone()).unwrap_or_default(),
+        public_key: state
+            .vapid
+            .as_ref()
+            .map(|v| v.public_key.clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -45,7 +49,10 @@ pub async fn create_subscription(
     Extension(user): Extension<UserId>,
     Json(req): Json<PushSubscriptionRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if req.endpoint.trim().is_empty() || req.keys.p256dh.trim().is_empty() || req.keys.auth.trim().is_empty() {
+    if req.endpoint.trim().is_empty()
+        || req.keys.p256dh.trim().is_empty()
+        || req.keys.auth.trim().is_empty()
+    {
         return Err(AppError::Unprocessable(
             "push subscription endpoint and keys are required".to_owned(),
         ));

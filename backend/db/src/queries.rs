@@ -22,6 +22,7 @@ pub struct ThreadRow {
     pub is_flagged: bool,
     pub account_id: String,
     pub folder_id: String,
+    pub folder_type: String,
     pub folder_path: String,
     pub list_id: Option<String>,
     pub phishing_verdict: Option<String>,
@@ -52,6 +53,7 @@ type RawRow = (
     Option<String>,
     Option<String>,
     String,
+    String,
 );
 
 /// SQL predicate selecting the messages for a cross-account unified view.
@@ -67,7 +69,7 @@ pub fn view_filter(view: Option<&str>) -> &'static str {
     }
 }
 
-const LIST_COLUMNS: &str = "m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path";
+const LIST_COLUMNS: &str = "m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path, f.folder_type";
 
 /// Cross-account unified inbox/view page, newest first. Pass `account_id` to
 /// scope the same view to a single mailbox (e.g. that account's starred list).
@@ -80,8 +82,16 @@ pub async fn unified_page(
     unread: bool,
 ) -> Result<Page, sqlx::Error> {
     let filter = view_filter(view);
-    let account_clause = if account_id.is_some() { "AND m.account_id = ?" } else { "" };
-    let cursor_clause = if cursor.is_some() { "AND m.internal_date < ?" } else { "" };
+    let account_clause = if account_id.is_some() {
+        "AND m.account_id = ?"
+    } else {
+        ""
+    };
+    let cursor_clause = if cursor.is_some() {
+        "AND m.internal_date < ?"
+    } else {
+        ""
+    };
     let unread_clause = if unread { "AND m.is_read = 0" } else { "" };
     let sql = format!(
         "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0 {unread_clause} {account_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
@@ -116,8 +126,17 @@ pub async fn unified_page(
 /// the view's folders and sum per-folder counts: a `folder_id = ?` equality is
 /// served by the covering `idx_msg_folder_undeleted` deterministically, with no
 /// dependence on planner statistics.
-async fn view_total(db: &SqlitePool, view: Option<&str>, account_id: Option<&str>, unread: bool) -> i64 {
-    let account_clause = if account_id.is_some() { "AND account_id = ?" } else { "" };
+async fn view_total(
+    db: &SqlitePool,
+    view: Option<&str>,
+    account_id: Option<&str>,
+    unread: bool,
+) -> i64 {
+    let account_clause = if account_id.is_some() {
+        "AND account_id = ?"
+    } else {
+        ""
+    };
     let unread_clause = if unread { "AND is_read = 0" } else { "" };
     if view == Some("starred") {
         let sql = format!(
@@ -168,7 +187,11 @@ pub async fn folder_page(
     limit: i64,
     unread: bool,
 ) -> Result<Page, sqlx::Error> {
-    let cursor_clause = if cursor.is_some() { "AND m.internal_date < ?" } else { "" };
+    let cursor_clause = if cursor.is_some() {
+        "AND m.internal_date < ?"
+    } else {
+        ""
+    };
     let unread_clause = if unread { "AND m.is_read = 0" } else { "" };
     let sql = format!(
         "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id = ? AND m.is_deleted = 0 {unread_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
@@ -267,6 +290,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
                 list_id,
                 phishing_verdict,
                 folder_path,
+                folder_type,
             ) = r;
 
             let (thread_size, thread_unread, thread_participants) = match &thread_id {
@@ -295,6 +319,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
                 is_flagged,
                 account_id,
                 folder_id,
+                folder_type,
                 folder_path,
                 list_id,
                 phishing_verdict,

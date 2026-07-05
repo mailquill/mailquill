@@ -4,7 +4,11 @@ use sqlx::SqlitePool;
 
 #[test]
 fn provider_kind_roundtrip() {
-    for kind in [ProviderKind::Imap, ProviderKind::GmailApi, ProviderKind::OutlookApi] {
+    for kind in [
+        ProviderKind::Imap,
+        ProviderKind::GmailApi,
+        ProviderKind::OutlookApi,
+    ] {
         assert_eq!(ProviderKind::parse(kind.as_str()), kind);
     }
     // Unknown values fall back to IMAP (existing accounts have no kind column).
@@ -14,7 +18,10 @@ fn provider_kind_roundtrip() {
 #[tokio::test]
 async fn api_providers_require_oauth_token() {
     for kind in [ProviderKind::GmailApi, ProviderKind::OutlookApi] {
-        let err = connect(kind, &ProviderConfig::default()).await.err().unwrap();
+        let err = connect(kind, &ProviderConfig::default())
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(err, ProviderError::Other(_)), "{err}");
     }
 }

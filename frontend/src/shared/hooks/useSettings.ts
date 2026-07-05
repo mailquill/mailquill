@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/shared/api'
-import type { AllowedImageSender, Settings } from '@/shared/types'
+import type { AllowedImageSender, BrandEntry, Settings } from '@/shared/types'
 
 export function useSettings() {
   return useQuery({
@@ -46,6 +46,31 @@ export function useResetPhishingAnalysis() {
       queryClient.invalidateQueries({ queryKey: ['message'] })
       queryClient.invalidateQueries({ queryKey: ['thread'] })
     },
+  })
+}
+
+export function useBrandEntries() {
+  return useQuery({
+    queryKey: ['brand-entries'],
+    queryFn: () => apiGet<BrandEntry[]>('/settings/brands'),
+  })
+}
+
+export function useAddBrandEntry() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (entry: { domain: string; brand_name: string }) => apiPost<BrandEntry>('/settings/brands', entry),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['brand-entries'] }),
+  })
+}
+
+export function useDeleteBrandEntry() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (id: string) => apiDelete(`/settings/brands/${id}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['brand-entries'] }),
   })
 }
 

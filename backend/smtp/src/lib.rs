@@ -32,6 +32,10 @@ pub struct SendRequest {
     pub subject: String,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
+    pub pgp_mime_mode: Option<String>,
+    pub pgp_signature: Option<String>,
+    pub calendar_method: Option<String>,
+    pub calendar_ics: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
     pub attachments: Vec<AttachmentData>,
@@ -120,6 +124,104 @@ fn build_message(req: &SendRequest) -> Result<Message, SmtpError> {
         builder = builder.references(refs.clone());
     }
 
+    if let Some(mode) = req.pgp_mime_mode.as_deref() {
+        return match mode {
+            "encrypted" => {
+                let encrypted = req.body_text.clone().unwrap_or_default();
+                builder
+                    .multipart(
+                        MultiPart::encrypted("application/pgp-encrypted".to_owned())
+                            .singlepart(
+                                SinglePart::builder()
+                                    .header(ContentType::parse("application/pgp-encrypted").unwrap())
+                                    .body(String::from("Version: 1")),
+                            )
+                            .singlepart(
+                                SinglePart::builder()
+                                    .header(
+                                        ContentType::parse("application/octet-stream; name=\"encrypted.asc\"")
+                                            .unwrap(),
+                                    )
+                                    .header(lettre::message::header::ContentDisposition::inline_with_name(
+                                        "encrypted.asc",
+                                    ))
+                                    .body(encrypted),
+                            ),
+                    )
+                    .map_err(|e| SmtpError::Build(e.to_string()))
+            }
+            "signed" => {
+                let text = req.body_text.clone().unwrap_or_default();
+                let signature = req.pgp_signature.clone().ok_or_else(|| {
+                    SmtpError::Build("pgp_signature required for multipart/signed".into())
+                })?;
+                builder
+                    .multipart(
+                        MultiPart::signed(
+                            "application/pgp-signature".to_owned(),
+                            "pgp-sha256".to_owned(),
+                        )
+                        .singlepart(SinglePart::plain(text))
+                        .singlepart(
+                            SinglePart::builder()
+                                .header(
+                                    ContentType::parse(
+                                        "application/pgp-signature; name=\"signature.asc\"",
+                                    )
+                                    .unwrap(),
+                                )
+                                .header(lettre::message::header::ContentDisposition::attachment(
+                                    "signature.asc",
+                                ))
+                                .body(signature),
+                        ),
+                    )
+                    .map_err(|e| SmtpError::Build(e.to_string()))
+            }
+            other => Err(SmtpError::Build(format!(
+                "unsupported PGP/MIME mode: {other}"
+            ))),
+        };
+    }
+
+    if let Some(calendar_ics) = req.calendar_ics.as_ref() {
+        let method = req
+            .calendar_method
+            .as_deref()
+            .unwrap_or("PUBLISH")
+            .to_ascii_uppercase();
+        let text = req.body_text.clone().unwrap_or_default();
+        let calendar_part = SinglePart::builder()
+            .header(
+                ContentType::parse(&format!("text/calendar; method={method}; charset=utf-8"))
+                    .unwrap_or(ContentType::TEXT_PLAIN),
+            )
+            .body(calendar_ics.clone());
+        let alternative = MultiPart::alternative()
+            .singlepart(SinglePart::plain(text))
+            .singlepart(calendar_part);
+
+        if req.attachments.is_empty() {
+            return builder
+                .multipart(alternative)
+                .map_err(|e| SmtpError::Build(e.to_string()));
+        }
+
+        let mut mixed = MultiPart::mixed().multipart(alternative);
+        for att in &req.attachments {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&att.data)
+                .map_err(|e| SmtpError::Attachment(e.to_string()))?;
+            let ct: ContentType = att.content_type.parse().unwrap_or(ContentType::TEXT_PLAIN);
+            mixed = mixed
+                .singlepart(lettre::message::Attachment::new(att.filename.clone()).body(data, ct));
+        }
+
+        return builder
+            .multipart(mixed)
+            .map_err(|e| SmtpError::Build(e.to_string()));
+    }
+
     // No attachments: simple body
     if req.attachments.is_empty() {
         return match (&req.body_text, &req.body_html) {
@@ -157,13 +259,9 @@ fn build_message(req: &SendRequest) -> Result<Message, SmtpError> {
         let data = base64::engine::general_purpose::STANDARD
             .decode(&att.data)
             .map_err(|e| SmtpError::Attachment(e.to_string()))?;
-        let ct: ContentType = att
-            .content_type
-            .parse()
-            .unwrap_or(ContentType::TEXT_PLAIN);
-        mixed = mixed.singlepart(
-            lettre::message::Attachment::new(att.filename.clone()).body(data, ct),
-        );
+        let ct: ContentType = att.content_type.parse().unwrap_or(ContentType::TEXT_PLAIN);
+        mixed =
+            mixed.singlepart(lettre::message::Attachment::new(att.filename.clone()).body(data, ct));
     }
 
     builder
@@ -184,11 +282,10 @@ fn build_transport(req: &SendRequest) -> Result<AsyncSmtpTransport<Tokio1Executo
         .build_native()
         .map_err(|e| SmtpError::Build(e.to_string()))?;
 
-    let mut transport_builder =
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&req.smtp_host)
-            .map_err(|e| SmtpError::Build(e.to_string()))?
-            .port(req.smtp_port)
-            .tls(Tls::Required(tls_params));
+    let mut transport_builder = AsyncSmtpTransport::<Tokio1Executor>::relay(&req.smtp_host)
+        .map_err(|e| SmtpError::Build(e.to_string()))?
+        .port(req.smtp_port)
+        .tls(Tls::Required(tls_params));
 
     transport_builder = match req.auth_scheme.as_str() {
         "xoauth2" => {

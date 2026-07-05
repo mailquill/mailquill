@@ -27,12 +27,20 @@ pub async fn fresh_access_token(
             .map_err(|e| e.to_string())?;
     let creds_enc = creds_enc.ok_or("account not found")?;
 
-    let creds_bytes = credential_key.decrypt(&creds_enc).map_err(|e| e.to_string())?;
+    let creds_bytes = credential_key
+        .decrypt(&creds_enc)
+        .map_err(|e| e.to_string())?;
     let mut creds: serde_json::Value =
         serde_json::from_slice(&creds_bytes).map_err(|e| e.to_string())?;
 
-    let access_token = creds["oauth_access_token"].as_str().unwrap_or("").to_owned();
-    let refresh_token = creds["oauth_refresh_token"].as_str().unwrap_or("").to_owned();
+    let access_token = creds["oauth_access_token"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    let refresh_token = creds["oauth_refresh_token"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
     if access_token.is_empty() && refresh_token.is_empty() {
         return Ok(None);
     }

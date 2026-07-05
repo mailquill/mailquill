@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use sqlx::AnyPool;
+use std::sync::Arc;
 
 pub type DbPool = AnyPool;
 

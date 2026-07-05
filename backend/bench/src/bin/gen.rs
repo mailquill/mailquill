@@ -18,9 +18,15 @@ async fn main() -> anyhow::Result<()> {
     let min: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(30_000);
     let max: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(50_000);
 
-    println!("generating {accounts} mailboxes, {min}-{max} messages each -> {}", path.display());
+    println!(
+        "generating {accounts} mailboxes, {min}-{max} messages each -> {}",
+        path.display()
+    );
     let t = Instant::now();
     let total = bench::generate(&path, accounts, min, max).await?;
-    println!("done: {total} messages in {:.1}s", t.elapsed().as_secs_f64());
+    println!(
+        "done: {total} messages in {:.1}s",
+        t.elapsed().as_secs_f64()
+    );
     Ok(())
 }

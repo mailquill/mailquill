@@ -30,7 +30,10 @@ impl IntoResponse for AppError {
             AppError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             AppError::Internal(m) => {
                 tracing::error!("internal error: {m}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".into(),
+                )
             }
         };
         (status, Json(json!({ "error": msg }))).into_response()

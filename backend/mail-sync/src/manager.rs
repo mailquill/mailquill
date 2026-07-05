@@ -85,7 +85,8 @@ impl SyncManager {
         let self_tx = tx.clone();
 
         let handle = tokio::spawn(async move {
-            crate::sync::run_sync_task(account_id_clone, user_id_clone, rx, self_tx, app_state).await;
+            crate::sync::run_sync_task(account_id_clone, user_id_clone, rx, self_tx, app_state)
+                .await;
         });
 
         let mut tasks = self.tasks.lock().await;

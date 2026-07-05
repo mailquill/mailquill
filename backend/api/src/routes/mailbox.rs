@@ -63,7 +63,12 @@ pub async fn unified_counts(
     )
     .fetch_all(&user_db)
     .await?;
-    let unread = |t: &str| rows.iter().find(|(ft, _)| ft == t).map(|(_, c)| *c).unwrap_or(0);
+    let unread = |t: &str| {
+        rows.iter()
+            .find(|(ft, _)| ft == t)
+            .map(|(_, c)| *c)
+            .unwrap_or(0)
+    };
 
     let starred: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE is_flagged = 1 AND is_deleted = 0")
@@ -105,46 +110,50 @@ pub async fn bulk_action(
     let user_db = state.user_db_pool.get(&user.0).await?;
 
     // Resolve the scope into a WHERE predicate plus its bind values.
-    let (where_sql, binds): (String, Vec<String>) =
-        if let (Some(account_id), Some(folder)) = (&req.account_id, &req.folder) {
-            let fid: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM folders WHERE account_id = ? AND full_path = ? COLLATE NOCASE LIMIT 1",
-            )
-            .bind(account_id)
-            .bind(folder)
-            .fetch_optional(&user_db)
-            .await?;
-            (
-                "folder_id = ? AND is_deleted = 0".into(),
-                vec![fid.ok_or(AppError::NotFound)?],
-            )
-        } else {
-            let (mut pred, mut binds): (String, Vec<String>) =
-                match req.view.as_deref().unwrap_or("inbox") {
-                    "starred" => ("is_flagged = 1 AND is_deleted = 0".into(), vec![]),
-                    v => {
-                        let ft = match v {
-                            "sent" => "SENT",
-                            "drafts" => "DRAFTS",
-                            "archive" => "ARCHIVE",
-                            "spam" => "SPAM",
-                            "trash" => "TRASH",
-                            _ => "INBOX",
-                        };
-                        (
+    let (where_sql, binds): (String, Vec<String>) = if let (Some(account_id), Some(folder)) =
+        (&req.account_id, &req.folder)
+    {
+        let fid: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM folders WHERE account_id = ? AND full_path = ? COLLATE NOCASE LIMIT 1",
+        )
+        .bind(account_id)
+        .bind(folder)
+        .fetch_optional(&user_db)
+        .await?;
+        (
+            "folder_id = ? AND is_deleted = 0".into(),
+            vec![fid.ok_or(AppError::NotFound)?],
+        )
+    } else {
+        let (mut pred, mut binds): (String, Vec<String>) = match req
+            .view
+            .as_deref()
+            .unwrap_or("inbox")
+        {
+            "starred" => ("is_flagged = 1 AND is_deleted = 0".into(), vec![]),
+            v => {
+                let ft = match v {
+                    "sent" => "SENT",
+                    "drafts" => "DRAFTS",
+                    "archive" => "ARCHIVE",
+                    "spam" => "SPAM",
+                    "trash" => "TRASH",
+                    _ => "INBOX",
+                };
+                (
                             "folder_id IN (SELECT id FROM folders WHERE folder_type = ?) AND is_deleted = 0".into(),
                             vec![ft.to_string()],
                         )
-                    }
-                };
-            // Scope a view to one account (per-mailbox starred select-all) so the
-            // action never spills over to other accounts' messages.
-            if let Some(account_id) = &req.account_id {
-                pred.push_str(" AND account_id = ?");
-                binds.push(account_id.clone());
             }
-            (pred, binds)
         };
+        // Scope a view to one account (per-mailbox starred select-all) so the
+        // action never spills over to other accounts' messages.
+        if let Some(account_id) = &req.account_id {
+            pred.push_str(" AND account_id = ?");
+            binds.push(account_id.clone());
+        }
+        (pred, binds)
+    };
 
     let set_sql = match req.action.as_str() {
         "read" => "is_read = 1",
@@ -155,8 +164,9 @@ pub async fn bulk_action(
         _ => return Err(AppError::Unprocessable("invalid action".into())),
     };
 
-    let sql =
-        format!("UPDATE messages SET {set_sql} WHERE {where_sql} RETURNING account_id, uid, folder_id");
+    let sql = format!(
+        "UPDATE messages SET {set_sql} WHERE {where_sql} RETURNING account_id, uid, folder_id"
+    );
     let mut q = sqlx::query_as::<_, (String, i64, String)>(&sql);
     for b in &binds {
         q = q.bind(b);
@@ -193,19 +203,40 @@ pub async fn bulk_action(
                 "read" => {
                     state2
                         .sync_manager
-                        .queue_imap_flag(user_id.clone(), account_id, uid, full_path, "seen".into(), true)
+                        .queue_imap_flag(
+                            user_id.clone(),
+                            account_id,
+                            uid,
+                            full_path,
+                            "seen".into(),
+                            true,
+                        )
                         .await
                 }
                 "flag" => {
                     state2
                         .sync_manager
-                        .queue_imap_flag(user_id.clone(), account_id, uid, full_path, "flagged".into(), true)
+                        .queue_imap_flag(
+                            user_id.clone(),
+                            account_id,
+                            uid,
+                            full_path,
+                            "flagged".into(),
+                            true,
+                        )
                         .await
                 }
                 "archive" => {
                     state2
                         .sync_manager
-                        .queue_imap_move(user_id.clone(), account_id, uid, full_path, "Archive".into(), false)
+                        .queue_imap_move(
+                            user_id.clone(),
+                            account_id,
+                            uid,
+                            full_path,
+                            "Archive".into(),
+                            false,
+                        )
                         .await
                 }
                 "delete" => {
@@ -218,7 +249,14 @@ pub async fn bulk_action(
                     } else {
                         state2
                             .sync_manager
-                            .queue_imap_move(user_id.clone(), account_id, uid, full_path, "Trash".into(), false)
+                            .queue_imap_move(
+                                user_id.clone(),
+                                account_id,
+                                uid,
+                                full_path,
+                                "Trash".into(),
+                                false,
+                            )
                             .await
                     }
                 }
@@ -238,11 +276,10 @@ pub async fn list_folders(
     let user_db = state.user_db_pool.get(&user.0).await?;
 
     // Check account exists
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&user_db)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
+        .bind(&account_id)
+        .fetch_optional(&user_db)
+        .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
@@ -256,23 +293,29 @@ pub async fn list_folders(
 
     let folders: Vec<_> = rows
         .into_iter()
-        .map(|(id, name, full_path, folder_type, unread_count, sync_enabled)| {
-            // `full_path` stays the raw IMAP identifier (used for commands and
-            // routing); `folder_name`/`folder_name_server` carry the decoded and
-            // raw leaf names for display.
-            let raw_leaf = full_path.rsplit('/').next().unwrap_or(&full_path).to_string();
-            json!({
-                "id": id,
-                "name": name,
-                "full_path": full_path,
-                "folder_name": crate::imap_utf7::decode(&raw_leaf),
-                "folder_name_server": raw_leaf,
-                "folder_type": folder_type,
-                "unread_count": unread_count,
-                "sync_enabled": sync_enabled != 0,
-                "account_id": account_id,
-            })
-        })
+        .map(
+            |(id, name, full_path, folder_type, unread_count, sync_enabled)| {
+                // `full_path` stays the raw IMAP identifier (used for commands and
+                // routing); `folder_name`/`folder_name_server` carry the decoded and
+                // raw leaf names for display.
+                let raw_leaf = full_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&full_path)
+                    .to_string();
+                json!({
+                    "id": id,
+                    "name": name,
+                    "full_path": full_path,
+                    "folder_name": crate::imap_utf7::decode(&raw_leaf),
+                    "folder_name_server": raw_leaf,
+                    "folder_type": folder_type,
+                    "unread_count": unread_count,
+                    "sync_enabled": sync_enabled != 0,
+                    "account_id": account_id,
+                })
+            },
+        )
         .collect();
 
     Ok(Json(folders))
@@ -297,12 +340,13 @@ pub async fn set_folder_sync(
         .unwrap_or_else(|_| std::borrow::Cow::Borrowed(&folder_path))
         .into_owned();
 
-    let res = sqlx::query("UPDATE folders SET sync_enabled = ? WHERE account_id = ? AND full_path = ?")
-        .bind(req.sync_enabled as i64)
-        .bind(&account_id)
-        .bind(&folder_path)
-        .execute(&user_db)
-        .await?;
+    let res =
+        sqlx::query("UPDATE folders SET sync_enabled = ? WHERE account_id = ? AND full_path = ?")
+            .bind(req.sync_enabled as i64)
+            .bind(&account_id)
+            .bind(&folder_path)
+            .execute(&user_db)
+            .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
@@ -328,13 +372,12 @@ pub async fn list_folder_messages(
         .unwrap_or_else(|_| std::borrow::Cow::Borrowed(&folder_path))
         .into_owned();
 
-    let exact: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM folders WHERE account_id = ? AND full_path = ?",
-    )
-    .bind(&account_id)
-    .bind(&folder_path)
-    .fetch_optional(&user_db)
-    .await?;
+    let exact: Option<String> =
+        sqlx::query_scalar("SELECT id FROM folders WHERE account_id = ? AND full_path = ?")
+            .bind(&account_id)
+            .bind(&folder_path)
+            .fetch_optional(&user_db)
+            .await?;
     // Fall back to a case-insensitive match so a bookmarked/typed `inbox`
     // resolves to the canonical `INBOX` folder instead of 404ing.
     let folder_id = match exact {
@@ -349,7 +392,14 @@ pub async fn list_folder_messages(
         .ok_or(AppError::NotFound)?,
     };
 
-    let page = db::queries::folder_page(&user_db, &folder_id, q.cursor.as_deref(), limit, q.unread.unwrap_or(false)).await?;
+    let page = db::queries::folder_page(
+        &user_db,
+        &folder_id,
+        q.cursor.as_deref(),
+        limit,
+        q.unread.unwrap_or(false),
+    )
+    .await?;
 
     Ok(Json(json!({
         "account_id": account_id,

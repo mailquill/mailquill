@@ -8,6 +8,7 @@ pub mod events;
 pub mod mailbox;
 pub mod messages;
 pub mod oauth;
+pub mod pgp;
 pub mod push_subscriptions;
 pub mod rules;
 pub mod search;

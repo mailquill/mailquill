@@ -6,6 +6,7 @@ import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { parseFromAddr } from '@/shared/lib/format'
 import { isValidEmail } from '@/shared/lib/email'
 import { useUiPrefs } from '@/shared/hooks/useUiPrefs'
+import { useContactSearch } from '@/shared/hooks/useContacts'
 
 interface RecipientChipsProps {
   label: string
@@ -21,6 +22,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus }:
   const [focused, setFocused] = useState(false)
   const limit = useUiPrefs((s) => s.maxRecipients)
   const atLimit = value.length >= limit
+  const { data: suggestions = [] } = useContactSearch(focused ? draft : '')
 
   function commit(raw: string) {
     const parts = raw
@@ -51,6 +53,12 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus }:
       onChange(value.slice(0, -1))
       setDraft(value[value.length - 1])
     }
+  }
+
+  function selectSuggestion(displayName: string, email: string) {
+    const recipient = displayName ? `${displayName} <${email}>` : email
+    if (!value.includes(recipient)) onChange([...value, recipient])
+    setDraft('')
   }
 
   return (
@@ -110,19 +118,51 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus }:
           )
         })}
         {!atLimit && (
-          <input
-            autoFocus={autoFocus}
-            value={draft}
-            onChange={(e) => setDraft(e.currentTarget.value)}
-            onKeyDown={onKeyDown}
-            onFocus={() => setFocused(true)}
-            onBlur={() => {
-              setFocused(false)
-              if (draft.trim()) commit(draft)
-            }}
-            placeholder={value.length ? '' : t('compose.placeholder')}
-            className="min-w-[140px] flex-1 bg-transparent py-0.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
-          />
+          <span className="relative min-w-[180px] flex-1">
+            <input
+              autoFocus={autoFocus}
+              value={draft}
+              onChange={(e) => setDraft(e.currentTarget.value)}
+              onKeyDown={onKeyDown}
+              onFocus={() => setFocused(true)}
+              onBlur={() => {
+                window.setTimeout(() => {
+                  setFocused(false)
+                  if (draft.trim()) commit(draft)
+                }, 120)
+              }}
+              placeholder={value.length ? '' : t('compose.placeholder')}
+              className="w-full bg-transparent py-0.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+            />
+            {focused && draft.trim().length >= 2 && suggestions.length > 0 && (
+              <span className="absolute left-0 top-7 z-50 flex w-[320px] max-w-[80vw] flex-col overflow-hidden rounded-md border border-border bg-popover shadow-lg">
+                {suggestions.flatMap((contact) =>
+                  contact.emails.slice(0, 2).map((email) => (
+                    <button
+                      key={`${contact.id}-${email.value}`}
+                      type="button"
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => selectSuggestion(contact.display_name ?? '', email.value)}
+                      className="flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent"
+                    >
+                      <span
+                        className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold uppercase text-white"
+                        style={{ backgroundColor: accountColor(contact.id) }}
+                      >
+                        {accountInitials(contact.display_name ?? email.value)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium text-foreground">
+                          {contact.display_name ?? email.value}
+                        </span>
+                        <span className="block truncate font-mono text-xs text-muted-foreground">{email.value}</span>
+                      </span>
+                    </button>
+                  )),
+                )}
+              </span>
+            )}
+          </span>
         )}
       </div>
       {focused && !atLimit && <p className="text-[11px] text-muted-foreground">{t('compose.hint')}</p>}

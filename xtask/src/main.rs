@@ -62,7 +62,8 @@ fn build(root: &Path) -> Result<(), String> {
 
     println!("==> Building backend (release)…");
     let mut cmd = cargo();
-    cmd.current_dir(root).args(["build", "--release", "-p", "api"]);
+    cmd.current_dir(root)
+        .args(["build", "--release", "-p", "api"]);
     run(cmd)
 }
 
@@ -100,11 +101,9 @@ fn ensure_frontend_dist(root: &Path) -> Result<(), String> {
     }
 
     if !frontend.join("dist").join("index.html").is_file() {
-        return Err(
-            "frontend/dist/index.html missing — cannot embed the UI. \
+        return Err("frontend/dist/index.html missing — cannot embed the UI. \
              Run without SKIP_FRONTEND=1 to build the frontend first."
-                .to_string(),
-        );
+            .to_string());
     }
     Ok(())
 }

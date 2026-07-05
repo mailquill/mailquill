@@ -65,9 +65,11 @@ pub async fn list_rules(
     Extension(user): Extension<UserId>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
-    let rows: Vec<RuleRow> = sqlx::query_as(&format!("SELECT {COLS} FROM inbox_rules ORDER BY created_at DESC"))
-        .fetch_all(&user_db)
-        .await?;
+    let rows: Vec<RuleRow> = sqlx::query_as(&format!(
+        "SELECT {COLS} FROM inbox_rules ORDER BY created_at DESC"
+    ))
+    .fetch_all(&user_db)
+    .await?;
     Ok(Json(rows.into_iter().map(Rule::from).collect::<Vec<_>>()))
 }
 
@@ -161,7 +163,10 @@ pub async fn apply_sieve(
     let (imap_host, enc) = row.ok_or(AppError::NotFound)?;
 
     let creds: Value = serde_json::from_slice(
-        &state.credential_key.decrypt(&enc).map_err(|e| AppError::Internal(e.to_string()))?,
+        &state
+            .credential_key
+            .decrypt(&enc)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
     )
     .map_err(|e| AppError::Internal(e.to_string()))?;
     if creds["oauth_access_token"].as_str().is_some() {
@@ -182,18 +187,29 @@ pub async fn apply_sieve(
 
     let compiled: Vec<crate::sieve::CompiledRule> = rows
         .into_iter()
-        .map(|(name, match_all, conditions, actions)| crate::sieve::CompiledRule {
-            name,
-            match_all,
-            conditions: serde_json::from_str(&conditions).unwrap_or_default(),
-            actions: serde_json::from_str(&actions).unwrap_or_default(),
-        })
+        .map(
+            |(name, match_all, conditions, actions)| crate::sieve::CompiledRule {
+                name,
+                match_all,
+                conditions: serde_json::from_str(&conditions).unwrap_or_default(),
+                actions: serde_json::from_str(&actions).unwrap_or_default(),
+            },
+        )
         .collect();
 
     let script = crate::sieve::compile_sieve(&compiled);
-    crate::sieve::upload_script(&imap_host, 4190, &username, &password, "mailtastic", &script)
-        .await
-        .map_err(AppError::BadGateway)?;
+    crate::sieve::upload_script(
+        &imap_host,
+        4190,
+        &username,
+        &password,
+        "mailtastic",
+        &script,
+    )
+    .await
+    .map_err(AppError::BadGateway)?;
 
-    Ok(Json(serde_json::json!({ "uploaded": true, "rules": compiled.len() })))
+    Ok(Json(
+        serde_json::json!({ "uploaded": true, "rules": compiled.len() }),
+    ))
 }

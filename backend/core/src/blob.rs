@@ -137,7 +137,10 @@ impl S3BlobStore {
             .build()
             .map_err(|e| format!("failed to build S3 store: {e}"))?;
 
-        Ok(Self { store, _bucket: bucket })
+        Ok(Self {
+            store,
+            _bucket: bucket,
+        })
     }
 }
 
@@ -164,9 +167,7 @@ impl BlobStore for S3BlobStore {
                     .map_err(|e| BlobError::Storage(e.to_string()))?;
                 Ok(bytes)
             }
-            Err(object_store::Error::NotFound { .. }) => {
-                Err(BlobError::NotFound(key.to_string()))
-            }
+            Err(object_store::Error::NotFound { .. }) => Err(BlobError::NotFound(key.to_string())),
             Err(e) => Err(BlobError::Storage(e.to_string())),
         }
     }

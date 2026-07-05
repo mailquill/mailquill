@@ -16,7 +16,9 @@ fn bench_db_path() -> PathBuf {
 
 async fn setup(path: &std::path::Path) -> SqlitePool {
     let needs_gen = !path.exists()
-        || std::fs::metadata(path).map(|m| m.len() < 1_000_000).unwrap_or(true);
+        || std::fs::metadata(path)
+            .map(|m| m.len() < 1_000_000)
+            .unwrap_or(true);
     if needs_gen {
         eprintln!("generating benchmark db at {} ...", path.display());
         bench::generate(path, 5, 30_000, 50_000)

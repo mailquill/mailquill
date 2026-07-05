@@ -12,7 +12,10 @@ use crate::state::AppState;
 #[async_trait::async_trait]
 impl SyncAppState for AppState {
     async fn user_db(&self, user_id: &str) -> Result<sqlx::SqlitePool, String> {
-        self.user_db_pool.get(user_id).await.map_err(|e| e.to_string())
+        self.user_db_pool
+            .get(user_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     fn blob_store(&self) -> Arc<dyn BlobStore> {

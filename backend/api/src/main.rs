@@ -7,9 +7,11 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Extension, Router,
 };
-use mailquill_core::{blob::create_blob_store, crypto::CredentialKey, jwt::JwtKey, pii::init_pii_mode};
 use db::pool::UserDbPool;
 use mail_sync::manager::SyncManager;
+use mailquill_core::{
+    blob::create_blob_store, crypto::CredentialKey, jwt::JwtKey, pii::init_pii_mode,
+};
 use rust_embed::RustEmbed;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::sync::Arc;
@@ -79,7 +81,9 @@ async fn main() {
     let data_dir = settings.data_dir.clone();
     phishing::init(
         &data_dir,
-        settings.openphish_enabled.then(|| settings.openphish_feed_url.clone()),
+        settings
+            .openphish_enabled
+            .then(|| settings.openphish_feed_url.clone()),
     )
     .await;
     let app_db = open_app_db(&data_dir).await;
@@ -87,6 +91,7 @@ async fn main() {
     let user_db_pool = UserDbPool::new(&data_dir);
 
     let sync_manager = Arc::new(SyncManager::new());
+    let contact_sync_manager = Arc::new(contact_sync::ContactSyncManager::new());
     let vapid = load_vapid_config(&settings);
     let web_push_client = vapid
         .as_ref()
@@ -106,6 +111,7 @@ async fn main() {
         user_db_pool,
         blob_store,
         sync_manager,
+        contact_sync_manager,
         credential_key,
         jwt_key,
         vapid,
@@ -125,71 +131,256 @@ async fn main() {
         // `oauth_start` is a top-level browser redirect, so it cannot carry an
         // Authorization header — it authenticates from a short-lived `token`
         // query parameter validated inside the handler instead.
-        .route("/auth/oauth/{provider}/start", get(routes::oauth::oauth_start))
-        .route("/auth/oauth/{provider}/callback", get(routes::oauth::oauth_callback))
+        .route(
+            "/auth/oauth/{provider}/start",
+            get(routes::oauth::oauth_start),
+        )
+        .route(
+            "/auth/oauth/{provider}/callback",
+            get(routes::oauth::oauth_callback),
+        )
         // SSE: EventSource can't set an Authorization header, so this validates
         // a `?token=` query parameter itself (like oauth_start above).
         .route("/events", get(routes::events::events_stream))
-        .route("/auth/me", get(routes::auth::me).layer(axum_middleware::from_fn_with_state(state.clone(), middleware::require_auth)));
+        .route(
+            "/auth/me",
+            get(routes::auth::me).layer(axum_middleware::from_fn_with_state(
+                state.clone(),
+                middleware::require_auth,
+            )),
+        );
 
     let protected = Router::new()
         // Accounts
-        .route("/accounts", post(routes::accounts::add_account).get(routes::accounts::list_accounts))
-        .route("/accounts/{id}", get(routes::accounts::get_account).put(routes::accounts::update_account).delete(routes::accounts::delete_account))
+        .route(
+            "/accounts",
+            post(routes::accounts::add_account).get(routes::accounts::list_accounts),
+        )
+        .route(
+            "/accounts/{id}",
+            get(routes::accounts::get_account)
+                .put(routes::accounts::update_account)
+                .delete(routes::accounts::delete_account),
+        )
         .route("/accounts/{id}/sync", post(routes::accounts::trigger_sync))
-        .route("/accounts/{id}/sync-status", get(routes::accounts::sync_status))
-        .route("/accounts/{id}/aliases", post(routes::accounts::add_alias).get(routes::accounts::list_aliases))
-        .route("/accounts/{id}/aliases/{alias_id}", patch(routes::accounts::update_alias).delete(routes::accounts::delete_alias))
+        .route(
+            "/accounts/{id}/sync-status",
+            get(routes::accounts::sync_status),
+        )
+        .route(
+            "/accounts/{id}/aliases",
+            post(routes::accounts::add_alias).get(routes::accounts::list_aliases),
+        )
+        .route(
+            "/accounts/{id}/aliases/{alias_id}",
+            patch(routes::accounts::update_alias).delete(routes::accounts::delete_alias),
+        )
         .route("/accounts/{id}/sync-dav", post(routes::dav::sync_dav))
+        .route(
+            "/accounts/{id}/caldav-discover",
+            get(routes::dav::caldav_discover),
+        )
         .route("/accounts/{id}/folders", get(routes::mailbox::list_folders))
-        .route("/accounts/{id}/folders/{folder}/sync", patch(routes::mailbox::set_folder_sync))
-        .route("/accounts/{id}/folders/{folder}/messages", get(routes::mailbox::list_folder_messages))
+        .route(
+            "/accounts/{id}/folders/{folder}/sync",
+            patch(routes::mailbox::set_folder_sync),
+        )
+        .route(
+            "/accounts/{id}/folders/{folder}/messages",
+            get(routes::mailbox::list_folder_messages),
+        )
         // Mailbox
         .route("/mailbox/unified", get(routes::mailbox::unified_inbox))
-        .route("/mailbox/unified/counts", get(routes::mailbox::unified_counts))
+        .route(
+            "/mailbox/unified/counts",
+            get(routes::mailbox::unified_counts),
+        )
         .route("/mailbox/bulk", post(routes::mailbox::bulk_action))
         // Messages
         .route("/messages/{id}", get(routes::messages::get_message))
         .route("/messages/{id}/read", patch(routes::messages::mark_read))
         .route("/messages/{id}/flag", patch(routes::messages::toggle_flag))
-        .route("/messages/{id}/archive", post(routes::messages::archive_message))
+        .route(
+            "/messages/{id}/archive",
+            post(routes::messages::archive_message),
+        )
+        .route(
+            "/messages/{id}/not-spam",
+            post(routes::messages::mark_not_spam),
+        )
         .route("/messages/{id}", delete(routes::messages::delete_message))
         .route("/messages/{id}/move", post(routes::messages::move_message))
-        .route("/messages/{id}/reanalyse", post(routes::messages::reanalyse_message))
-        .route("/attachments/{id}", get(routes::messages::download_attachment))
+        .route(
+            "/messages/{id}/reanalyse",
+            post(routes::messages::reanalyse_message),
+        )
+        .route(
+            "/attachments/{id}",
+            get(routes::messages::download_attachment),
+        )
         // Threads
         .route("/threads/{thread_id}", get(routes::threads::get_thread))
-        .route("/threads/{thread_id}/archive", post(routes::threads::archive_thread))
-        .route("/threads/{thread_id}/delete", post(routes::threads::delete_thread))
-        .route("/threads/{thread_id}/read", patch(routes::threads::mark_thread_read))
+        .route(
+            "/threads/{thread_id}/archive",
+            post(routes::threads::archive_thread),
+        )
+        .route(
+            "/threads/{thread_id}/delete",
+            post(routes::threads::delete_thread),
+        )
+        .route(
+            "/threads/{thread_id}/read",
+            patch(routes::threads::mark_thread_read),
+        )
         // Send
         .route("/send", post(routes::send::send_email))
         // Search
         .route("/search", get(routes::search::search))
         // Server autodiscovery for the account wizard
         .route("/discover", get(routes::discover::discover))
+        // OpenPGP
+        .route(
+            "/pgp-keys",
+            get(routes::pgp::list_pgp_keys).post(routes::pgp::create_pgp_key),
+        )
+        .route("/pgp-keys/{id}/blob", get(routes::pgp::get_pgp_key_blob))
+        .route(
+            "/pgp-keys/{id}/primary",
+            put(routes::pgp::set_primary_pgp_key),
+        )
+        .route("/pgp-keys/{id}", delete(routes::pgp::delete_pgp_key))
+        .route("/keys/discover", get(routes::pgp::discover_key))
+        .route(
+            "/contact-keys",
+            get(routes::pgp::get_contact_key).post(routes::pgp::create_contact_key),
+        )
         // Contacts
-        .route("/contacts", get(routes::contacts::list_contacts).post(routes::contacts::create_contact))
-        .route("/contacts/{id}", delete(routes::contacts::delete_contact))
+        .route(
+            "/contact-accounts",
+            get(routes::contacts::list_accounts).post(routes::contacts::create_account),
+        )
+        .route(
+            "/contact-accounts/{id}",
+            delete(routes::contacts::delete_account),
+        )
+        .route(
+            "/contact-accounts/{id}/sync",
+            post(routes::contacts::trigger_sync),
+        )
+        .route(
+            "/contact-accounts/{id}/sync-status",
+            get(routes::contacts::account_sync_status),
+        )
+        .route("/contacts/search", get(routes::contacts::search_contacts))
+        .route(
+            "/contacts",
+            get(routes::contacts::list_contacts).post(routes::contacts::create_contact),
+        )
+        .route(
+            "/contacts/{id}",
+            put(routes::contacts::update_contact).delete(routes::contacts::delete_contact),
+        )
+        .route("/contacts/{id}/photo", get(routes::contacts::get_photo))
         // Calendar
-        .route("/calendars", get(routes::calendar::list_calendars).post(routes::calendar::create_calendar))
-        .route("/calendars/{id}", put(routes::calendar::update_calendar).delete(routes::calendar::delete_calendar))
-        .route("/calendar/events", get(routes::calendar::list_events).post(routes::calendar::create_event))
-        .route("/calendar/events/{id}", put(routes::calendar::update_event).delete(routes::calendar::delete_event))
+        .route(
+            "/calendars",
+            get(routes::calendar::list_calendars).post(routes::calendar::create_calendar),
+        )
+        .route(
+            "/calendars/{id}",
+            put(routes::calendar::update_calendar).delete(routes::calendar::delete_calendar),
+        )
+        .route(
+            "/calendar-accounts",
+            get(routes::calendar::list_accounts).post(routes::calendar::create_account),
+        )
+        .route(
+            "/calendar-accounts/{id}",
+            delete(routes::calendar::delete_account),
+        )
+        .route(
+            "/calendar-accounts/{id}/sync-status",
+            get(routes::calendar::account_sync_status),
+        )
+        .route(
+            "/calendar/events",
+            get(routes::calendar::list_events).post(routes::calendar::create_event),
+        )
+        .route(
+            "/calendar/events/{id}",
+            put(routes::calendar::update_event).delete(routes::calendar::delete_event),
+        )
+        .route(
+            "/calendar-events",
+            get(routes::calendar::list_events).post(routes::calendar::create_event),
+        )
+        .route(
+            "/calendar-events/{id}",
+            put(routes::calendar::update_event).delete(routes::calendar::delete_event),
+        )
+        .route(
+            "/meeting-invitations",
+            get(routes::calendar::list_invitations),
+        )
+        .route(
+            "/meeting-invitations/{id}/rsvp",
+            post(routes::calendar::rsvp_invitation),
+        )
         // Rules
-        .route("/rules", get(routes::rules::list_rules).post(routes::rules::create_rule))
-        .route("/rules/{id}", put(routes::rules::update_rule).delete(routes::rules::delete_rule))
-        .route("/accounts/{id}/apply-sieve", post(routes::rules::apply_sieve))
+        .route(
+            "/rules",
+            get(routes::rules::list_rules).post(routes::rules::create_rule),
+        )
+        .route(
+            "/rules/{id}",
+            put(routes::rules::update_rule).delete(routes::rules::delete_rule),
+        )
+        .route(
+            "/accounts/{id}/apply-sieve",
+            post(routes::rules::apply_sieve),
+        )
         // Settings
-        .route("/settings", get(routes::settings::get_settings).patch(routes::settings::patch_settings))
-        .route("/settings/image-allowlist", get(routes::settings::list_image_allowlist).post(routes::settings::add_image_allowlist))
-        .route("/settings/image-allowlist/{sender}", delete(routes::settings::remove_image_allowlist))
-        .route("/settings/phishing/reset", post(routes::settings::reset_phishing_analysis))
+        .route(
+            "/settings",
+            get(routes::settings::get_settings).patch(routes::settings::patch_settings),
+        )
+        .route(
+            "/settings/image-allowlist",
+            get(routes::settings::list_image_allowlist).post(routes::settings::add_image_allowlist),
+        )
+        .route(
+            "/settings/image-allowlist/{sender}",
+            delete(routes::settings::remove_image_allowlist),
+        )
+        .route(
+            "/settings/brands",
+            get(routes::settings::list_brands).post(routes::settings::add_brand),
+        )
+        .route(
+            "/settings/brands/{id}",
+            delete(routes::settings::delete_brand),
+        )
+        .route(
+            "/settings/phishing/reset",
+            post(routes::settings::reset_phishing_analysis),
+        )
         // Push subscriptions
-        .route("/push-subscriptions/vapid-public-key", get(routes::push_subscriptions::vapid_public_key))
-        .route("/push-subscriptions", post(routes::push_subscriptions::create_subscription))
-        .route("/push-subscriptions/{id}", delete(routes::push_subscriptions::delete_subscription))
-        .layer(axum_middleware::from_fn_with_state(state.clone(), middleware::require_auth));
+        .route(
+            "/push-subscriptions/vapid-public-key",
+            get(routes::push_subscriptions::vapid_public_key),
+        )
+        .route(
+            "/push-subscriptions",
+            post(routes::push_subscriptions::create_subscription),
+        )
+        .route(
+            "/push-subscriptions/{id}",
+            delete(routes::push_subscriptions::delete_subscription),
+        )
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::require_auth,
+        ));
 
     let app = Router::new()
         .route("/api/health", get(health))
@@ -214,7 +405,10 @@ async fn main() {
 
 fn load_vapid_config(settings: &config::Settings) -> Option<Arc<VapidConfig>> {
     let public_key = settings.vapid_public_key.as_ref().filter(|v| !v.is_empty());
-    let private_key = settings.vapid_private_key.as_ref().filter(|v| !v.is_empty());
+    let private_key = settings
+        .vapid_private_key
+        .as_ref()
+        .filter(|v| !v.is_empty());
 
     match (public_key, private_key) {
         (Some(public_key), Some(private_key)) => Some(Arc::new(VapidConfig {
@@ -266,16 +460,22 @@ async fn restart_existing_accounts(state: &AppState, data_dir: &str) {
             Ok(db) => db,
             Err(_) => continue,
         };
-        let account_ids: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM email_accounts")
-                .fetch_all(&db)
-                .await
-                .unwrap_or_default();
+        let account_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM email_accounts")
+            .fetch_all(&db)
+            .await
+            .unwrap_or_default();
         for account_id in account_ids {
             state
                 .sync_manager
                 .start_account(account_id, user_id.clone(), Arc::new(state.clone()))
                 .await;
+        }
+        let contact_account_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM contact_accounts")
+            .fetch_all(&db)
+            .await
+            .unwrap_or_default();
+        for account_id in contact_account_ids {
+            routes::contacts::spawn_contact_sync_task(state.clone(), user_id.clone(), account_id, true).await;
         }
     }
 }

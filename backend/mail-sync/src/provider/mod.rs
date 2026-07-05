@@ -130,27 +130,45 @@ pub trait MailProvider: Send {
 
     /// Read/flagged/deleted state for a uid set `(uid, seen, flagged, deleted)`,
     /// to reconcile already-synced messages.
-    async fn fetch_flags(&mut self, folder: &str, uid_set: &str)
-        -> Result<Vec<(u32, bool, bool, bool)>, ProviderError>;
+    async fn fetch_flags(
+        &mut self,
+        folder: &str,
+        uid_set: &str,
+    ) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError>;
 
     /// Envelope + raw header block per message (lazy sync).
-    async fn fetch_headers(&mut self, folder: &str, uid_set: &str)
-        -> Result<Vec<FetchedMessage>, ProviderError>;
+    async fn fetch_headers(
+        &mut self,
+        folder: &str,
+        uid_set: &str,
+    ) -> Result<Vec<FetchedMessage>, ProviderError>;
 
     /// Complete raw RFC 2822 messages (full sync).
-    async fn fetch_full(&mut self, folder: &str, uid_set: &str)
-        -> Result<Vec<FetchedMessage>, ProviderError>;
+    async fn fetch_full(
+        &mut self,
+        folder: &str,
+        uid_set: &str,
+    ) -> Result<Vec<FetchedMessage>, ProviderError>;
 
     /// Complete raw RFC 2822 message for a single uid (on-demand body fetch).
     async fn fetch_raw(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>, ProviderError>;
 
     /// Set/clear a normalized flag ("seen" / "flagged" / "deleted").
-    async fn set_flag(&mut self, folder: &str, uid: u32, flag: &str, value: bool)
-        -> Result<(), ProviderError>;
+    async fn set_flag(
+        &mut self,
+        folder: &str,
+        uid: u32,
+        flag: &str,
+        value: bool,
+    ) -> Result<(), ProviderError>;
 
     /// Move a message between folders.
-    async fn move_message(&mut self, src_folder: &str, uid: u32, dest_folder: &str)
-        -> Result<(), ProviderError>;
+    async fn move_message(
+        &mut self,
+        src_folder: &str,
+        uid: u32,
+        dest_folder: &str,
+    ) -> Result<(), ProviderError>;
 
     /// Permanently delete (IMAP: \Deleted + EXPUNGE).
     async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError>;

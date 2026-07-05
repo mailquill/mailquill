@@ -17,7 +17,9 @@ pub async fn open_pool(path: &Path) -> anyhow::Result<SqlitePool> {
         .filename(path)
         .create_if_missing(true);
     let pool = SqlitePool::connect_with(opts).await?;
-    sqlx::query(db::migrations::WAL_PRAGMAS).execute(&pool).await?;
+    sqlx::query(db::migrations::WAL_PRAGMAS)
+        .execute(&pool)
+        .await?;
     db::migrations::run_mail_migrations(&pool)
         .await
         .map_err(|e| anyhow::anyhow!("migrations: {e}"))?;

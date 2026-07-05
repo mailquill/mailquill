@@ -8,6 +8,7 @@ pub struct ParsedBody {
     pub html: Option<String>,
     pub attachments: Vec<Attachment>,
     pub has_calendar: bool,
+    pub calendar_parts: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -47,7 +48,12 @@ fn walk_parts(part: &ParsedMail, body: &mut ParsedBody) {
     let content_id = part
         .get_headers()
         .get_first_value("Content-ID")
-        .map(|v| v.trim().trim_start_matches('<').trim_end_matches('>').to_owned())
+        .map(|v| {
+            v.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_owned()
+        })
         .filter(|v| !v.is_empty());
 
     // Inline images often carry only a Content-ID, no Content-Disposition —
@@ -57,6 +63,14 @@ fn walk_parts(part: &ParsedMail, body: &mut ParsedBody) {
         || (content_id.is_some() && !ct.starts_with("text/") && !ct.starts_with("multipart/"));
 
     if is_attachment {
+        if ct == "text/calendar" {
+            body.has_calendar = true;
+            if let Ok(calendar) = part.get_body() {
+                if !calendar.trim().is_empty() {
+                    body.calendar_parts.push(calendar);
+                }
+            }
+        }
         let filename = part
             .get_headers()
             .get_first_value("Content-Disposition")
@@ -90,6 +104,11 @@ fn walk_parts(part: &ParsedMail, body: &mut ParsedBody) {
 
     if ct == "text/calendar" {
         body.has_calendar = true;
+        if let Ok(calendar) = part.get_body() {
+            if !calendar.trim().is_empty() {
+                body.calendar_parts.push(calendar);
+            }
+        }
     }
 
     match ct.as_str() {

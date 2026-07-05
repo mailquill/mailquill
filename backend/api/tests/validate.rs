@@ -25,7 +25,16 @@ fn email_accepts_valid_and_rejects_hostile() {
 fn host_rejects_injection_and_whitespace() {
     assert!(host("h", "imap.example.com").is_ok());
     assert!(host("h", "127.0.0.1").is_ok());
-    for bad in ["", "has space", "bad_host", "http://x", "a;b", "-lead", ".lead", "x\n"] {
+    for bad in [
+        "",
+        "has space",
+        "bad_host",
+        "http://x",
+        "a;b",
+        "-lead",
+        ".lead",
+        "x\n",
+    ] {
         assert!(host("h", bad).is_err(), "should reject: {bad:?}");
     }
 }
@@ -45,7 +54,12 @@ fn one_of_is_allow_list() {
 #[test]
 fn http_url_scheme_restricted() {
     assert!(http_url("u", "https://dav.example.com/").is_ok());
-    for bad in ["ftp://x", "javascript:alert(1)", "file:///etc/passwd", "https://x y"] {
+    for bad in [
+        "ftp://x",
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "https://x y",
+    ] {
         assert!(http_url("u", bad).is_err(), "should reject: {bad:?}");
     }
 }

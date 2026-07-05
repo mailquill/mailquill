@@ -66,6 +66,7 @@ export function MessageRow({
   const density = useUiPrefs((s) => s.density)
   const marker = useUiPrefs((s) => s.marker)
   const { name } = parseFromAddr(message.from_addr)
+  const domain = fromDomain(message.from_addr)
   const listName = listIdToName(message.list_id)
   const date = formatDate(message.internal_date)
   const participants = message.thread_participants
@@ -178,14 +179,21 @@ export function MessageRow({
           >
             {senderLabel}
           </span>
-          {(message.phishing_verdict === 'phishing' || message.phishing_verdict === 'suspicious') && (
-            <ShieldAlert
-              className={cn(
-                'size-3.5 shrink-0',
-                message.phishing_verdict === 'phishing' ? 'text-red-500' : 'text-amber-500',
-              )}
-            />
+          {domain && !participants && (
+            <span className="max-w-[160px] truncate font-mono text-[11px] text-muted-foreground">
+              ({domain})
+            </span>
           )}
+          <ShieldAlert
+            className={cn(
+              'size-3.5 shrink-0',
+              message.phishing_verdict === 'phishing'
+                ? 'text-red-500'
+                : message.phishing_verdict === 'suspicious'
+                  ? 'text-amber-500'
+                  : 'text-muted-foreground',
+            )}
+          />
           {count > 1 && (
             <span className="shrink-0 rounded-full bg-secondary px-1.5 text-[11px] font-bold leading-4 text-[var(--mq-text-3)]">
               {count}
@@ -239,6 +247,11 @@ export function MessageRow({
       </div>
     </button>
   )
+}
+
+function fromDomain(value: string): string {
+  const { email } = parseFromAddr(value)
+  return email.split('@')[1]?.toLowerCase() ?? ''
 }
 
 interface MessageListProps {

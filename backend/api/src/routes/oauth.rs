@@ -37,9 +37,7 @@ pub fn new_pkce_store() -> PkceStore {
     Mutex::new(HashMap::new())
 }
 
-fn provider_config(
-    provider: &str,
-) -> Result<(oauth2::AuthUrl, oauth2::TokenUrl), AppError> {
+fn provider_config(provider: &str) -> Result<(oauth2::AuthUrl, oauth2::TokenUrl), AppError> {
     match provider {
         PROVIDER_GOOGLE => Ok((
             oauth2::AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".into())
@@ -81,10 +79,7 @@ fn provider_scopes(provider: &str) -> Vec<Scope> {
     }
 }
 
-fn build_client(
-    provider: &str,
-    state: &AppState,
-) -> Result<oauth2::basic::BasicClient, AppError> {
+fn build_client(provider: &str, state: &AppState) -> Result<oauth2::basic::BasicClient, AppError> {
     let (auth_url, token_url) = provider_config(provider)?;
     let env_prefix = match provider {
         PROVIDER_GOOGLE => "GOOGLE",
@@ -95,7 +90,8 @@ fn build_client(
         .unwrap_or_else(|_| "placeholder".into());
     let client_secret = std::env::var(format!("{env_prefix}_OAUTH_CLIENT_SECRET"))
         .unwrap_or_else(|_| "placeholder".into());
-    let redirect_base = std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let redirect_base =
+        std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let redirect_url = RedirectUrl::new(format!(
         "{redirect_base}/api/auth/oauth/{provider}/callback"
     ))
@@ -240,12 +236,18 @@ pub async fn oauth_callback(
     .fetch_one(&user_db)
     .await?;
 
-    state.sync_manager.start_account(
-        account_id.clone(),
-        user_id,
-        std::sync::Arc::new(state.clone()),
-    ).await;
+    state
+        .sync_manager
+        .start_account(
+            account_id.clone(),
+            user_id,
+            std::sync::Arc::new(state.clone()),
+        )
+        .await;
 
-    let redirect_base = std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-    Ok(Redirect::temporary(&format!("{redirect_base}/mail/accounts?connected={account_id}")))
+    let redirect_base =
+        std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    Ok(Redirect::temporary(&format!(
+        "{redirect_base}/mail/accounts?connected={account_id}"
+    )))
 }

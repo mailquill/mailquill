@@ -33,7 +33,9 @@ pub async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if req.password.len() < 8 {
-        return Err(AppError::Unprocessable("password must be at least 8 characters".into()));
+        return Err(AppError::Unprocessable(
+            "password must be at least 8 characters".into(),
+        ));
     }
     if !req.email.contains('@') {
         return Err(AppError::Unprocessable("invalid email address".into()));
@@ -46,19 +48,18 @@ pub async fn register(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .to_string();
 
-    let user_id: String = sqlx::query_scalar(
-        "INSERT INTO users (email, password_hash) VALUES (?, ?) RETURNING id",
-    )
-    .bind(&email)
-    .bind(&hash)
-    .fetch_one(&state.app_db)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::Database(ref db) if db.is_unique_violation() => {
-            AppError::Conflict("email already registered".into())
-        }
-        other => AppError::Internal(other.to_string()),
-    })?;
+    let user_id: String =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES (?, ?) RETURNING id")
+            .bind(&email)
+            .bind(&hash)
+            .fetch_one(&state.app_db)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                    AppError::Conflict("email already registered".into())
+                }
+                other => AppError::Internal(other.to_string()),
+            })?;
 
     // Insert user settings with privacy defaults off (D9)
     sqlx::query(
@@ -77,7 +78,14 @@ pub async fn register(
 
     let mut headers = HeaderMap::new();
     headers.insert("Set-Cookie", cookie.parse().unwrap());
-    Ok((StatusCode::CREATED, headers, Json(AuthResponse { access_token, token_type: "Bearer".into() })))
+    Ok((
+        StatusCode::CREATED,
+        headers,
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".into(),
+        }),
+    ))
 }
 
 pub async fn login(
@@ -108,7 +116,13 @@ pub async fn login(
 
     let mut headers = HeaderMap::new();
     headers.insert("Set-Cookie", cookie.parse().unwrap());
-    Ok((headers, Json(AuthResponse { access_token, token_type: "Bearer".into() })))
+    Ok((
+        headers,
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".into(),
+        }),
+    ))
 }
 
 pub async fn refresh(
@@ -138,10 +152,12 @@ pub async fn refresh(
         }
     } else {
         // Normal rotation: mark the presented token replaced.
-        sqlx::query("UPDATE refresh_tokens SET revoked = 1, replaced_at = datetime('now') WHERE id = ?")
-            .bind(&token_id)
-            .execute(&state.app_db)
-            .await?;
+        sqlx::query(
+            "UPDATE refresh_tokens SET revoked = 1, replaced_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&token_id)
+        .execute(&state.app_db)
+        .await?;
     }
 
     let access_token = state
@@ -153,7 +169,13 @@ pub async fn refresh(
 
     let mut headers = HeaderMap::new();
     headers.insert("Set-Cookie", cookie.parse().unwrap());
-    Ok((headers, Json(AuthResponse { access_token, token_type: "Bearer".into() })))
+    Ok((
+        headers,
+        Json(AuthResponse {
+            access_token,
+            token_type: "Bearer".into(),
+        }),
+    ))
 }
 
 pub async fn logout(
@@ -182,11 +204,10 @@ pub async fn me(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
 ) -> Result<impl IntoResponse, AppError> {
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT id, email FROM users WHERE id = ?")
-            .bind(&user.0)
-            .fetch_optional(&state.app_db)
-            .await?;
+    let row: Option<(String, String)> = sqlx::query_as("SELECT id, email FROM users WHERE id = ?")
+        .bind(&user.0)
+        .fetch_optional(&state.app_db)
+        .await?;
 
     let (id, email) = row.ok_or(AppError::NotFound)?;
     Ok(Json(json!({ "id": id, "email": email })))
@@ -219,14 +240,12 @@ async fn issue_refresh_token(
     let token_hash = hash_token(&token);
     let expires_at = (Utc::now() + chrono::Duration::days(30)).to_rfc3339();
 
-    sqlx::query(
-        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
-    )
-    .bind(user_id)
-    .bind(&token_hash)
-    .bind(&expires_at)
-    .execute(&state.app_db)
-    .await?;
+    sqlx::query("INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)")
+        .bind(user_id)
+        .bind(&token_hash)
+        .bind(&expires_at)
+        .execute(&state.app_db)
+        .await?;
 
     let cookie = format!(
         "refresh_token={}; HttpOnly; SameSite=Strict; Path=/api/auth/refresh; Max-Age=2592000",

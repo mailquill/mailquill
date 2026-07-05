@@ -38,11 +38,12 @@ impl GmailProvider {
         let token = config
             .oauth_access_token
             .clone()
-            .ok_or(ProviderError::Other("gmail api requires an OAuth access token".into()))?;
-        let db = config
-            .db
-            .clone()
-            .ok_or(ProviderError::Other("gmail api requires a user db handle".into()))?;
+            .ok_or(ProviderError::Other(
+                "gmail api requires an OAuth access token".into(),
+            ))?;
+        let db = config.db.clone().ok_or(ProviderError::Other(
+            "gmail api requires a user db handle".into(),
+        ))?;
         Ok(Self {
             rest: Rest::new(token),
             ids: IdMap::new(db, config.account_id.clone()),
@@ -90,23 +91,39 @@ impl GmailProvider {
         (!has("UNREAD"), has("STARRED"))
     }
 
-    async fn fetch_metadata(&self, uid: u32, remote_id: &str) -> Result<FetchedMessage, ProviderError> {
+    async fn fetch_metadata(
+        &self,
+        uid: u32,
+        remote_id: &str,
+    ) -> Result<FetchedMessage, ProviderError> {
         let res = self
             .rest
             .get_json(&format!("{BASE}/messages/{remote_id}?format=metadata"))
             .await?;
         let (is_seen, is_flagged) = Self::flags_from_labels(&res["labelIds"]);
         let internal_date = rfc3339_from_millis(
-            res["internalDate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
+            res["internalDate"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
         );
 
         let empty = Vec::new();
         let headers = res["payload"]["headers"].as_array().unwrap_or(&empty);
-        let block = header_block_from_pairs(headers.iter().filter_map(|h| {
-            Some((h["name"].as_str()?, h["value"].as_str()?))
-        }));
+        let block = header_block_from_pairs(
+            headers
+                .iter()
+                .filter_map(|h| Some((h["name"].as_str()?, h["value"].as_str()?))),
+        );
 
-        Ok(fetched_from_raw(uid, &block, internal_date, is_seen, is_flagged, false))
+        Ok(fetched_from_raw(
+            uid,
+            &block,
+            internal_date,
+            is_seen,
+            is_flagged,
+            false,
+        ))
     }
 
     async fn fetch_raw_message(&self, remote_id: &str) -> Result<(Vec<u8>, Value), ProviderError> {
@@ -242,9 +259,19 @@ impl MailProvider for GmailProvider {
                 Ok((raw, meta)) => {
                     let (is_seen, is_flagged) = Self::flags_from_labels(&meta["labelIds"]);
                     let internal_date = rfc3339_from_millis(
-                        meta["internalDate"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
+                        meta["internalDate"]
+                            .as_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0),
                     );
-                    out.push(fetched_from_raw(uid, &raw, internal_date, is_seen, is_flagged, true));
+                    out.push(fetched_from_raw(
+                        uid,
+                        &raw,
+                        internal_date,
+                        is_seen,
+                        is_flagged,
+                        true,
+                    ));
                 }
                 Err(e) => tracing::warn!("gmail: raw fetch failed for {remote_id}: {e}"),
             }
@@ -298,7 +325,8 @@ impl MailProvider for GmailProvider {
                 .post_json(&format!("{BASE}/messages/{remote_id}/trash"), &json!({}))
                 .await?;
         } else {
-            self.modify_labels(&remote_id, &[dest_folder], &[src_folder]).await?;
+            self.modify_labels(&remote_id, &[dest_folder], &[src_folder])
+                .await?;
         }
         // Re-discovered with a fresh uid in the destination label.
         self.ids.remove(src_folder, uid).await
@@ -306,7 +334,9 @@ impl MailProvider for GmailProvider {
 
     async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError> {
         let remote_id = self.ids.remote_id(folder, uid).await?;
-        self.rest.delete(&format!("{BASE}/messages/{remote_id}")).await?;
+        self.rest
+            .delete(&format!("{BASE}/messages/{remote_id}"))
+            .await?;
         self.ids.remove(folder, uid).await
     }
 

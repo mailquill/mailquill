@@ -39,7 +39,12 @@ impl Rest {
 
     pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, ProviderError> {
         let res = self.auth(self.client.get(url)).send().await.map_err(wrap)?;
-        Ok(Self::check(res).await?.bytes().await.map_err(wrap)?.to_vec())
+        Ok(Self::check(res)
+            .await?
+            .bytes()
+            .await
+            .map_err(wrap)?
+            .to_vec())
     }
 
     pub async fn post_json(&self, url: &str, body: &Value) -> Result<Value, ProviderError> {
@@ -92,7 +97,11 @@ impl Rest {
     }
 
     pub async fn delete(&self, url: &str) -> Result<(), ProviderError> {
-        let res = self.auth(self.client.delete(url)).send().await.map_err(wrap)?;
+        let res = self
+            .auth(self.client.delete(url))
+            .send()
+            .await
+            .map_err(wrap)?;
         Self::check(res).await?;
         Ok(())
     }

@@ -27,8 +27,8 @@ pub struct JwtKey {
 impl JwtKey {
     /// Load JWT secret from JWT_SECRET env var. Panics if absent.
     pub fn from_env() -> Self {
-        let secret = std::env::var("JWT_SECRET")
-            .unwrap_or_else(|_| panic!("JWT_SECRET env var required"));
+        let secret =
+            std::env::var("JWT_SECRET").unwrap_or_else(|_| panic!("JWT_SECRET env var required"));
         Self::from_secret(secret.as_bytes())
     }
 

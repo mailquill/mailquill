@@ -67,12 +67,18 @@ impl<T: fmt::Display> fmt::Display for Pii<'_, T> {
                     rand::thread_rng().fill_bytes(&mut nonce_bytes);
                     let nonce = Nonce::from_slice(&nonce_bytes);
                     let mut buf = self.0.to_string().into_bytes();
-                    let tag = cipher.encrypt_in_place_detached(nonce, b"", &mut buf).unwrap();
+                    let tag = cipher
+                        .encrypt_in_place_detached(nonce, b"", &mut buf)
+                        .unwrap();
                     let mut out = Vec::with_capacity(12 + buf.len() + 16);
                     out.extend_from_slice(&nonce_bytes);
                     out.extend_from_slice(&buf);
                     out.extend_from_slice(&tag);
-                    write!(f, "pii:enc:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &out))
+                    write!(
+                        f,
+                        "pii:enc:{}",
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &out)
+                    )
                 } else {
                     f.write_str("[REDACTED]")
                 }

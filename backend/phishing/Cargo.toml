@@ -7,6 +7,8 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 mailparse = "0.15"
 strsim = "0.11"
+idna = "1"
+scraper = "0.22"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "chrono", "uuid"] }

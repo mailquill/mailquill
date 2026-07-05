@@ -5,10 +5,18 @@ use api::routes::discover::{candidate_hosts, mx_parent_domain, parse_ispdb};
 
 #[test]
 fn candidates_prefer_convention_then_mail_then_mx() {
-    let mx = vec!["mx1.hoster.example".to_string(), "mx2.hoster.example".to_string()];
+    let mx = vec![
+        "mx1.hoster.example".to_string(),
+        "mx2.hoster.example".to_string(),
+    ];
     assert_eq!(
         candidate_hosts("imap", "fgehann.de", &mx),
-        vec!["imap.fgehann.de", "mail.fgehann.de", "mx1.hoster.example", "mx2.hoster.example"]
+        vec![
+            "imap.fgehann.de",
+            "mail.fgehann.de",
+            "mx1.hoster.example",
+            "mx2.hoster.example"
+        ]
     );
 }
 
@@ -63,9 +71,15 @@ fn ispdb_parses_first_imap_and_smtp_servers() {
     let cfg = parse_ispdb(ISPDB_SAMPLE);
     assert_eq!(cfg.provider.as_deref(), Some("Google Mail"));
     let imap = cfg.imap.expect("imap endpoint");
-    assert_eq!((imap.host.as_str(), imap.port, imap.security), ("imap.gmail.com", 993, "ssl"));
+    assert_eq!(
+        (imap.host.as_str(), imap.port, imap.security),
+        ("imap.gmail.com", 993, "ssl")
+    );
     let smtp = cfg.smtp.expect("smtp endpoint");
-    assert_eq!((smtp.host.as_str(), smtp.port, smtp.security), ("smtp.gmail.com", 465, "ssl"));
+    assert_eq!(
+        (smtp.host.as_str(), smtp.port, smtp.security),
+        ("smtp.gmail.com", 465, "ssl")
+    );
 }
 
 #[test]

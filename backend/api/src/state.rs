@@ -1,6 +1,7 @@
 use db::pool::UserDbPool;
-use mailquill_core::{blob::BlobStore, crypto::CredentialKey, jwt::JwtKey};
+use contact_sync::ContactSyncManager;
 use mail_sync::manager::SyncManager;
+use mailquill_core::{blob::BlobStore, crypto::CredentialKey, jwt::JwtKey};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub blob_store: Arc<dyn BlobStore>,
     /// manages per-account IMAP sync tasks
     pub sync_manager: Arc<SyncManager>,
+    /// manages per-account contact sync tasks
+    pub contact_sync_manager: Arc<ContactSyncManager>,
     /// AES-256-GCM key for encrypting IMAP/SMTP credentials
     pub credential_key: Arc<CredentialKey>,
     /// JWT signing key

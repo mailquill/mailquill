@@ -14,6 +14,7 @@ struct MessageRow {
     id: String,
     account_id: String,
     folder_id: String,
+    folder_type: Option<String>,
     uid: i64,
     message_id_header: Option<String>,
     thread_id: Option<String>,
@@ -55,9 +56,9 @@ pub async fn get_message(
     let user_db = state.user_db_pool.get(&user.0).await?;
 
     let row: Option<MessageRow> = sqlx::query_as(
-        "SELECT id, account_id, folder_id, uid, message_id_header, thread_id, in_reply_to, \
-         \"references\", list_id, subject, from_addr, to_addrs, cc_addrs, snippet, date, \
-         internal_date, is_read, is_flagged, is_deleted FROM messages WHERE id = ?",
+        "SELECT m.id, m.account_id, m.folder_id, f.folder_type, m.uid, m.message_id_header, m.thread_id, m.in_reply_to, \
+         m.\"references\", m.list_id, m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.snippet, m.date, \
+         m.internal_date, m.is_read, m.is_flagged, m.is_deleted FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE m.id = ?",
     )
     .bind(&message_id)
     .fetch_optional(&user_db)
@@ -73,57 +74,81 @@ pub async fn get_message(
     .fetch_optional(&user_db)
     .await?;
 
-    let (body_html, body_text, body_available) = if let Some((blob_key, _size, _size_uncompressed)) = body_row {
-        // Read body from blob store and decompress
-        match state.blob_store.get(&blob_key).await {
-            Ok(compressed) => {
-                match mailquill_core::compression::decompress_body(&compressed) {
-                    Ok(decompressed) => {
-                        // Parse as JSON to get html/text parts
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&decompressed) {
-                            let html = v["html"].as_str().map(|s| s.to_owned());
-                            let text = v["text"].as_str().map(|s| s.to_owned());
-                            (html, text, true)
-                        } else {
-                            // Raw bytes — treat as text
-                            let text = String::from_utf8_lossy(&decompressed).into_owned();
-                            (None, Some(text), true)
+    let (body_html, body_text, body_available) =
+        if let Some((blob_key, _size, _size_uncompressed)) = body_row {
+            // Read body from blob store and decompress
+            match state.blob_store.get(&blob_key).await {
+                Ok(compressed) => {
+                    match mailquill_core::compression::decompress_body(&compressed) {
+                        Ok(decompressed) => {
+                            // Parse as JSON to get html/text parts
+                            if let Ok(v) =
+                                serde_json::from_slice::<serde_json::Value>(&decompressed)
+                            {
+                                let html = v["html"].as_str().map(|s| s.to_owned());
+                                let text = v["text"].as_str().map(|s| s.to_owned());
+                                (html, text, true)
+                            } else {
+                                // Raw bytes — treat as text
+                                let text = String::from_utf8_lossy(&decompressed).into_owned();
+                                (None, Some(text), true)
+                            }
                         }
+                        Err(_) => (None, None, false),
                     }
-                    Err(_) => (None, None, false),
+                }
+                Err(_) => {
+                    // Body not in blob store yet — trigger on-demand IMAP fetch
+                    match fetch_body_on_demand(
+                        &state,
+                        &user.0,
+                        &user_db,
+                        &message_id,
+                        row.account_id.clone(),
+                        row.folder_id.clone(),
+                        row.uid as u32,
+                    )
+                    .await
+                    {
+                        Ok((html, text)) => {
+                            // Mark as read after successful body load (task 4.11)
+                            let _ = sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
+                                .bind(&message_id)
+                                .execute(&user_db)
+                                .await;
+                            queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", true)
+                                .await;
+                            (html, text, true)
+                        }
+                        Err(_) => (None, None, false),
+                    }
                 }
             }
-            Err(_) => {
-                // Body not in blob store yet — trigger on-demand IMAP fetch
-                match fetch_body_on_demand(&state, &user.0, &user_db, &message_id, row.account_id.clone(), row.folder_id.clone(), row.uid as u32).await {
-                    Ok((html, text)) => {
-                        // Mark as read after successful body load (task 4.11)
-                        let _ = sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
-                            .bind(&message_id)
-                            .execute(&user_db)
-                            .await;
-                        queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", true).await;
-                        (html, text, true)
-                    }
-                    Err(_) => (None, None, false),
+        } else {
+            // No body record — trigger on-demand fetch
+            match fetch_body_on_demand(
+                &state,
+                &user.0,
+                &user_db,
+                &message_id,
+                row.account_id.clone(),
+                row.folder_id.clone(),
+                row.uid as u32,
+            )
+            .await
+            {
+                Ok((html, text)) => {
+                    // Mark as read after successful body load
+                    let _ = sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
+                        .bind(&message_id)
+                        .execute(&user_db)
+                        .await;
+                    queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", true).await;
+                    (html, text, true)
                 }
+                Err(_) => (None, None, false),
             }
-        }
-    } else {
-        // No body record — trigger on-demand fetch
-        match fetch_body_on_demand(&state, &user.0, &user_db, &message_id, row.account_id.clone(), row.folder_id.clone(), row.uid as u32).await {
-            Ok((html, text)) => {
-                // Mark as read after successful body load
-                let _ = sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
-                    .bind(&message_id)
-                    .execute(&user_db)
-                    .await;
-                queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", true).await;
-                (html, text, true)
-            }
-            Err(_) => (None, None, false),
-        }
-    };
+        };
 
     // Phishing analysis: messages synced before the analyser existed (or in
     // lazy mode without an on-demand fetch above) have no verdict yet — fetch
@@ -135,7 +160,16 @@ pub async fn get_message(
             .fetch_optional(&user_db)
             .await?;
     if verdict.flatten().is_none() {
-        let _ = fetch_body_on_demand(&state, &user.0, &user_db, &message_id, row.account_id.clone(), row.folder_id.clone(), row.uid as u32).await;
+        let _ = fetch_body_on_demand(
+            &state,
+            &user.0,
+            &user_db,
+            &message_id,
+            row.account_id.clone(),
+            row.folder_id.clone(),
+            row.uid as u32,
+        )
+        .await;
     }
 
     let phishing: Option<(i32, String, String)> = sqlx::query_as(
@@ -168,16 +202,35 @@ pub async fn get_message(
         .await
         .unwrap_or(0);
         if have_inline == 0 {
-            let _ = fetch_body_on_demand(&state, &user.0, &user_db, &message_id, row.account_id.clone(), row.folder_id.clone(), row.uid as u32).await;
+            let _ = fetch_body_on_demand(
+                &state,
+                &user.0,
+                &user_db,
+                &message_id,
+                row.account_id.clone(),
+                row.folder_id.clone(),
+                row.uid as u32,
+            )
+            .await;
         }
     }
 
     // Thread summary
     let (thread_size, thread_unread) = if let Some(ref tid) = row.thread_id {
-        let size: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_deleted = 0")
-            .bind(tid).fetch_one(&user_db).await.unwrap_or(1);
-        let unread: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_read = 0 AND is_deleted = 0")
-            .bind(tid).fetch_one(&user_db).await.unwrap_or(0);
+        let size: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_deleted = 0",
+        )
+        .bind(tid)
+        .fetch_one(&user_db)
+        .await
+        .unwrap_or(1);
+        let unread: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_read = 0 AND is_deleted = 0",
+        )
+        .bind(tid)
+        .fetch_one(&user_db)
+        .await
+        .unwrap_or(0);
         (size, unread)
     } else {
         (1, if row.is_read { 0 } else { 1 })
@@ -196,6 +249,7 @@ pub async fn get_message(
         "id": row.id,
         "account_id": row.account_id,
         "folder_id": row.folder_id,
+        "folder_type": row.folder_type,
         "uid": row.uid,
         "message_id_header": row.message_id_header,
         "thread_id": row.thread_id,
@@ -239,12 +293,11 @@ pub async fn download_attachment(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT blob_key, content_type, filename FROM attachments WHERE id = ?",
-    )
-    .bind(&attachment_id)
-    .fetch_optional(&user_db)
-    .await?;
+    let row: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT blob_key, content_type, filename FROM attachments WHERE id = ?")
+            .bind(&attachment_id)
+            .fetch_optional(&user_db)
+            .await?;
     let (blob_key, content_type, filename) = row.ok_or(AppError::NotFound)?;
 
     let bytes = state
@@ -275,17 +328,24 @@ pub async fn reanalyse_message(
     Path(message_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
-    let row: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT account_id, folder_id, uid FROM messages WHERE id = ?",
-    )
-    .bind(&message_id)
-    .fetch_optional(&user_db)
-    .await?;
+    let row: Option<(String, String, i64)> =
+        sqlx::query_as("SELECT account_id, folder_id, uid FROM messages WHERE id = ?")
+            .bind(&message_id)
+            .fetch_optional(&user_db)
+            .await?;
     let (account_id, folder_id, uid) = row.ok_or(AppError::NotFound)?;
 
-    fetch_body_on_demand(&state, &user.0, &user_db, &message_id, account_id, folder_id, uid as u32)
-        .await
-        .map_err(|_| AppError::Internal("reanalysis fetch failed".into()))?;
+    fetch_body_on_demand(
+        &state,
+        &user.0,
+        &user_db,
+        &message_id,
+        account_id,
+        folder_id,
+        uid as u32,
+    )
+    .await
+    .map_err(|_| AppError::Internal("reanalysis fetch failed".into()))?;
 
     let result: Option<(i32, String, String)> = sqlx::query_as(
         "SELECT score, verdict, checks_json FROM phishing_analysis WHERE message_id = ?",
@@ -339,7 +399,15 @@ pub async fn toggle_flag(
         .execute(&user_db)
         .await?;
 
-    queue_imap_flag(&state, &user.0, &user_db, &message_id, "flagged", req.is_flagged).await;
+    queue_imap_flag(
+        &state,
+        &user.0,
+        &user_db,
+        &message_id,
+        "flagged",
+        req.is_flagged,
+    )
+    .await;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -353,14 +421,17 @@ pub async fn archive_message(
     let (account_id, uid, folder_full_path) = get_message_location(&user_db, &message_id).await?;
 
     // Queue IMAP MOVE to Archive
-    state.sync_manager.queue_imap_move(
-        user.0.clone(),
-        account_id,
-        uid,
-        folder_full_path,
-        "Archive".into(),
-        false,
-    ).await;
+    state
+        .sync_manager
+        .queue_imap_move(
+            user.0.clone(),
+            account_id,
+            uid,
+            folder_full_path,
+            "Archive".into(),
+            false,
+        )
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -386,22 +457,23 @@ pub async fn delete_message(
 
     if is_trash {
         // Hard delete — EXPUNGE
-        state.sync_manager.queue_imap_expunge(
-            user.0.clone(),
-            account_id,
-            uid,
-            folder_full_path,
-        ).await;
+        state
+            .sync_manager
+            .queue_imap_expunge(user.0.clone(), account_id, uid, folder_full_path)
+            .await;
     } else {
         // Soft delete — move to Trash
-        state.sync_manager.queue_imap_move(
-            user.0.clone(),
-            account_id,
-            uid,
-            folder_full_path,
-            "Trash".into(),
-            false,
-        ).await;
+        state
+            .sync_manager
+            .queue_imap_move(
+                user.0.clone(),
+                account_id,
+                uid,
+                folder_full_path,
+                "Trash".into(),
+                false,
+            )
+            .await;
     }
 
     sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
@@ -422,22 +494,82 @@ pub async fn move_message(
     let user_db = state.user_db_pool.get(&user.0).await?;
     let (account_id, uid, src_folder) = get_message_location(&user_db, &message_id).await?;
 
-    // Get destination folder path
+    // Get destination folder path. The target must belong to the same account
+    // because IMAP MOVE cannot cross account boundaries.
     let dest_path: Option<String> =
-        sqlx::query_scalar("SELECT full_path FROM folders WHERE id = ?")
+        sqlx::query_scalar("SELECT full_path FROM folders WHERE id = ? AND account_id = ?")
             .bind(&req.folder_id)
+            .bind(&account_id)
             .fetch_optional(&user_db)
             .await?;
     let dest_path = dest_path.ok_or(AppError::NotFound)?;
 
-    state.sync_manager.queue_imap_move(
-        user.0.clone(),
-        account_id,
-        uid,
-        src_folder,
-        dest_path,
-        false,
-    ).await;
+    state
+        .sync_manager
+        .queue_imap_move(
+            user.0.clone(),
+            account_id.clone(),
+            uid,
+            src_folder,
+            dest_path,
+            false,
+        )
+        .await;
+
+    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+        .bind(&message_id)
+        .execute(&user_db)
+        .await?;
+    refresh_unread_counts(&user_db).await;
+    let _ = state.sync_manager.force_poll(&account_id).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn mark_not_spam(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(message_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let (account_id, uid, src_folder) = get_message_location(&user_db, &message_id).await?;
+
+    let src_type: Option<String> = sqlx::query_scalar(
+        "SELECT f.folder_type FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.id = ?",
+    )
+    .bind(&message_id)
+    .fetch_optional(&user_db)
+    .await?;
+    if !matches!(src_type.as_deref(), Some("SPAM" | "JUNK")) {
+        return Err(AppError::NotFound);
+    }
+
+    let inbox_path: Option<String> = sqlx::query_scalar(
+        "SELECT full_path FROM folders WHERE account_id = ? AND folder_type = 'INBOX' ORDER BY full_path LIMIT 1",
+    )
+    .bind(&account_id)
+    .fetch_optional(&user_db)
+    .await?;
+    let inbox_path = inbox_path.ok_or(AppError::NotFound)?;
+
+    state
+        .sync_manager
+        .queue_imap_move(
+            user.0.clone(),
+            account_id.clone(),
+            uid,
+            src_folder,
+            inbox_path,
+            false,
+        )
+        .await;
+
+    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+        .bind(&message_id)
+        .execute(&user_db)
+        .await?;
+    refresh_unread_counts(&user_db).await;
+    let _ = state.sync_manager.force_poll(&account_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -458,11 +590,10 @@ pub(crate) async fn refresh_unread_counts(db: &sqlx::SqlitePool) {
 }
 
 async fn require_message_exists(db: &sqlx::SqlitePool, message_id: &str) -> Result<(), AppError> {
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM messages WHERE id = ?")
-            .bind(message_id)
-            .fetch_optional(db)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM messages WHERE id = ?")
+        .bind(message_id)
+        .fetch_optional(db)
+        .await?;
     exists.map(|_| ()).ok_or(AppError::NotFound)
 }
 

@@ -14,6 +14,9 @@ export interface Account {
   created_at: string
   carddav_url?: string | null
   caldav_url?: string | null
+  caldav_accept_invalid_tls?: boolean
+  pgp_key_id?: string | null
+  sign_by_default: boolean
 }
 
 export interface AccountAlias {
@@ -113,11 +116,18 @@ export interface Settings {
   pgp_discovery_wkd_enabled: boolean
   pgp_discovery_keyserver_enabled: boolean
   load_external_images: boolean
+  default_calendar_id?: string | null
 }
 
 export interface AllowedImageSender {
   sender: string
   created_at: string
+}
+
+export interface BrandEntry {
+  id: string
+  domain: string
+  brand_name: string
 }
 
 export interface User {
@@ -127,27 +137,59 @@ export interface User {
 
 export interface Contact {
   id: string
-  account_id: string | null
-  display_name: string
-  email: string | null
-  phone: string | null
-  company: string | null
-  job_title: string | null
+  account_id: string
+  uid: string
+  display_name: string | null
+  given_name: string | null
+  family_name: string | null
+  org: string | null
+  title: string | null
+  emails: LabeledValue[]
+  phones: LabeledValue[]
+  addresses: PostalAddress[]
   notes: string | null
-  favorite: boolean
-  group_name: string | null
+  photo_blob_key: string | null
+  raw_vcard: string | null
+  synced_at: string | null
 }
 
 export interface NewContact {
-  account_id?: string | null
-  display_name: string
-  email?: string | null
-  phone?: string | null
-  company?: string | null
-  job_title?: string | null
+  account_id: string
+  display_name?: string | null
+  given_name?: string | null
+  family_name?: string | null
+  org?: string | null
+  title?: string | null
+  emails?: LabeledValue[]
+  phones?: LabeledValue[]
+  addresses?: PostalAddress[]
   notes?: string | null
-  favorite?: boolean
-  group_name?: string | null
+}
+
+export interface LabeledValue {
+  label: string | null
+  value: string
+}
+
+export interface PostalAddress {
+  label: string | null
+  street: string | null
+  locality: string | null
+  region: string | null
+  postal_code: string | null
+  country: string | null
+}
+
+export interface ContactAccount {
+  id: string
+  display_name: string
+  type: 'cardav' | 'graph' | 'google'
+  base_url: string | null
+  auth_scheme: string
+  sync_token: string | null
+  last_synced_at: string | null
+  sync_status: string
+  sync_error: string | null
 }
 
 export interface Calendar {
@@ -155,6 +197,19 @@ export interface Calendar {
   account_id: string | null
   name: string
   color: string
+  is_default?: boolean
+}
+
+export interface CalendarAccount {
+  id: string
+  display_name: string
+  type: 'caldav' | 'graph' | 'google' | 'openxchange'
+  base_url: string | null
+  auth_scheme: string
+  sync_interval_secs: number
+  last_synced_at: string | null
+  sync_status: string
+  sync_error: string | null
 }
 
 export interface CalendarEvent {
@@ -167,6 +222,16 @@ export interface CalendarEvent {
   ends_at: string
   all_day: boolean
   color: string
+  rrule?: string | null
+  rrule_uid?: string | null
+  recurrence_id?: string | null
+  status?: string
+  organizer_email?: string | null
+  organizer_name?: string | null
+  attendees?: string
+  ms_busystatus?: string | null
+  ms_teams_url?: string | null
+  raw_ical?: string | null
 }
 
 export interface NewCalendarEvent {
@@ -177,6 +242,26 @@ export interface NewCalendarEvent {
   starts_at: string
   ends_at: string
   all_day?: boolean
+  rrule?: string | null
+  attendees?: unknown
+  organizer_email?: string | null
+  organizer_name?: string | null
+  recurring_edit_scope?: 'this' | 'following' | 'all'
+}
+
+export interface MeetingInvitation {
+  id: string
+  message_id: string
+  method: string
+  uid: string
+  summary: string | null
+  start_dt: string | null
+  end_dt: string | null
+  organizer_email: string | null
+  attendees: string
+  user_rsvp_status: string
+  raw_ical: string
+  ms_teams_url: string | null
 }
 
 export type RuleField = 'from' | 'to' | 'subject' | 'body'
@@ -223,6 +308,8 @@ export interface SendMessageInput {
   subject: string
   body_text?: string
   body_html?: string
+  pgp_mime_mode?: 'signed' | 'encrypted'
+  pgp_signature?: string
   in_reply_to?: string | null
   references?: string | null
   attachments?: AttachmentInput[]

@@ -128,9 +128,18 @@ pub fn parse_ispdb(xml: &str) -> IspdbConfig {
                     if let (Some(kind), Some(port), Some(security)) = (server, port, security) {
                         let valid = validate::host("host", &host).is_ok()
                             && validate::port("port", port).is_ok();
-                        let slot = if kind == "imap" { &mut cfg.imap } else { &mut cfg.smtp };
+                        let slot = if kind == "imap" {
+                            &mut cfg.imap
+                        } else {
+                            &mut cfg.smtp
+                        };
                         if valid && slot.is_none() {
-                            *slot = Some(Endpoint { host: host.clone(), port, security, source: "ispdb" });
+                            *slot = Some(Endpoint {
+                                host: host.clone(),
+                                port,
+                                security,
+                                source: "ispdb",
+                            });
                         }
                     }
                     server = None;
@@ -146,8 +155,15 @@ pub fn parse_ispdb(xml: &str) -> IspdbConfig {
 }
 
 async fn ispdb_lookup(domain: &str) -> Option<IspdbConfig> {
-    let client = reqwest::Client::builder().timeout(ISPDB_TIMEOUT).build().ok()?;
-    let res = client.get(format!("{ISPDB_BASE}/{domain}")).send().await.ok()?;
+    let client = reqwest::Client::builder()
+        .timeout(ISPDB_TIMEOUT)
+        .build()
+        .ok()?;
+    let res = client
+        .get(format!("{ISPDB_BASE}/{domain}"))
+        .send()
+        .await
+        .ok()?;
     if !res.status().is_success() {
         return None;
     }
@@ -194,7 +210,12 @@ async fn srv_endpoint(
             .min_by_key(|r| (r.priority(), u16::MAX - r.weight()))?;
         let host = best.target().to_utf8().trim_end_matches('.').to_string();
         if validate::host("host", &host).is_ok() && validate::port("port", best.port()).is_ok() {
-            return Some(Endpoint { host, port: best.port(), security, source: "srv" });
+            return Some(Endpoint {
+                host,
+                port: best.port(),
+                security,
+                source: "srv",
+            });
         }
     }
     None
@@ -225,7 +246,11 @@ async fn starttls_upgrade(stream: TcpStream, port: u16) -> Option<TcpStream> {
         if !line.starts_with("220") {
             return None;
         }
-        reader.get_mut().write_all(b"EHLO autodiscover.invalid\r\n").await.ok()?;
+        reader
+            .get_mut()
+            .write_all(b"EHLO autodiscover.invalid\r\n")
+            .await
+            .ok()?;
         loop {
             line.clear();
             if reader.read_line(&mut line).await.ok()? == 0 || !line.starts_with("250") {
@@ -260,7 +285,13 @@ pub async fn fetch_peer_cert(host: &str, port: u16) -> Option<Vec<u8>> {
             .ok()?;
         let tls = tokio_native_tls::TlsConnector::from(tls);
         let stream = tls.connect(host, stream).await.ok()?;
-        stream.get_ref().peer_certificate().ok().flatten()?.to_der().ok()
+        stream
+            .get_ref()
+            .peer_certificate()
+            .ok()
+            .flatten()?
+            .to_der()
+            .ok()
     };
     timeout(PROBE_TIMEOUT, attempt).await.ok().flatten()
 }
@@ -315,7 +346,12 @@ async fn probe_endpoint(hosts: &[String], ports: &[(u16, &'static str)]) -> Opti
     for host in hosts {
         for &(port, security) in ports {
             if usable.contains(&(host.clone(), port)) {
-                return Some(Endpoint { host: host.clone(), port, security, source: "probe" });
+                return Some(Endpoint {
+                    host: host.clone(),
+                    port,
+                    security,
+                    source: "probe",
+                });
             }
         }
     }
@@ -328,7 +364,12 @@ async fn mx_targets(resolver: &TokioAsyncResolver, domain: &str) -> Vec<String> 
     };
     let mut records: Vec<(u16, String)> = lookup
         .iter()
-        .map(|r| (r.preference(), r.exchange().to_utf8().trim_end_matches('.').to_string()))
+        .map(|r| {
+            (
+                r.preference(),
+                r.exchange().to_utf8().trim_end_matches('.').to_string(),
+            )
+        })
         .filter(|(_, h)| !h.is_empty() && validate::host("host", h).is_ok())
         .collect();
     records.sort();
@@ -337,7 +378,12 @@ async fn mx_targets(resolver: &TokioAsyncResolver, domain: &str) -> Vec<String> 
 
 pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoResponse, AppError> {
     validate::email("email", &q.email)?;
-    let domain = q.email.split('@').nth(1).unwrap_or_default().to_ascii_lowercase();
+    let domain = q
+        .email
+        .split('@')
+        .nth(1)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
 
     let resolver = TokioAsyncResolver::tokio_from_system_conf()
         .map_err(|e| AppError::Internal(format!("dns resolver: {e}")))?;
@@ -350,7 +396,10 @@ pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoRespons
     let smtp_srv = srv_endpoint(
         &resolver,
         &domain,
-        &[("_submissions._tcp", "ssl"), ("_submission._tcp", "starttls")],
+        &[
+            ("_submissions._tcp", "ssl"),
+            ("_submission._tcp", "starttls"),
+        ],
     );
     let (mut imap, mut smtp) = tokio::join!(imap_srv, smtp_srv);
     let mut provider: Option<String> = None;
@@ -402,5 +451,7 @@ pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoRespons
         (imap, smtp) = tokio::join!(imap_probe, smtp_probe);
     }
 
-    Ok(Json(json!({ "domain": domain, "provider": provider, "imap": imap, "smtp": smtp })))
+    Ok(Json(
+        json!({ "domain": domain, "provider": provider, "imap": imap, "smtp": smtp }),
+    ))
 }

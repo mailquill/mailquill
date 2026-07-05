@@ -38,10 +38,9 @@ pub struct GmailImapProvider {
 
 impl GmailImapProvider {
     pub async fn connect(config: &ProviderConfig) -> Result<Self, ProviderError> {
-        let token = config
-            .oauth_access_token
-            .clone()
-            .ok_or_else(|| ProviderError::Other("gmail_imap requires an OAuth access token".into()))?;
+        let token = config.oauth_access_token.clone().ok_or_else(|| {
+            ProviderError::Other("gmail_imap requires an OAuth access token".into())
+        })?;
         let db = config
             .db
             .clone()
@@ -116,7 +115,12 @@ impl GmailImapProvider {
         self.label_ids.as_ref().and_then(|m| m.get(name).cloned())
     }
 
-    async fn modify_labels(&self, remote_id: &str, add: &[&str], remove: &[&str]) -> Result<(), ProviderError> {
+    async fn modify_labels(
+        &self,
+        remote_id: &str,
+        add: &[&str],
+        remove: &[&str],
+    ) -> Result<(), ProviderError> {
         self.rest
             .post_json(
                 &format!("{BASE}/messages/{remote_id}/modify"),
@@ -219,7 +223,9 @@ impl MailProvider for GmailImapProvider {
 
     async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError> {
         let remote = self.ids.remote_id(folder, uid).await?;
-        self.rest.delete(&format!("{BASE}/messages/{remote}")).await?;
+        self.rest
+            .delete(&format!("{BASE}/messages/{remote}"))
+            .await?;
         self.ids.remove(folder, uid).await
     }
 

@@ -29,11 +29,14 @@ pub struct AddAccountRequest {
     sync_mode: Option<String>,
     carddav_url: Option<String>,
     caldav_url: Option<String>,
+    caldav_accept_invalid_tls: Option<bool>,
     /// User-approved TLS trust exceptions: base64 DER certificate per service.
     imap_tls_cert: Option<String>,
     smtp_tls_cert: Option<String>,
     /// Mailbox backend: imap (default), gmail_api, outlook_api.
     provider_kind: Option<String>,
+    pgp_key_id: Option<String>,
+    sign_by_default: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -54,9 +57,12 @@ pub struct UpdateAccountRequest {
     sync_mode: Option<String>,
     carddav_url: Option<String>,
     caldav_url: Option<String>,
+    caldav_accept_invalid_tls: Option<bool>,
+    pgp_key_id: Option<String>,
+    sign_by_default: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 pub struct AccountResponse {
     id: String,
     display_name: String,
@@ -73,6 +79,9 @@ pub struct AccountResponse {
     created_at: String,
     carddav_url: Option<String>,
     caldav_url: Option<String>,
+    caldav_accept_invalid_tls: bool,
+    pgp_key_id: Option<String>,
+    sign_by_default: bool,
 }
 
 #[derive(Deserialize)]
@@ -119,7 +128,9 @@ pub async fn add_account(
     }
     let imap_tls_cert = req.imap_tls_cert.as_deref().filter(|s| !s.is_empty());
     let smtp_tls_cert = req.smtp_tls_cert.as_deref().filter(|s| !s.is_empty());
-    let imap_tls_cert_der = imap_tls_cert.map(|s| validate::b64_cert("imap_tls_cert", s)).transpose()?;
+    let imap_tls_cert_der = imap_tls_cert
+        .map(|s| validate::b64_cert("imap_tls_cert", s))
+        .transpose()?;
     if let Some(s) = smtp_tls_cert {
         validate::b64_cert("smtp_tls_cert", s)?;
     }
@@ -128,7 +139,11 @@ pub async fn add_account(
     validate::one_of("body_sync_mode", body_sync_mode, validate::BODY_SYNC_MODES)?;
 
     let provider_kind = req.provider_kind.as_deref().unwrap_or("imap");
-    validate::one_of("provider_kind", provider_kind, &["imap", "gmail_api", "outlook_api"])?;
+    validate::one_of(
+        "provider_kind",
+        provider_kind,
+        &["imap", "gmail_api", "outlook_api"],
+    )?;
 
     let sync_mode = req.sync_mode.as_deref().unwrap_or("idle");
     validate::one_of("sync_mode", sync_mode, validate::SYNC_MODES)?;
@@ -151,7 +166,10 @@ pub async fn add_account(
     let imap_port = req.imap_port;
     let imap_user = req.imap_username.clone();
     let imap_pass = req.imap_password.clone();
-    let auth_scheme = req.imap_auth_scheme.clone().unwrap_or_else(|| "plain".into());
+    let auth_scheme = req
+        .imap_auth_scheme
+        .clone()
+        .unwrap_or_else(|| "plain".into());
 
     if let Err(e) = mail_sync::test_imap_connection(
         &imap_host,
@@ -166,7 +184,8 @@ pub async fn add_account(
         // TLS failures carry the presented certificate so the UI can offer a
         // Thunderbird-style trust exception; the user retries with the cert.
         if matches!(e, mail_sync::SessionError::Tls(_)) {
-            if let Some(der) = crate::routes::discover::fetch_peer_cert(&imap_host, imap_port).await {
+            if let Some(der) = crate::routes::discover::fetch_peer_cert(&imap_host, imap_port).await
+            {
                 use base64::Engine;
                 return Ok((
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -189,7 +208,7 @@ pub async fn add_account(
 
     let user_db = state.user_db_pool.get(&user.0).await?;
     let account_id: String = sqlx::query_scalar(
-        "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, sync_interval_secs, sync_mode, carddav_url, caldav_url, imap_tls_cert, smtp_tls_cert, provider_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, sync_interval_secs, sync_mode, carddav_url, caldav_url, caldav_accept_invalid_tls, imap_tls_cert, smtp_tls_cert, provider_kind, pgp_key_id, sign_by_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(&req.display_name)
     .bind(&req.primary_email)
@@ -205,18 +224,20 @@ pub async fn add_account(
     .bind(sync_mode)
     .bind(req.carddav_url.as_deref().filter(|s| !s.is_empty()))
     .bind(req.caldav_url.as_deref().filter(|s| !s.is_empty()))
+    .bind(req.caldav_accept_invalid_tls.unwrap_or(false))
     .bind(imap_tls_cert)
     .bind(smtp_tls_cert)
     .bind(provider_kind)
+    .bind(&req.pgp_key_id)
+    .bind(req.sign_by_default.unwrap_or(false))
     .fetch_one(&user_db)
     .await?;
 
     // Kick off initial sync
-    state.sync_manager.start_account(
-        account_id.clone(),
-        user.0.clone(),
-        Arc::new(state.clone()),
-    ).await;
+    state
+        .sync_manager
+        .start_account(account_id.clone(), user.0.clone(), Arc::new(state.clone()))
+        .await;
 
     let row = get_account_row(&user_db, &account_id).await?;
     Ok((StatusCode::CREATED, Json(row)).into_response())
@@ -228,16 +249,11 @@ pub async fn list_accounts(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let rows: Vec<AccountResponse> = sqlx::query_as(
-        "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url FROM email_accounts ORDER BY created_at",
+        "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts ORDER BY created_at",
     )
     .fetch_all(&user_db)
     .await
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .into_iter()
-    .map(|(id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url): (String, String, String, String, i64, String, String, i64, String, String, i64, String, String, Option<String>, Option<String>)| AccountResponse {
-        id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url,
-    })
-    .collect();
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(Json(rows))
 }
@@ -259,33 +275,64 @@ pub async fn update_account(
     Json(req): Json<UpdateAccountRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Zero-trust: validate every provided field before any work.
-    if let Some(v) = &req.display_name { validate::text("display_name", v, 200)?; }
-    if let Some(v) = &req.imap_host { validate::host("imap_host", v)?; }
-    if let Some(p) = req.imap_port { validate::port("imap_port", p)?; }
-    if let Some(s) = &req.imap_auth_scheme { validate::one_of("imap_auth_scheme", s, validate::AUTH_SCHEMES)?; }
-    if let Some(v) = &req.imap_username { validate::text("imap_username", v, 320)?; }
-    if let Some(v) = &req.imap_password { validate::text("imap_password", v, 4096)?; }
-    if let Some(v) = &req.smtp_host { validate::host("smtp_host", v)?; }
-    if let Some(p) = req.smtp_port { validate::port("smtp_port", p)?; }
-    if let Some(s) = &req.smtp_auth_scheme { validate::one_of("smtp_auth_scheme", s, validate::AUTH_SCHEMES)?; }
-    if let Some(v) = &req.smtp_username { validate::text("smtp_username", v, 320)?; }
-    if let Some(v) = &req.smtp_password { validate::text("smtp_password", v, 4096)?; }
-    if let Some(m) = &req.body_sync_mode { validate::one_of("body_sync_mode", m, validate::BODY_SYNC_MODES)?; }
-    if let Some(s) = req.sync_interval_secs { validate::range_i64("sync_interval_secs", s, 30, 86_400)?; }
-    if let Some(m) = &req.sync_mode { validate::one_of("sync_mode", m, validate::SYNC_MODES)?; }
+    if let Some(v) = &req.display_name {
+        validate::text("display_name", v, 200)?;
+    }
+    if let Some(v) = &req.imap_host {
+        validate::host("imap_host", v)?;
+    }
+    if let Some(p) = req.imap_port {
+        validate::port("imap_port", p)?;
+    }
+    if let Some(s) = &req.imap_auth_scheme {
+        validate::one_of("imap_auth_scheme", s, validate::AUTH_SCHEMES)?;
+    }
+    if let Some(v) = &req.imap_username {
+        validate::text("imap_username", v, 320)?;
+    }
+    if let Some(v) = &req.imap_password {
+        validate::text("imap_password", v, 4096)?;
+    }
+    if let Some(v) = &req.smtp_host {
+        validate::host("smtp_host", v)?;
+    }
+    if let Some(p) = req.smtp_port {
+        validate::port("smtp_port", p)?;
+    }
+    if let Some(s) = &req.smtp_auth_scheme {
+        validate::one_of("smtp_auth_scheme", s, validate::AUTH_SCHEMES)?;
+    }
+    if let Some(v) = &req.smtp_username {
+        validate::text("smtp_username", v, 320)?;
+    }
+    if let Some(v) = &req.smtp_password {
+        validate::text("smtp_password", v, 4096)?;
+    }
+    if let Some(m) = &req.body_sync_mode {
+        validate::one_of("body_sync_mode", m, validate::BODY_SYNC_MODES)?;
+    }
+    if let Some(s) = req.sync_interval_secs {
+        validate::range_i64("sync_interval_secs", s, 30, 86_400)?;
+    }
+    if let Some(m) = &req.sync_mode {
+        validate::one_of("sync_mode", m, validate::SYNC_MODES)?;
+    }
     // Empty string clears the URL (COALESCE keeps old only on NULL, so empty is allowed through).
-    if let Some(u) = req.carddav_url.as_deref().filter(|s| !s.is_empty()) { validate::http_url("carddav_url", u)?; }
-    if let Some(u) = req.caldav_url.as_deref().filter(|s| !s.is_empty()) { validate::http_url("caldav_url", u)?; }
+    if let Some(u) = req.carddav_url.as_deref().filter(|s| !s.is_empty()) {
+        validate::http_url("carddav_url", u)?;
+    }
+    if let Some(u) = req.caldav_url.as_deref().filter(|s| !s.is_empty()) {
+        validate::http_url("caldav_url", u)?;
+    }
 
     let user_db = state.user_db_pool.get(&user.0).await?;
 
     // Check ownership (returns 404 for both missing and wrong owner — D2)
-    let existing: Option<(String, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, credentials_encrypted FROM email_accounts WHERE id = ?",
-    )
-    .bind(&account_id)
-    .fetch_optional(&user_db)
-    .await?;
+    let existing: Option<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT id, credentials_encrypted FROM email_accounts WHERE id = ?")
+            .bind(&account_id)
+            .fetch_optional(&user_db)
+            .await?;
     let (_id, old_creds_enc) = existing.ok_or(AppError::NotFound)?;
 
     // Decrypt old credentials to patch
@@ -296,10 +343,18 @@ pub async fn update_account(
     let mut creds: serde_json::Value =
         serde_json::from_slice(&old_creds_bytes).map_err(|e| AppError::Internal(e.to_string()))?;
 
-    if let Some(u) = &req.imap_username { creds["imap_username"] = json!(u); }
-    if let Some(p) = &req.imap_password { creds["imap_password"] = json!(p); }
-    if let Some(u) = &req.smtp_username { creds["smtp_username"] = json!(u); }
-    if let Some(p) = &req.smtp_password { creds["smtp_password"] = json!(p); }
+    if let Some(u) = &req.imap_username {
+        creds["imap_username"] = json!(u);
+    }
+    if let Some(p) = &req.imap_password {
+        creds["imap_password"] = json!(p);
+    }
+    if let Some(u) = &req.smtp_username {
+        creds["smtp_username"] = json!(u);
+    }
+    if let Some(p) = &req.smtp_password {
+        creds["smtp_password"] = json!(p);
+    }
 
     let new_creds_bytes = serde_json::to_vec(&creds).unwrap();
     let new_encrypted = state
@@ -321,21 +376,31 @@ pub async fn update_account(
 
     if let Some(host) = &test_imap_host {
         if let Some(port) = req.imap_port {
-            let scheme = req.imap_auth_scheme.clone().unwrap_or_else(|| "plain".into());
+            let scheme = req
+                .imap_auth_scheme
+                .clone()
+                .unwrap_or_else(|| "plain".into());
             let tls_cert: Option<String> =
                 sqlx::query_scalar("SELECT imap_tls_cert FROM email_accounts WHERE id = ?")
                     .bind(&account_id)
                     .fetch_one(&user_db)
                     .await?;
             let trusted = mail_sync::session::decode_trusted_cert(tls_cert.as_deref());
-            mail_sync::test_imap_connection(host, port, &imap_user, &imap_pass, &scheme, trusted.as_deref())
-                .await
-                .map_err(|e| AppError::Unprocessable(e.to_string()))?;
+            mail_sync::test_imap_connection(
+                host,
+                port,
+                &imap_user,
+                &imap_pass,
+                &scheme,
+                trusted.as_deref(),
+            )
+            .await
+            .map_err(|e| AppError::Unprocessable(e.to_string()))?;
         }
     }
 
     sqlx::query(
-        "UPDATE email_accounts SET display_name = COALESCE(?, display_name), imap_host = COALESCE(?, imap_host), imap_port = COALESCE(?, imap_port), imap_auth_scheme = COALESCE(?, imap_auth_scheme), smtp_host = COALESCE(?, smtp_host), smtp_port = COALESCE(?, smtp_port), smtp_auth_scheme = COALESCE(?, smtp_auth_scheme), credentials_encrypted = ?, body_sync_mode = COALESCE(?, body_sync_mode), sync_interval_secs = COALESCE(?, sync_interval_secs), sync_mode = COALESCE(?, sync_mode), carddav_url = COALESCE(?, carddav_url), caldav_url = COALESCE(?, caldav_url) WHERE id = ?",
+        "UPDATE email_accounts SET display_name = COALESCE(?, display_name), imap_host = COALESCE(?, imap_host), imap_port = COALESCE(?, imap_port), imap_auth_scheme = COALESCE(?, imap_auth_scheme), smtp_host = COALESCE(?, smtp_host), smtp_port = COALESCE(?, smtp_port), smtp_auth_scheme = COALESCE(?, smtp_auth_scheme), credentials_encrypted = ?, body_sync_mode = COALESCE(?, body_sync_mode), sync_interval_secs = COALESCE(?, sync_interval_secs), sync_mode = COALESCE(?, sync_mode), carddav_url = COALESCE(?, carddav_url), caldav_url = COALESCE(?, caldav_url), caldav_accept_invalid_tls = COALESCE(?, caldav_accept_invalid_tls), pgp_key_id = COALESCE(?, pgp_key_id), sign_by_default = COALESCE(?, sign_by_default) WHERE id = ?",
     )
     .bind(req.display_name.as_deref())
     .bind(req.imap_host.as_deref())
@@ -350,6 +415,9 @@ pub async fn update_account(
     .bind(req.sync_mode.as_deref())
     .bind(req.carddav_url.as_deref())
     .bind(req.caldav_url.as_deref())
+    .bind(req.caldav_accept_invalid_tls)
+    .bind(req.pgp_key_id.as_deref())
+    .bind(req.sign_by_default)
     .bind(&account_id)
     .execute(&user_db)
     .await?;
@@ -372,11 +440,10 @@ pub async fn delete_account(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&user_db)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
+        .bind(&account_id)
+        .fetch_optional(&user_db)
+        .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
@@ -400,11 +467,10 @@ pub async fn sync_status(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&user_db)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
+        .bind(&account_id)
+        .fetch_optional(&user_db)
+        .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
@@ -427,11 +493,10 @@ pub async fn trigger_sync(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&user_db)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
+        .bind(&account_id)
+        .fetch_optional(&user_db)
+        .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
@@ -460,11 +525,10 @@ pub async fn add_alias(
     }
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&user_db)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
+        .bind(&account_id)
+        .fetch_optional(&user_db)
+        .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
@@ -496,11 +560,10 @@ pub async fn list_aliases(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&user_db)
-            .await?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM email_accounts WHERE id = ?")
+        .bind(&account_id)
+        .fetch_optional(&user_db)
+        .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
@@ -530,33 +593,31 @@ pub async fn update_alias(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let exists: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM account_aliases WHERE id = ? AND account_id = ?",
-    )
-    .bind(&alias_id)
-    .bind(&account_id)
-    .fetch_optional(&user_db)
-    .await?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM account_aliases WHERE id = ? AND account_id = ?")
+            .bind(&alias_id)
+            .bind(&account_id)
+            .fetch_optional(&user_db)
+            .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
 
-    sqlx::query(
-        "UPDATE account_aliases SET display_name = COALESCE(?, display_name) WHERE id = ?",
-    )
-    .bind(req.display_name.as_deref())
-    .bind(&alias_id)
-    .execute(&user_db)
-    .await?;
+    sqlx::query("UPDATE account_aliases SET display_name = COALESCE(?, display_name) WHERE id = ?")
+        .bind(req.display_name.as_deref())
+        .bind(&alias_id)
+        .execute(&user_db)
+        .await?;
 
-    let row: (String, String, Option<String>) = sqlx::query_as(
-        "SELECT id, email, display_name FROM account_aliases WHERE id = ?",
-    )
-    .bind(&alias_id)
-    .fetch_one(&user_db)
-    .await?;
+    let row: (String, String, Option<String>) =
+        sqlx::query_as("SELECT id, email, display_name FROM account_aliases WHERE id = ?")
+            .bind(&alias_id)
+            .fetch_one(&user_db)
+            .await?;
 
-    Ok(Json(json!({ "id": row.0, "account_id": account_id, "email": row.1, "display_name": row.2 })))
+    Ok(Json(
+        json!({ "id": row.0, "account_id": account_id, "email": row.1, "display_name": row.2 }),
+    ))
 }
 
 pub async fn delete_alias(
@@ -566,13 +627,12 @@ pub async fn delete_alias(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
 
-    let exists: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM account_aliases WHERE id = ? AND account_id = ?",
-    )
-    .bind(&alias_id)
-    .bind(&account_id)
-    .fetch_optional(&user_db)
-    .await?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM account_aliases WHERE id = ? AND account_id = ?")
+            .bind(&alias_id)
+            .bind(&account_id)
+            .fetch_optional(&user_db)
+            .await?;
     if exists.is_none() {
         return Err(AppError::NotFound);
     }
@@ -593,32 +653,12 @@ async fn get_account_row(
     db: &sqlx::SqlitePool,
     account_id: &str,
 ) -> Result<AccountResponse, AppError> {
-    let row: Option<(String, String, String, String, i64, String, String, i64, String, String, i64, String, String, Option<String>, Option<String>)> =
+    let row: Option<AccountResponse> =
         sqlx::query_as(
-            "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url FROM email_accounts WHERE id = ?",
+            "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts WHERE id = ?",
         )
         .bind(account_id)
         .fetch_optional(db)
         .await?;
-
-    let (id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url) =
-        row.ok_or(AppError::NotFound)?;
-
-    Ok(AccountResponse {
-        id,
-        display_name,
-        primary_email,
-        imap_host,
-        imap_port,
-        imap_auth_scheme,
-        smtp_host,
-        smtp_port,
-        smtp_auth_scheme,
-        body_sync_mode,
-        sync_interval_secs,
-        sync_mode,
-        created_at,
-        carddav_url,
-        caldav_url,
-    })
+    row.ok_or(AppError::NotFound)
 }

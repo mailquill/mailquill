@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueries } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Bold, Italic, Underline, Strikethrough, List, ListOrdered, Paperclip, Send, Type, X } from 'lucide-react'
+import { Bold, Italic, Underline, Strikethrough, List, ListOrdered, Lock, Paperclip, Send, ShieldCheck, TriangleAlert, Type, X } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/components/ui/dialog'
 import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
@@ -12,6 +12,15 @@ import { apiGet } from '@/shared/api'
 import { useAccounts } from '@/shared/hooks/useAccounts'
 import { useSendMessage } from '@/shared/hooks/useMessages'
 import { useOnlineStatus } from '@/shared/hooks/useOnlineStatus'
+import { useDiscoverKey, usePgpKeys, type ContactKey } from '@/shared/hooks/usePgp'
+import {
+  encryptText,
+  getUnlockedKey,
+  hasInlinePgpMessage,
+  hasPgpMime,
+  signDetachedText,
+  unlockPrivateKey,
+} from '@/shared/lib/pgpCrypto'
 import type { Account, AccountAlias, AttachmentInput, Message } from '@/shared/types'
 import type { ComposeInitialState } from '../types'
 import { isValidEmail } from '@/shared/lib/email'
@@ -60,6 +69,8 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
   const senderData = useSenderIdentityData(accounts)
   const identities = senderData.groups.flatMap((group) => group.identities)
   const sendMessage = useSendMessage()
+  const discoverKey = useDiscoverKey()
+  const { data: pgpKeys = [] } = usePgpKeys()
   const sourceMessage = initialState.sourceMessage
 
   const initialTo =
@@ -79,8 +90,19 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
   const [plainText, setPlainText] = useState(false)
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [recipientKeys, setRecipientKeys] = useState<Record<string, ContactKey | null>>({})
+  const [sign, setSign] = useState(false)
+  const [encrypt, setEncrypt] = useState(false)
+  const [cryptoError, setCryptoError] = useState<string | null>(null)
 
   const selectedIdentity = identities.find((identity) => identityKey(identity) === from) ?? identities[0]
+  const selectedAccount = selectedIdentity
+    ? accounts.find((account) => account.id === selectedIdentity.accountId)
+    : undefined
+  const primaryPgpKey =
+    (selectedAccount?.pgp_key_id ? pgpKeys.find((key) => key.id === selectedAccount.pgp_key_id) : undefined) ??
+    pgpKeys.find((key) => key.is_primary) ??
+    pgpKeys[0]
   const title =
     initialState.mode === 'reply'
       ? t('action.reply')
@@ -90,6 +112,14 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
 
   const allRecipients = [...to, ...cc, ...bcc]
   const recipientsValid = to.length > 0 && allRecipients.every(isValidEmail)
+  const uniqueRecipients = useMemo(
+    () => Array.from(new Set(allRecipients.map((item) => item.trim().toLowerCase()).filter(isValidEmail))),
+    [bcc, cc, to],
+  )
+  const missingRecipientKeys = encrypt
+    ? uniqueRecipients.filter((recipient) => recipientKeys[recipient] === null)
+    : []
+  const sourceEncrypted = hasInlinePgpMessage(sourceMessage?.body_text) || hasInlinePgpMessage(sourceMessage?.body_html) || hasPgpMime(sourceMessage?.body_text) || hasPgpMime(sourceMessage?.body_html)
 
   useEffect(() => {
     // Seed the editor only when opening or switching back to rich mode — not on
@@ -99,6 +129,31 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, plainText])
+
+  useEffect(() => {
+    if (!open) return
+    setSign(Boolean(sourceEncrypted || selectedAccount?.sign_by_default))
+    setEncrypt(Boolean(sourceEncrypted))
+  }, [open, selectedAccount?.sign_by_default, sourceEncrypted])
+
+  useEffect(() => {
+    if (!open || !uniqueRecipients.length) return
+    let cancelled = false
+    for (const recipient of uniqueRecipients) {
+      if (recipient in recipientKeys) continue
+      discoverKey
+        .mutateAsync(recipient)
+        .then((result) => {
+          if (!cancelled) setRecipientKeys((current) => ({ ...current, [recipient]: result.key ?? null }))
+        })
+        .catch(() => {
+          if (!cancelled) setRecipientKeys((current) => ({ ...current, [recipient]: null }))
+        })
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [discoverKey, open, recipientKeys, uniqueRecipients])
 
   function applyFormat(command: RichCommand) {
     editorRef.current?.focus()
@@ -118,26 +173,65 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
     setAttachmentError(null)
   }
 
-  function handleSend() {
+  async function handleSend() {
     if (!selectedIdentity) return
-    const html = plainText ? undefined : editorRef.current?.innerHTML ?? bodyHtml
-    const text = plainText ? bodyText : htmlToText(html ?? '')
-    sendMessage.mutate(
-      {
-        account_id: selectedIdentity.accountId,
-        from: selectedIdentity.email,
-        to,
-        cc,
-        bcc,
-        subject,
-        body_html: html,
-        body_text: text,
-        in_reply_to: initialState.mode === 'reply' ? sourceMessage?.message_id_header : null,
-        references: initialState.mode === 'reply' || initialState.mode === 'forward' ? sourceMessage?.references : null,
-        attachments: attachments.map(toAttachmentInput),
-      },
-      { onSuccess: () => onClose() },
-    )
+    setCryptoError(null)
+    try {
+      const html = plainText ? undefined : editorRef.current?.innerHTML ?? bodyHtml
+      let text = plainText ? bodyText : htmlToText(html ?? '')
+      let nextHtml = html
+      let pgpMimeMode: 'signed' | 'encrypted' | undefined
+      let pgpSignature: string | undefined
+      let privateKeyArmored: string | undefined
+      if (sign || encrypt) {
+        privateKeyArmored = await ensureUnlockedPrimaryKey()
+      }
+      if (encrypt) {
+        if (!primaryPgpKey) throw new Error('compose.noSigningKey')
+        if (missingRecipientKeys.length) throw new Error('compose.missingRecipientKeys')
+        const recipientPublicKeys = uniqueRecipients
+          .map((recipient) => recipientKeys[recipient]?.public_key_data)
+          .filter(Boolean) as string[]
+        text = await encryptText(text, [...recipientPublicKeys, primaryPgpKey.public_key_armored], privateKeyArmored)
+        nextHtml = undefined
+        pgpMimeMode = 'encrypted'
+      } else if (sign && privateKeyArmored) {
+        pgpSignature = await signDetachedText(text, privateKeyArmored)
+        nextHtml = undefined
+        pgpMimeMode = 'signed'
+      }
+      sendMessage.mutate(
+        {
+          account_id: selectedIdentity.accountId,
+          from: selectedIdentity.email,
+          to,
+          cc,
+          bcc,
+          subject,
+          body_html: nextHtml,
+          body_text: text,
+          pgp_mime_mode: pgpMimeMode,
+          pgp_signature: pgpSignature,
+          in_reply_to: initialState.mode === 'reply' ? sourceMessage?.message_id_header : null,
+          references: initialState.mode === 'reply' || initialState.mode === 'forward' ? sourceMessage?.references : null,
+          attachments: attachments.map(toAttachmentInput),
+        },
+        { onSuccess: () => onClose() },
+      )
+    } catch (err) {
+      setCryptoError(t(err instanceof Error && err.message.startsWith('compose.') ? err.message : 'compose.cryptoFailed'))
+    }
+  }
+
+  async function ensureUnlockedPrimaryKey(): Promise<string> {
+    if (!primaryPgpKey) throw new Error('compose.noSigningKey')
+    const cached = getUnlockedKey(primaryPgpKey.fingerprint)
+    if (cached) return cached.privateKeyArmored
+    const passphrase = window.prompt(t('pgp.unlockPrompt'))
+    if (!passphrase) throw new Error('compose.unlockRequired')
+    const blob = await apiGet<{ private_key_encrypted_blob: string }>(`/pgp-keys/${primaryPgpKey.id}/blob`)
+    const unlocked = await unlockPrivateKey(primaryPgpKey.fingerprint, blob.private_key_encrypted_blob, passphrase)
+    return unlocked.privateKeyArmored
   }
 
   return (
@@ -258,6 +352,30 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
               <Type className="size-4" />
               {plainText ? t('compose.richText') : t('compose.plainText')}
             </button>
+            <button
+              type="button"
+              aria-pressed={sign}
+              onClick={() => setSign((value) => !value)}
+              className={cn(
+                'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12px] font-semibold transition-colors',
+                sign ? 'bg-primary text-primary-foreground' : 'text-secondary-foreground hover:bg-secondary',
+              )}
+            >
+              <ShieldCheck className="size-4" />
+              {t('compose.sign')}
+            </button>
+            <button
+              type="button"
+              aria-pressed={encrypt}
+              onClick={() => setEncrypt((value) => !value)}
+              className={cn(
+                'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12px] font-semibold transition-colors',
+                encrypt ? 'bg-primary text-primary-foreground' : 'text-secondary-foreground hover:bg-secondary',
+              )}
+            >
+              <Lock className="size-4" />
+              {t('compose.encrypt')}
+            </button>
             <label className="ml-auto inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-input px-3 text-[13px] transition-colors hover:bg-secondary">
               <Paperclip className="size-4" aria-hidden="true" />
               {t('compose.attach')}
@@ -303,6 +421,21 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
           ) : null}
 
           {attachmentError ? <p className="text-sm text-destructive">{attachmentError}</p> : null}
+          {encrypt && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-[12.5px] text-muted-foreground">
+              {missingRecipientKeys.length ? (
+                <TriangleAlert className="size-4 text-destructive" aria-hidden="true" />
+              ) : (
+                <Lock className="size-4" aria-hidden="true" />
+              )}
+              <span>
+                {missingRecipientKeys.length
+                  ? t('compose.missingKeys', { emails: missingRecipientKeys.join(', ') })
+                  : t('compose.allKeysReady')}
+              </span>
+            </div>
+          )}
+          {cryptoError ? <p className="text-sm text-destructive">{cryptoError}</p> : null}
           {sendMessage.error ? <p className="text-sm text-destructive">{t('compose.sendFailed')}</p> : null}
 
           <div className="flex justify-end gap-2">
@@ -312,7 +445,7 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
             <Button
               type="button"
               onClick={handleSend}
-              disabled={sendMessage.isPending || !selectedIdentity || !recipientsValid || !isOnline}
+              disabled={sendMessage.isPending || !selectedIdentity || !recipientsValid || !isOnline || missingRecipientKeys.length > 0}
             >
               <Send className="size-4" aria-hidden="true" />
               {!isOnline ? t('compose.noConnection') : sendMessage.isPending ? t('compose.sending') : t('compose.send')}

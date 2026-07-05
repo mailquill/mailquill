@@ -20,8 +20,10 @@ import {
   List,
   ChevronDown,
   ShieldAlert,
+  ShieldCheck,
 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
+import { Button } from '@/shared/components/ui/button'
 import { formatDate, parseFromAddr } from '@/shared/lib/format'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import {
@@ -40,12 +42,17 @@ import {
   useMarkRead,
   useToggleFlag,
   useDeleteMessage,
+  useNotSpamMessage,
   useMessage,
+  useReanalyseMessage,
   useThread,
 } from '@/shared/hooks/useMessages'
+import { useMeetingInvitations, useRsvpInvitation } from '@/shared/hooks/useCalendar'
+import { useContactSearch } from '@/shared/hooks/useContacts'
 import { useAddAllowedImageSender, useImageAllowlist, useSettings } from '@/shared/hooks/useSettings'
+import { PgpMessagePanel } from '@/widgets/PgpMessagePanel'
 import type { MailOutletContext } from '@/pages/MailLayout'
-import type { Message } from '@/shared/types'
+import type { MeetingInvitation, Message } from '@/shared/types'
 
 function ToolButton({
   label,
@@ -96,6 +103,7 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   const archiveThread = useArchiveThread()
   const deleteThread = useDeleteThread()
   const markThreadRead = useMarkThreadRead()
+  const notSpam = useNotSpamMessage()
   const { openCompose } = useOutletContext<MailOutletContext>()
   const messages = useMemo(() => data?.messages ?? [], [data?.messages])
   const firstMessage = messages[0]
@@ -124,6 +132,7 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   const fromEmail = parseFromAddr(firstMessage.from_addr).email
   const color = accountColor(firstMessage.account_id)
   const lastMessage = messages.at(-1)!
+  const lastMessageIsSpam = isSpamMessage(lastMessage)
 
   return (
     <article className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
@@ -136,6 +145,15 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
         >
           <Archive className="size-4" />
         </ToolButton>
+        {lastMessageIsSpam && (
+          <ToolButton
+            label={t('action.notSpam')}
+            onClick={() => notSpam.mutate(lastMessage.id, { onSuccess: () => messages.length === 1 && onThreadGone?.() })}
+            disabled={notSpam.isPending}
+          >
+            <ShieldCheck className="size-4" />
+          </ToolButton>
+        )}
         <ToolButton
           label={t('action.delete')}
           danger
@@ -287,16 +305,24 @@ function MessageCard({
   const [expanded, setExpanded] = useState(defaultExpanded)
   const [view, setView] = useState<SourceView>('html')
   const sender = parseFromAddr(message.from_addr)
+  const senderDomain = sender.email.split('@')[1]?.toLowerCase() ?? ''
   const { data: detail, isLoading } = useMessage(expanded ? message.id : '')
   const markRead = useMarkRead()
   const toggleFlag = useToggleFlag()
   const deleteMessage = useDeleteMessage()
+  const notSpam = useNotSpamMessage()
+  const reanalyseMessage = useReanalyseMessage()
   const { data: settings } = useSettings()
   const { data: imageAllowlist } = useImageAllowlist()
   const addAllowedSender = useAddAllowedImageSender()
   const [showRemoteOnce, setShowRemoteOnce] = useState(false)
+  const [contactOpen, setContactOpen] = useState(false)
   const [cidUrls, setCidUrls] = useState<Record<string, string>>({})
   const displayed = detail ?? message
+  const { data: senderMatches = [] } = useContactSearch(contactOpen ? sender.email : '')
+  const senderContact = senderMatches.find((contact) =>
+    contact.emails.some((email) => email.value.toLowerCase() === sender.email.toLowerCase()),
+  )
 
   // Resolve inline attachments: the HTML references them as cid:<Content-ID>,
   // which the browser can't load — fetch each one (authenticated) and swap in
@@ -329,6 +355,7 @@ function MessageCard({
   const bodyLoaded = Boolean(displayed.body_html || displayed.body_text || displayed.snippet)
   const offlineMissing = !navigator.onLine && displayed.body_available === false
   const color = accountColor(message.account_id)
+  const isSpam = isSpamMessage(displayed)
 
   useEffect(() => {
     if (expanded && bodyLoaded && !displayed.is_read && !markRead.isPending) {
@@ -350,7 +377,10 @@ function MessageCard({
     for (const [cid, url] of Object.entries(cidUrls)) {
       rawHtml = rawHtml.split(`cid:${cid}`).join(url)
     }
-    return allowRemote ? { html: rawHtml, blocked: false } : blockRemoteContent(rawHtml)
+    const content = allowRemote ? { html: rawHtml, blocked: false } : blockRemoteContent(rawHtml)
+    return displayed.phishing_verdict === 'phishing'
+      ? { ...content, html: highlightMismatchedLinks(content.html) }
+      : content
   }, [expanded, view, displayed, allowRemote, cidUrls])
 
   return (
@@ -368,7 +398,63 @@ function MessageCard({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <span className="truncate text-[14px] font-bold text-foreground">{sender.name}</span>
+            <span className="relative">
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setContactOpen((value) => !value)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    setContactOpen((value) => !value)
+                  }
+                }}
+                className="block truncate text-[14px] font-bold text-foreground hover:underline"
+              >
+                {sender.name}
+              </span>
+              {contactOpen && (
+                <span className="absolute left-0 top-7 z-50 flex w-72 flex-col gap-2 rounded-md border border-border bg-popover p-3 text-sm shadow-lg">
+                  <span className="flex items-center gap-2">
+                    <span
+                      className="flex size-9 shrink-0 items-center justify-center rounded-full text-[12px] font-bold uppercase text-white"
+                      style={{ backgroundColor: accountColor(sender.email) }}
+                    >
+                      {accountInitials(senderContact?.display_name ?? sender.name)}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate font-semibold text-foreground">
+                        {senderContact?.display_name ?? sender.name}
+                      </span>
+                      <span className="block truncate font-mono text-xs text-muted-foreground">{sender.email}</span>
+                    </span>
+                  </span>
+                  {senderContact?.org && <span className="text-xs text-muted-foreground">{senderContact.org}</span>}
+                  {senderContact?.phones[0]?.value && (
+                    <span className="font-mono text-xs text-muted-foreground">{senderContact.phones[0].value}</span>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      openCompose({ mode: 'new', to: [sender.email] })
+                    }}
+                  >
+                    <Mail className="size-4" />
+                    {t('action.sendEmail')}
+                  </Button>
+                </span>
+              )}
+            </span>
+            {senderDomain && (
+              <span className="truncate font-mono text-[12px] text-muted-foreground">({senderDomain})</span>
+            )}
             <span className="truncate font-mono text-[12px] text-muted-foreground">{sender.email}</span>
             <span className="ml-auto shrink-0 text-[12px] text-muted-foreground">
               {formatDate(message.internal_date)}
@@ -386,6 +472,12 @@ function MessageCard({
       {expanded && (
         <div className="px-4 pb-4">
           <PhishingBanner message={displayed} />
+          <div className="pl-[3.25rem]">
+            <PgpMessagePanel message={displayed} />
+          </div>
+          <div className="pl-[3.25rem]">
+            <RsvpCard messageId={displayed.id} />
+          </div>
           {/* view switcher + actions */}
           <div className="mb-3.5 flex flex-wrap items-center gap-2 pl-[3.25rem]">
             <div className="inline-flex gap-0.5 rounded-lg bg-secondary p-0.5">
@@ -501,6 +593,22 @@ function MessageCard({
               <Forward className="size-4" />
             </ToolButton>
             <ToolButton
+              label={t('action.reanalyse')}
+              onClick={() => reanalyseMessage.mutate(displayed.id)}
+              disabled={reanalyseMessage.isPending}
+            >
+              <ShieldAlert className="size-4" />
+            </ToolButton>
+            {isSpam && (
+              <ToolButton
+                label={t('action.notSpam')}
+                onClick={() => notSpam.mutate(displayed.id, { onSuccess: () => onDeleted?.() })}
+                disabled={notSpam.isPending}
+              >
+                <ShieldCheck className="size-4" />
+              </ToolButton>
+            )}
+            <ToolButton
               label={t('action.delete')}
               danger
               onClick={() => deleteMessage.mutate(displayed.id, { onSuccess: () => onDeleted?.() })}
@@ -513,6 +621,79 @@ function MessageCard({
       )}
     </section>
   )
+}
+
+function isSpamMessage(message: Message) {
+  return message.folder_type === 'SPAM' || message.folder_type === 'JUNK'
+}
+
+function RsvpCard({ messageId }: { messageId: string }) {
+  const { t } = useTranslation()
+  const { data: invitations = [] } = useMeetingInvitations(messageId)
+  const rsvp = useRsvpInvitation()
+  if (!invitations.length) return null
+  const invitation = invitations[0]
+  const attendees = parseAttendees(invitation.attendees)
+  return (
+    <div className="mb-3.5 rounded-lg border border-[#2563eb]/30 bg-[#2563eb]/5 p-3">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[14px] font-bold">{invitation.summary || t('calendar.invitation')}</div>
+          <div className="mt-1 text-[12.5px] text-muted-foreground">
+            {invitation.start_dt ? new Date(invitation.start_dt).toLocaleString() : ''}
+            {invitation.organizer_email ? ` · ${invitation.organizer_email}` : ''}
+          </div>
+          {attendees.length > 0 && (
+            <div className="mt-1 truncate text-[12px] text-muted-foreground">
+              {attendees.map((a) => `${a.email}${a.partstat ? ` (${a.partstat})` : ''}`).join(', ')}
+            </div>
+          )}
+        </div>
+        <span className="rounded-full bg-card px-2.5 py-1 text-[11px] font-bold text-secondary-foreground">
+          {invitation.user_rsvp_status}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {invitation.ms_teams_url && (
+          <a className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-[12px] font-semibold hover:bg-secondary" href={invitation.ms_teams_url} target="_blank" rel="noreferrer">
+            {t('calendar.joinTeams')}
+          </a>
+        )}
+        <button className="inline-flex h-8 items-center rounded-md bg-[#2563eb] px-3 text-[12px] font-semibold text-white disabled:opacity-60" disabled={rsvp.isPending} onClick={() => rsvp.mutate({ id: invitation.id, response: 'accepted' })}>
+          {t('calendar.accept')}
+        </button>
+        <button className="inline-flex h-8 items-center rounded-md border border-border bg-card px-3 text-[12px] font-semibold hover:bg-secondary disabled:opacity-60" disabled={rsvp.isPending} onClick={() => rsvp.mutate({ id: invitation.id, response: 'tentative' })}>
+          {t('calendar.tentative')}
+        </button>
+        <button className="inline-flex h-8 items-center rounded-md border border-border bg-card px-3 text-[12px] font-semibold text-destructive hover:bg-secondary disabled:opacity-60" disabled={rsvp.isPending} onClick={() => rsvp.mutate({ id: invitation.id, response: 'declined' })}>
+          {t('calendar.decline')}
+        </button>
+        <button className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-[12px] font-semibold hover:bg-secondary" onClick={() => downloadIcs(invitation)}>
+          <Download className="size-3.5" />
+          {t('calendar.downloadIcs')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function parseAttendees(raw: string): Array<{ email: string; partstat?: string }> {
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function downloadIcs(invitation: MeetingInvitation) {
+  const blob = new Blob([invitation.raw_ical], { type: 'text/calendar;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${invitation.uid || 'invitation'}.ics`
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 /**
@@ -623,6 +804,43 @@ function HtmlBody({ html, title }: { html: string; title: string }) {
       className="block w-full rounded-md border border-border bg-background"
     />
   )
+}
+
+function highlightMismatchedLinks(html: string): string {
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(html, 'text/html')
+  doc.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((anchor) => {
+    const hrefDomain = linkDomain(anchor.href)
+    const textDomain = visibleLinkDomain(anchor.textContent ?? '')
+    if (!hrefDomain || !textDomain || sameDomainOrg(hrefDomain, textDomain)) return
+    anchor.style.outline = '2px solid #dc2626'
+    anchor.style.borderRadius = '4px'
+    anchor.style.backgroundColor = 'rgba(220, 38, 38, 0.12)'
+    anchor.title = `Displayed ${textDomain}, opens ${hrefDomain}`
+  })
+  return doc.documentElement.outerHTML
+}
+
+function visibleLinkDomain(value: string): string {
+  const match = value.trim().match(/(?:https?:\/\/|www\.)([a-z0-9.-]+\.[a-z]{2,})/i)
+  return match?.[1]?.toLowerCase() ?? ''
+}
+
+function linkDomain(value: string): string {
+  try {
+    return new URL(value).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+function sameDomainOrg(a: string, b: string): boolean {
+  return registrableDomain(a) === registrableDomain(b)
+}
+
+function registrableDomain(domain: string): string {
+  const parts = domain.split('.')
+  return parts.length <= 2 ? domain : parts.slice(-2).join('.')
 }
 
 function CopyButton({ text }: { text: string }) {

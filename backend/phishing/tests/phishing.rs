@@ -7,10 +7,8 @@ fn bundled_brands() -> Vec<(String, String)> {
 
 fn raw(headers: &str, html: Option<&str>) -> Vec<u8> {
     match html {
-        Some(body) => format!(
-            "{headers}Content-Type: text/html; charset=utf-8\r\n\r\n{body}\r\n"
-        )
-        .into_bytes(),
+        Some(body) => format!("{headers}Content-Type: text/html; charset=utf-8\r\n\r\n{body}\r\n")
+            .into_bytes(),
         None => format!("{headers}\r\n").into_bytes(),
     }
 }
@@ -109,10 +107,7 @@ fn same_org_subdomains_do_not_fire() {
 #[test]
 fn multi_part_tld_not_treated_as_org() {
     // evil.co.uk and bank.co.uk share only the public suffix — must fire.
-    let msg = raw(
-        "From: x@bank.co.uk\r\nReply-To: y@evil.co.uk\r\n",
-        None,
-    );
+    let msg = raw("From: x@bank.co.uk\r\nReply-To: y@evil.co.uk\r\n", None);
     let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
     assert!(report.checks.iter().any(|c| c.id == "reply_to_mismatch"));
 }
@@ -140,7 +135,7 @@ fn link_text_href_mismatch_fires_and_caps() {
         <a href="https://evil.com/d">https://dkb.de</a>
         <a href="https://example.com/ok">Click here</a>
     "#;
-    let msg = raw("From: X <x@example.com>\r\n", Some(body));
+    let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
     let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
     let link_points: i32 = report
         .checks
@@ -199,7 +194,7 @@ fn feed_with(urls: &[&str]) -> OpenPhishFeed {
 #[test]
 fn openphish_exact_url_hit_is_phishing() {
     let body = r#"<a href="https://evil.example/steal/login">Click here</a>"#;
-    let msg = raw("From: X <x@example.com>\r\n", Some(body));
+    let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
     let feed = feed_with(&["https://evil.example/steal/login"]);
     let report = analyse(&msg, &bundled_brands(), &feed);
     assert!(report.checks.iter().any(|c| c.id == "openphish_url"));
@@ -209,7 +204,7 @@ fn openphish_exact_url_hit_is_phishing() {
 #[test]
 fn openphish_domain_hit_is_suspicious() {
     let body = r#"<a href="https://evil.example/other/path">Click here</a>"#;
-    let msg = raw("From: X <x@example.com>\r\n", Some(body));
+    let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
     let feed = feed_with(&["https://evil.example/steal/login"]);
     let report = analyse(&msg, &bundled_brands(), &feed);
     assert!(report.checks.iter().any(|c| c.id == "openphish_domain"));
@@ -219,7 +214,7 @@ fn openphish_domain_hit_is_suspicious() {
 #[test]
 fn openphish_clean_link_no_hit() {
     let body = r#"<a href="https://example.com/news">Click here</a>"#;
-    let msg = raw("From: X <x@example.com>\r\n", Some(body));
+    let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
     let feed = feed_with(&["https://evil.example/steal/login"]);
     let report = analyse(&msg, &bundled_brands(), &feed);
     assert!(report.checks.is_empty(), "checks: {:?}", report.checks);

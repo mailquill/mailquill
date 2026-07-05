@@ -95,12 +95,8 @@ pub async fn fetch_body_by_uid(
             .execute(user_db)
             .await;
         for (i, att) in parsed.attachments.iter().enumerate() {
-            let att_key = mailquill_core::blob::blob_key_attachment(
-                account_id,
-                uid,
-                internal_date,
-                i,
-            );
+            let att_key =
+                mailquill_core::blob::blob_key_attachment(account_id, uid, internal_date, i);
             let att_blob = bytes::Bytes::from(att.data.clone());
             if blob_store.put(&att_key, att_blob).await.is_ok() {
                 let _ = sqlx::query(

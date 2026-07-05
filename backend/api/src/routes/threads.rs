@@ -7,7 +7,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{error::AppError, middleware::UserId, routes::messages::refresh_unread_counts, state::AppState};
+use crate::{
+    error::AppError, middleware::UserId, routes::messages::refresh_unread_counts, state::AppState,
+};
 
 #[derive(Deserialize)]
 pub struct ThreadReadRequest {
@@ -50,26 +52,45 @@ pub async fn get_thread(
     let total = rows.len();
     let messages: Vec<_> = rows
         .into_iter()
-        .map(|(id, account_id, folder_id, uid, message_id_header, in_reply_to, list_id, subject, from_addr, to_addrs, snippet, internal_date, folder_type, folder_path, is_read, is_flagged)| {
-            json!({
-                "id": id,
-                "account_id": account_id,
-                "folder_id": folder_id,
-                "uid": uid,
-                "message_id_header": message_id_header,
-                "in_reply_to": in_reply_to,
-                "list_id": list_id,
-                "subject": subject,
-                "from_addr": from_addr,
-                "to_addrs": to_addrs,
-                "snippet": snippet,
-                "internal_date": internal_date,
-                "folder_type": folder_type,
-                "folder_path": folder_path,
-                "is_read": is_read,
-                "is_flagged": is_flagged,
-            })
-        })
+        .map(
+            |(
+                id,
+                account_id,
+                folder_id,
+                uid,
+                message_id_header,
+                in_reply_to,
+                list_id,
+                subject,
+                from_addr,
+                to_addrs,
+                snippet,
+                internal_date,
+                folder_type,
+                folder_path,
+                is_read,
+                is_flagged,
+            )| {
+                json!({
+                    "id": id,
+                    "account_id": account_id,
+                    "folder_id": folder_id,
+                    "uid": uid,
+                    "message_id_header": message_id_header,
+                    "in_reply_to": in_reply_to,
+                    "list_id": list_id,
+                    "subject": subject,
+                    "from_addr": from_addr,
+                    "to_addrs": to_addrs,
+                    "snippet": snippet,
+                    "internal_date": internal_date,
+                    "folder_type": folder_type,
+                    "folder_path": folder_path,
+                    "is_read": is_read,
+                    "is_flagged": is_flagged,
+                })
+            },
+        )
         .collect();
 
     let thread_unread: i64 = sqlx::query_scalar(
@@ -119,7 +140,13 @@ pub async fn mark_thread_read(
     Path(thread_id): Path<String>,
     Json(req): Json<ThreadReadRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::MarkRead(req.is_read)).await
+    bulk_thread_action(
+        &state,
+        &user.0,
+        &thread_id,
+        ThreadAction::MarkRead(req.is_read),
+    )
+    .await
 }
 
 enum ThreadAction {
@@ -150,28 +177,34 @@ async fn bulk_thread_action(
     for (msg_id, account_id, uid, folder_path) in &messages {
         match action {
             ThreadAction::Archive => {
-                state.sync_manager.queue_imap_move(
-                    user_id.to_owned(),
-                    account_id.clone(),
-                    *uid as u32,
-                    folder_path.clone(),
-                    "Archive".into(),
-                    false,
-                ).await;
+                state
+                    .sync_manager
+                    .queue_imap_move(
+                        user_id.to_owned(),
+                        account_id.clone(),
+                        *uid as u32,
+                        folder_path.clone(),
+                        "Archive".into(),
+                        false,
+                    )
+                    .await;
             }
             ThreadAction::Delete => {
                 sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
                     .bind(msg_id)
                     .execute(&user_db)
                     .await?;
-                state.sync_manager.queue_imap_move(
-                    user_id.to_owned(),
-                    account_id.clone(),
-                    *uid as u32,
-                    folder_path.clone(),
-                    "Trash".into(),
-                    false,
-                ).await;
+                state
+                    .sync_manager
+                    .queue_imap_move(
+                        user_id.to_owned(),
+                        account_id.clone(),
+                        *uid as u32,
+                        folder_path.clone(),
+                        "Trash".into(),
+                        false,
+                    )
+                    .await;
             }
             ThreadAction::MarkRead(is_read) => {
                 sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
@@ -179,14 +212,17 @@ async fn bulk_thread_action(
                     .bind(msg_id)
                     .execute(&user_db)
                     .await?;
-                state.sync_manager.queue_imap_flag(
-                    user_id.to_owned(),
-                    account_id.clone(),
-                    *uid as u32,
-                    folder_path.clone(),
-                    "seen".into(),
-                    is_read,
-                ).await;
+                state
+                    .sync_manager
+                    .queue_imap_flag(
+                        user_id.to_owned(),
+                        account_id.clone(),
+                        *uid as u32,
+                        folder_path.clone(),
+                        "seen".into(),
+                        is_read,
+                    )
+                    .await;
             }
         }
     }

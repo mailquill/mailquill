@@ -489,12 +489,13 @@ pub async fn graph_write(
 
 pub async fn google_sync(
     access_token: &str,
-    sync_token: Option<&str>,
-) -> Result<SyncResult, String> {
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<SyncResult>, String> {
     let c = client()?;
     let calendars_json = bearer_json(
         &c,
-        "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+        "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250",
         access_token,
     )
     .await?;
@@ -502,32 +503,37 @@ pub async fn google_sync(
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|item| item["accessRole"].as_str() != Some("freeBusyReader"))
         .map(|item| DiscoveredCalendar {
             name: item["summary"].as_str().unwrap_or("Calendar").to_owned(),
             url: item["id"].as_str().unwrap_or("primary").to_owned(),
             color: item["backgroundColor"].as_str().map(str::to_owned),
         })
         .collect::<Vec<_>>();
-    let mut url =
-        "https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=false"
-            .to_owned();
-    if let Some(token) = sync_token {
-        url.push_str("&syncToken=");
-        url.push_str(&urlencoding::encode(token));
+
+    let mut results = Vec::with_capacity(calendars.len());
+    for calendar in calendars {
+        let url = format!(
+            "https://www.googleapis.com/calendar/v3/calendars/{}/events?singleEvents=false&maxResults=2500&timeMin={}&timeMax={}",
+            urlencoding::encode(&calendar.url),
+            urlencoding::encode(start.to_rfc3339().as_str()),
+            urlencoding::encode(end.to_rfc3339().as_str())
+        );
+        let events_json = bearer_json(&c, &url, access_token).await?;
+        let events = events_json["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(google_event)
+            .collect();
+        let sync_token = events_json["nextSyncToken"].as_str().map(str::to_owned);
+        results.push(SyncResult {
+            calendars: vec![calendar],
+            events,
+            sync_token,
+        });
     }
-    let events_json = bearer_json(&c, &url, access_token).await?;
-    let events = events_json["items"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(google_event)
-        .collect();
-    let sync_token = events_json["nextSyncToken"].as_str().map(str::to_owned);
-    Ok(SyncResult {
-        calendars,
-        events,
-        sync_token,
-    })
+    Ok(results)
 }
 
 pub async fn google_write(

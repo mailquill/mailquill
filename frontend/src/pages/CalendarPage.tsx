@@ -9,9 +9,11 @@ import { Label } from '@/shared/components/ui/label'
 import { Select } from '@/shared/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/components/ui/dialog'
 import { apiGet } from '@/shared/api'
+import { startOAuthRedirect } from '@/shared/lib/oauth'
 import { DavSyncButton } from '@/widgets/DavSyncButton'
 import { RecipientChips } from '@/features/compose'
 import { CaldavErrorAlert } from '@/features/caldav-errors'
+import { useAccounts } from '@/shared/hooks/useAccounts'
 import {
   useCalendarAccounts,
   useCalendars,
@@ -132,6 +134,7 @@ export function CalendarPage() {
 function CalendarAccountsStrip() {
   const { t } = useTranslation()
   const { data: accounts = [] } = useCalendarAccounts()
+  const { data: emailAccounts = [] } = useAccounts()
   const createAccount = useCreateCalendarAccount()
   const deleteAccount = useDeleteCalendarAccount()
   const [open, setOpen] = useState(false)
@@ -143,8 +146,10 @@ function CalendarAccountsStrip() {
     username: '',
     password: '',
     access_token: '',
+    email_account_id: '',
     accept_invalid_tls: false,
   })
+  const gmailAccounts = emailAccounts.filter((account) => account.provider_kind === 'gmail_api')
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     createAccount.reset()
@@ -186,25 +191,60 @@ function CalendarAccountsStrip() {
       </div>
       {open && (
         <div className="mt-3 grid gap-2 md:grid-cols-[160px_160px_minmax(180px,1fr)_140px_140px_140px_auto]">
-          <Input placeholder={t('settings.displayName')} value={form.display_name} onChange={(e) => set('display_name', e.currentTarget.value)} />
-          <Select value={form.type} onChange={(e) => set('type', e.currentTarget.value as typeof form.type)}>
+          {form.type !== 'google' && (
+            <Input placeholder={t('settings.displayName')} value={form.display_name} onChange={(e) => set('display_name', e.currentTarget.value)} />
+          )}
+          <Select
+            value={form.type}
+            onChange={(e) => {
+              const type = e.currentTarget.value as typeof form.type
+              set('type', type)
+              if (type === 'google') set('auth_scheme', 'oauth2')
+            }}
+          >
             <option value="caldav">CalDAV</option>
             <option value="graph">Exchange</option>
             <option value="google">Google</option>
             <option value="openxchange">Open-Xchange</option>
           </Select>
-          <Input
-            placeholder={form.type === 'caldav' ? t('calendar.baseUrlOptional') : t('calendar.baseUrl')}
-            value={form.base_url}
-            onChange={(e) => set('base_url', e.currentTarget.value)}
-          />
-          <Select value={form.auth_scheme} onChange={(e) => set('auth_scheme', e.currentTarget.value as typeof form.auth_scheme)}>
-            <option value="basic">Basic</option>
-            <option value="oauth2">OAuth2</option>
-          </Select>
-          <Input placeholder={form.type === 'caldav' ? t('calendar.usernameEmail') : t('calendar.username')} value={form.username} onChange={(e) => set('username', e.currentTarget.value)} />
-          <Input placeholder={form.auth_scheme === 'oauth2' ? t('calendar.accessToken') : t('calendar.password')} type="password" value={form.auth_scheme === 'oauth2' ? form.access_token : form.password} onChange={(e) => form.auth_scheme === 'oauth2' ? set('access_token', e.currentTarget.value) : set('password', e.currentTarget.value)} />
-          <Button onClick={submit} disabled={createAccount.isPending}>{t('action.save')}</Button>
+          {form.type === 'google' ? (
+            <>
+              <Select
+                value={form.email_account_id}
+                onChange={(e) => set('email_account_id', e.currentTarget.value)}
+                aria-label={t('calendar.googleAccount')}
+              >
+                <option value="">{t('calendar.newGoogleAccount')}</option>
+                {gmailAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.display_name || account.primary_email}
+                  </option>
+                ))}
+              </Select>
+              <Button
+                onClick={() =>
+                  startOAuthRedirect('google', form.email_account_id || undefined, 'calendar')
+                }
+              >
+                {t('calendar.connectGoogle')}
+              </Button>
+            </>
+          ) : (
+            <>
+              <Input
+                placeholder={form.type === 'caldav' ? t('calendar.baseUrlOptional') : t('calendar.baseUrl')}
+                value={form.base_url}
+                onChange={(e) => set('base_url', e.currentTarget.value)}
+              />
+              <Select value={form.auth_scheme} onChange={(e) => set('auth_scheme', e.currentTarget.value as typeof form.auth_scheme)}>
+                <option value="basic">Basic</option>
+                <option value="oauth2">OAuth2</option>
+              </Select>
+              <Input placeholder={form.type === 'caldav' ? t('calendar.usernameEmail') : t('calendar.username')} value={form.username} onChange={(e) => set('username', e.currentTarget.value)} />
+              <Input placeholder={form.auth_scheme === 'oauth2' ? t('calendar.accessToken') : t('calendar.password')} type="password" value={form.auth_scheme === 'oauth2' ? form.access_token : form.password} onChange={(e) => form.auth_scheme === 'oauth2' ? set('access_token', e.currentTarget.value) : set('password', e.currentTarget.value)} />
+              <Button onClick={submit} disabled={createAccount.isPending}>{t('action.save')}</Button>
+            </>
+          )}
           {form.type === 'caldav' && (
             <label className="md:col-span-full flex items-start gap-2 text-[12px] text-muted-foreground">
               <input

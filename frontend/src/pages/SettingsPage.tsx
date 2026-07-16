@@ -136,9 +136,11 @@ export function SettingsPage() {
 
 function CalendarSettingsSection() {
   const { t } = useTranslation()
+  const { data: accounts = [] } = useAccounts()
   const { data: calendars = [] } = useCalendars()
   const { data: settings } = useSettings()
   const updateSettings = useUpdateSettings()
+  const mailboxByAccountId = new Map(accounts.map((account) => [account.id, account.primary_email]))
   return (
     <div>
       <SectionHeader title={t('settings.calendar')} description={t('settings.calendarDesc')} />
@@ -150,11 +152,14 @@ function CalendarSettingsSection() {
             onChange={(event) => updateSettings.mutate({ default_calendar_id: event.currentTarget.value || null })}
           >
             <option value="">{t('settings.noDefaultCalendar')}</option>
-            {calendars.map((calendar) => (
-              <option key={calendar.id} value={calendar.id}>
-                {calendar.name}
-              </option>
-            ))}
+            {calendars.map((calendar) => {
+              const mailbox = calendar.account_id ? mailboxByAccountId.get(calendar.account_id) : undefined
+              return (
+                <option key={calendar.id} value={calendar.id}>
+                  {mailbox ? `${calendar.name} (${mailbox})` : calendar.name}
+                </option>
+              )
+            })}
           </Select>
         </Field>
       </div>

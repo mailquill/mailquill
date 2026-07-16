@@ -73,6 +73,21 @@ export function useDeleteCalendarAccount() {
   })
 }
 
+export function useSyncCalendarAccount() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiPost<{ status: string; last_synced_at: string | null; error: string | null }>(
+        `/calendar-accounts/${id}`,
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['calendar-accounts'] })
+      qc.invalidateQueries({ queryKey: ['calendars'] })
+      qc.invalidateQueries({ queryKey: ['events'] })
+    },
+  })
+}
+
 /** Resolve an account's CalDAV calendar collections (RFC 6764 discovery). */
 export function useCaldavDiscover() {
   return useMutation({

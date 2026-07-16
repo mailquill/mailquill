@@ -52,6 +52,9 @@ pub struct Calendar {
     name: String,
     color: String,
     is_default: bool,
+    dav_url: Option<String>,
+    created_at: String,
+    provider_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -211,6 +214,31 @@ pub async fn create_account(
     Ok(Json(account))
 }
 
+/// Link a Google Calendar account to its Gmail OAuth account and run the first sync.
+pub(crate) async fn connect_google_account(
+    db: &sqlx::SqlitePool,
+    state: &AppState,
+    account_id: &str,
+    display_name: &str,
+    encrypted_credentials: &[u8],
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO calendar_accounts \
+         (id, display_name, type, base_url, auth_scheme, credentials_encrypted, sync_interval_secs, sync_status) \
+         VALUES (?, ?, 'google', NULL, 'oauth2', ?, 300, 'syncing') \
+         ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, type='google', \
+         auth_scheme='oauth2', credentials_encrypted=excluded.credentials_encrypted, sync_status='syncing', sync_error=NULL",
+    )
+    .bind(account_id)
+    .bind(display_name)
+    .bind(encrypted_credentials)
+    .execute(db)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    sync_calendar_account(db, state, account_id).await
+}
+
 pub async fn list_accounts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -272,13 +300,26 @@ pub async fn account_sync_status(
     }))
 }
 
+pub async fn sync_account(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    sync_calendar_account(&user_db, &state, &id)
+        .await
+        .map_err(AppError::BadGateway)?;
+    account_sync_status(State(state), Extension(user), Path(id)).await
+}
+
 pub async fn list_calendars(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let calendars: Vec<Calendar> = sqlx::query_as(
-        "SELECT id, account_id, name, color, is_default FROM calendars ORDER BY name COLLATE NOCASE ASC",
+        "SELECT c.id, c.account_id, c.name, c.color, c.is_default, c.dav_url, c.created_at, a.type AS provider_type \
+         FROM calendars c LEFT JOIN calendar_accounts a ON a.id = c.account_id ORDER BY c.name COLLATE NOCASE ASC",
     )
     .fetch_all(&user_db)
     .await?;
@@ -301,7 +342,8 @@ pub async fn create_calendar(
     .fetch_one(&user_db)
     .await?;
     let calendar: Calendar = sqlx::query_as(
-        "SELECT id, account_id, name, color, is_default FROM calendars WHERE id = ?",
+        "SELECT c.id, c.account_id, c.name, c.color, c.is_default, c.dav_url, c.created_at, a.type AS provider_type \
+         FROM calendars c LEFT JOIN calendar_accounts a ON a.id = c.account_id WHERE c.id = ?",
     )
     .bind(&id)
     .fetch_one(&user_db)
@@ -325,7 +367,8 @@ pub async fn update_calendar(
     .execute(&user_db)
     .await?;
     let calendar: Calendar = sqlx::query_as(
-        "SELECT id, account_id, name, color, is_default FROM calendars WHERE id = ?",
+        "SELECT c.id, c.account_id, c.name, c.color, c.is_default, c.dav_url, c.created_at, a.type AS provider_type \
+         FROM calendars c LEFT JOIN calendar_accounts a ON a.id = c.account_id WHERE c.id = ?",
     )
     .bind(&id)
     .fetch_one(&user_db)
@@ -825,11 +868,11 @@ async fn sync_calendar_account_inner(
             store_sync_result(db, account_id, result).await?;
         }
         "google" => {
-            let access_token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| "access_token missing".to_owned())?;
-            let result = calendar_sync::google_sync(access_token, sync_token.as_deref()).await?;
-            store_sync_result(db, account_id, result).await?;
+            let access_token = google_access_token(db, state, account_id, &creds).await?;
+            let results = calendar_sync::google_sync(&access_token, start, end).await?;
+            for result in results {
+                store_sync_result(db, account_id, result).await?;
+            }
         }
         "openxchange" => {
             let base = base_url.ok_or_else(|| "base_url is required".to_owned())?;
@@ -865,6 +908,33 @@ async fn store_sync_result(
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Resolve Google Calendar credentials through the linked Gmail account when available.
+async fn google_access_token(
+    db: &sqlx::SqlitePool,
+    state: &AppState,
+    account_id: &str,
+    calendar_credentials: &Value,
+) -> Result<String, String> {
+    let linked_email_account: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM email_accounts WHERE id = ? AND provider_kind = 'gmail_api')",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    if linked_email_account {
+        return crate::oauth_tokens::fresh_access_token(&state.credential_key, db, account_id)
+            .await?
+            .ok_or_else(|| "linked Gmail account has no OAuth access token".to_owned());
+    }
+
+    calendar_credentials["access_token"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "access_token missing".to_owned())
 }
 
 async fn upsert_calendar(
@@ -1008,9 +1078,9 @@ async fn write_remote_event(
     let Some((account_id, dav_url, provider, auth_scheme, encrypted)) = row else {
         return Err(AppError::NotFound);
     };
-    if account_id.is_none() {
+    let Some(account_id) = account_id else {
         return Ok((None, None));
-    }
+    };
     let provider = provider.unwrap_or_default();
     let auth_scheme = auth_scheme.unwrap_or_else(|| "basic".to_owned());
     let encrypted = encrypted.unwrap_or_default();
@@ -1065,9 +1135,9 @@ async fn write_remote_event(
             Ok((id, None))
         }
         "google" => {
-            let token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| AppError::BadGateway("access_token missing".into()))?;
+            let token = google_access_token(db, state, &account_id, &creds)
+                .await
+                .map_err(AppError::BadGateway)?;
             let calendar_remote = dav_url.as_deref().unwrap_or("primary");
             let attendees_json = req.attendees.as_ref().map(Value::to_string);
             let input = event_input(
@@ -1083,9 +1153,10 @@ async fn write_remote_event(
                 req.organizer_email.as_deref(),
                 req.organizer_name.as_deref(),
             );
-            let id = calendar_sync::google_write(token, calendar_remote, remote_id, &input, delete)
-                .await
-                .map_err(AppError::BadGateway)?;
+            let id =
+                calendar_sync::google_write(&token, calendar_remote, remote_id, &input, delete)
+                    .await
+                    .map_err(AppError::BadGateway)?;
             Ok((id, None))
         }
         _ => Ok((None, None)),

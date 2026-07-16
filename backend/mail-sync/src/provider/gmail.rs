@@ -13,6 +13,7 @@
 
 use async_trait::async_trait;
 use base64::Engine;
+use futures::{stream, StreamExt};
 use serde_json::{json, Value};
 
 use super::http::Rest;
@@ -27,10 +28,12 @@ const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 /// next sync tick), so the cap bounds work per tick without losing mail.
 const PAGE_SIZE: u32 = 500;
 const MAX_DISCOVERY_PAGES: u32 = 20;
+const CONCURRENT_FETCHES: usize = 8;
 
 pub struct GmailProvider {
     rest: Rest,
     ids: IdMap,
+    account_id: String,
 }
 
 impl GmailProvider {
@@ -47,7 +50,12 @@ impl GmailProvider {
         Ok(Self {
             rest: Rest::new(token),
             ids: IdMap::new(db, config.account_id.clone()),
+            account_id: config.account_id.clone(),
         })
+    }
+
+    fn encode_raw_message(raw_message: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_message)
     }
 
     /// Newest-first message ids in a label until an already-known id (or the
@@ -59,7 +67,7 @@ impl GmailProvider {
 
         'pages: for _ in 0..MAX_DISCOVERY_PAGES {
             let mut url = format!(
-                "{BASE}/messages?labelIds={}&maxResults={PAGE_SIZE}",
+                "{BASE}/messages?labelIds={}&maxResults={PAGE_SIZE}&fields=messages/id,nextPageToken",
                 urlencoding::encode(label_id)
             );
             if let Some(ref t) = page_token {
@@ -91,14 +99,24 @@ impl GmailProvider {
         (!has("UNREAD"), has("STARRED"))
     }
 
-    async fn fetch_metadata(
-        &self,
+    fn is_quota_error(error: &ProviderError) -> bool {
+        match error {
+            ProviderError::Http { status: 403, body } => {
+                body.to_ascii_lowercase().contains("quota exceeded")
+            }
+            _ => false,
+        }
+    }
+
+    async fn fetch_metadata_with_rest(
+        rest: &Rest,
         uid: u32,
         remote_id: &str,
     ) -> Result<FetchedMessage, ProviderError> {
-        let res = self
-            .rest
-            .get_json(&format!("{BASE}/messages/{remote_id}?format=metadata"))
+        let res = rest
+            .get_json(&format!(
+                "{BASE}/messages/{remote_id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=Message-Id&metadataHeaders=In-Reply-To&metadataHeaders=References&metadataHeaders=List-Id&fields=id,labelIds,internalDate,payload/headers"
+            ))
             .await?;
         let (is_seen, is_flagged) = Self::flags_from_labels(&res["labelIds"]);
         let internal_date = rfc3339_from_millis(
@@ -127,9 +145,17 @@ impl GmailProvider {
     }
 
     async fn fetch_raw_message(&self, remote_id: &str) -> Result<(Vec<u8>, Value), ProviderError> {
-        let res = self
-            .rest
-            .get_json(&format!("{BASE}/messages/{remote_id}?format=raw"))
+        Self::fetch_raw_message_with_rest(&self.rest, remote_id).await
+    }
+
+    async fn fetch_raw_message_with_rest(
+        rest: &Rest,
+        remote_id: &str,
+    ) -> Result<(Vec<u8>, Value), ProviderError> {
+        let res = rest
+            .get_json(&format!(
+                "{BASE}/messages/{remote_id}?format=raw&fields=id,raw,labelIds,internalDate"
+            ))
             .await?;
         let raw_b64 = res["raw"].as_str().unwrap_or_default();
         let raw = base64::engine::general_purpose::URL_SAFE
@@ -158,7 +184,10 @@ impl GmailProvider {
 #[async_trait]
 impl MailProvider for GmailProvider {
     async fn list_folders(&mut self) -> Result<Vec<FolderInfo>, ProviderError> {
-        let res = self.rest.get_json(&format!("{BASE}/labels")).await?;
+        let res = self
+            .rest
+            .get_json(&format!("{BASE}/labels?fields=labels(id,name,type)"))
+            .await?;
         let mut folders = Vec::new();
         for label in res["labels"].as_array().unwrap_or(&Vec::new()) {
             let id = label["id"].as_str().unwrap_or_default().to_owned();
@@ -190,7 +219,10 @@ impl MailProvider for GmailProvider {
     async fn folder_status(&mut self, folder: &str) -> Result<FolderStatus, ProviderError> {
         let res = self
             .rest
-            .get_json(&format!("{BASE}/labels/{}", urlencoding::encode(folder)))
+            .get_json(&format!(
+                "{BASE}/labels/{}?fields=messagesTotal",
+                urlencoding::encode(folder)
+            ))
             .await?;
         Ok(FolderStatus {
             // The uid mapping is locally owned — no server-side generation marker.
@@ -214,18 +246,33 @@ impl MailProvider for GmailProvider {
         folder: &str,
         uid_set: &str,
     ) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError> {
+        let resolved = self.ids.resolve_set(folder, uid_set).await?;
+        let rest = self.rest.clone();
+        let results = stream::iter(resolved)
+            .map(|(uid, remote_id)| {
+                let rest = rest.clone();
+                async move {
+                    let res = rest
+                        .get_json(&format!(
+                            "{BASE}/messages/{remote_id}?format=minimal&fields=id,labelIds"
+                        ))
+                        .await;
+                    (uid, remote_id, res)
+                }
+            })
+            .buffer_unordered(CONCURRENT_FETCHES)
+            .collect::<Vec<_>>()
+            .await;
+
         let mut out = Vec::new();
-        for (uid, remote_id) in self.ids.resolve_set(folder, uid_set).await? {
-            let res = self
-                .rest
-                .get_json(&format!("{BASE}/messages/{remote_id}?format=minimal"))
-                .await;
+        for (uid, _remote_id, res) in results {
             match res {
                 Ok(v) => {
                     let (seen, flagged) = Self::flags_from_labels(&v["labelIds"]);
                     // API providers move atomically; no IMAP-style \Deleted ghost.
                     out.push((uid, seen, flagged, false));
                 }
+                Err(e) if Self::is_quota_error(&e) => return Err(e),
                 // Message gone (deleted/moved on the server) — drop the mapping.
                 Err(_) => self.ids.remove(folder, uid).await?,
             }
@@ -238,11 +285,29 @@ impl MailProvider for GmailProvider {
         folder: &str,
         uid_set: &str,
     ) -> Result<Vec<FetchedMessage>, ProviderError> {
+        let resolved = self.ids.resolve_set(folder, uid_set).await?;
+        let rest = self.rest.clone();
+        let results = stream::iter(resolved)
+            .map(|(uid, remote_id)| {
+                let rest = rest.clone();
+                async move {
+                    let result = Self::fetch_metadata_with_rest(&rest, uid, &remote_id).await;
+                    (remote_id, result)
+                }
+            })
+            .buffer_unordered(CONCURRENT_FETCHES)
+            .collect::<Vec<_>>()
+            .await;
+
         let mut out = Vec::new();
-        for (uid, remote_id) in self.ids.resolve_set(folder, uid_set).await? {
-            match self.fetch_metadata(uid, &remote_id).await {
+        for (remote_id, result) in results {
+            match result {
                 Ok(m) => out.push(m),
-                Err(e) => tracing::warn!("gmail: metadata fetch failed for {remote_id}: {e}"),
+                Err(e) if Self::is_quota_error(&e) => return Err(e),
+                Err(e) => tracing::warn!(
+                    "gmail: metadata fetch failed: account={} folder={folder} uid_set={uid_set} remote_id={remote_id} err={e}",
+                    self.account_id
+                ),
             }
         }
         Ok(out)
@@ -253,9 +318,23 @@ impl MailProvider for GmailProvider {
         folder: &str,
         uid_set: &str,
     ) -> Result<Vec<FetchedMessage>, ProviderError> {
+        let resolved = self.ids.resolve_set(folder, uid_set).await?;
+        let rest = self.rest.clone();
+        let results = stream::iter(resolved)
+            .map(|(uid, remote_id)| {
+                let rest = rest.clone();
+                async move {
+                    let result = Self::fetch_raw_message_with_rest(&rest, &remote_id).await;
+                    (uid, remote_id, result)
+                }
+            })
+            .buffer_unordered(CONCURRENT_FETCHES)
+            .collect::<Vec<_>>()
+            .await;
+
         let mut out = Vec::new();
-        for (uid, remote_id) in self.ids.resolve_set(folder, uid_set).await? {
-            match self.fetch_raw_message(&remote_id).await {
+        for (uid, remote_id, result) in results {
+            match result {
                 Ok((raw, meta)) => {
                     let (is_seen, is_flagged) = Self::flags_from_labels(&meta["labelIds"]);
                     let internal_date = rfc3339_from_millis(
@@ -273,7 +352,11 @@ impl MailProvider for GmailProvider {
                         true,
                     ));
                 }
-                Err(e) => tracing::warn!("gmail: raw fetch failed for {remote_id}: {e}"),
+                Err(e) if Self::is_quota_error(&e) => return Err(e),
+                Err(e) => tracing::warn!(
+                    "gmail: raw fetch failed: account={} folder={folder} uid_set={uid_set} uid={uid} remote_id={remote_id} err={e}",
+                    self.account_id
+                ),
             }
         }
         Ok(out)
@@ -346,7 +429,7 @@ impl MailProvider for GmailProvider {
     }
 
     async fn send_message(&mut self, raw_message: &[u8]) -> Result<(), ProviderError> {
-        let raw = base64::engine::general_purpose::URL_SAFE.encode(raw_message);
+        let raw = Self::encode_raw_message(raw_message);
         self.rest
             .post_json(&format!("{BASE}/messages/send"), &json!({ "raw": raw }))
             .await?;
@@ -355,5 +438,49 @@ impl MailProvider for GmailProvider {
 
     async fn close(&mut self) -> Result<(), ProviderError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GmailProvider;
+    use serde_json::json;
+
+    #[test]
+    fn flags_from_labels_maps_gmail_unread_label_to_seen_state() {
+        let (seen, flagged) = GmailProvider::flags_from_labels(&json!(["INBOX", "STARRED"]));
+        assert!(seen);
+        assert!(flagged);
+
+        let (seen, flagged) = GmailProvider::flags_from_labels(&json!(["INBOX", "UNREAD"]));
+        assert!(!seen);
+        assert!(!flagged);
+    }
+
+    #[test]
+    fn flags_from_labels_defaults_missing_labels_to_read() {
+        let (seen, flagged) = GmailProvider::flags_from_labels(&json!(null));
+        assert!(seen);
+        assert!(!flagged);
+    }
+
+    #[test]
+    fn quota_errors_are_detected_from_gmail_http_body() {
+        let error = super::ProviderError::Http {
+            status: 403,
+            body: "Quota exceeded for quota metric 'Queries'".to_owned(),
+        };
+        assert!(GmailProvider::is_quota_error(&error));
+
+        let forbidden = super::ProviderError::Http {
+            status: 403,
+            body: "The caller does not have permission".to_owned(),
+        };
+        assert!(!GmailProvider::is_quota_error(&forbidden));
+    }
+
+    #[test]
+    fn encode_raw_message_uses_unpadded_base64url() {
+        assert_eq!(GmailProvider::encode_raw_message(b"\xfb\xff"), "-_8");
     }
 }

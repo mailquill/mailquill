@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::{error::AppError, middleware::UserId, state::AppState};
 
@@ -126,7 +127,17 @@ pub async fn send_email(
             .await
         {
             Ok(Some(token)) => Some(token),
-            _ => creds["oauth_access_token"].as_str().map(|s| s.to_owned()),
+            Ok(None) => creds["oauth_access_token"].as_str().map(|s| s.to_owned()),
+            Err(error) if crate::oauth_tokens::is_reauth_required(&error) => {
+                return Err(AppError::Unprocessable(
+                    "oauth_reauthentication_required".into(),
+                ));
+            }
+            Err(error) => {
+                return Err(AppError::BadGateway(format!(
+                    "oauth token refresh failed: {error}"
+                )));
+            }
         };
 
     let smtp_request = smtp::SendRequest {
@@ -211,7 +222,12 @@ pub async fn send_email(
                 .await
                 .unwrap_or(993);
 
-        let imap_user = creds["imap_username"].as_str().unwrap_or("").to_owned();
+        let imap_user = creds["imap_username"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&primary_email)
+            .trim()
+            .to_ascii_lowercase();
         let imap_pass = creds["imap_password"].as_str().unwrap_or("").to_owned();
         let imap_auth = sqlx::query_scalar::<_, String>(
             "SELECT imap_auth_scheme FROM email_accounts WHERE id = ?",
@@ -222,18 +238,25 @@ pub async fn send_email(
         .unwrap_or(None)
         .unwrap_or_else(|| "plain".to_string());
 
-        // Fire-and-forget APPEND (non-critical)
-        let _ = mail_sync::append_to_sent(
+        // APPEND is non-critical: SMTP delivery has already succeeded. Bound
+        // this follow-up so a slow IMAP server cannot leave the UI in
+        // "Sending…" indefinitely or encourage a duplicate retry.
+        let trusted_imap_cert = mail_sync::session::decode_trusted_cert(imap_tls_cert.as_deref());
+        let append = mail_sync::append_to_sent(
             &host,
             imap_port as u16,
             &imap_user,
             &imap_pass,
             oauth_token.as_deref(),
             &imap_auth,
-            mail_sync::session::decode_trusted_cert(imap_tls_cert.as_deref()).as_deref(),
+            trusted_imap_cert.as_deref(),
             &raw_sent,
-        )
-        .await;
+        );
+        match tokio::time::timeout(Duration::from_secs(15), append).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!("append to Sent failed after delivery: {error}"),
+            Err(_) => tracing::warn!("append to Sent timed out after delivery"),
+        }
     }
 
     Ok(Json(SendResponse { message_id }))

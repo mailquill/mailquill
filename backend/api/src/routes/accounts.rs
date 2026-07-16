@@ -33,7 +33,7 @@ pub struct AddAccountRequest {
     /// User-approved TLS trust exceptions: base64 DER certificate per service.
     imap_tls_cert: Option<String>,
     smtp_tls_cert: Option<String>,
-    /// Mailbox backend: imap (default), gmail_api, outlook_api.
+    /// Mailbox backend: imap (default), gmail_api, gmail_imap, outlook_api.
     provider_kind: Option<String>,
     pgp_key_id: Option<String>,
     sign_by_default: Option<bool>,
@@ -76,6 +76,7 @@ pub struct AccountResponse {
     body_sync_mode: String,
     sync_interval_secs: i64,
     sync_mode: String,
+    provider_kind: String,
     created_at: String,
     carddav_url: Option<String>,
     caldav_url: Option<String>,
@@ -142,7 +143,7 @@ pub async fn add_account(
     validate::one_of(
         "provider_kind",
         provider_kind,
-        &["imap", "gmail_api", "outlook_api"],
+        &["imap", "gmail_api", "gmail_imap", "outlook_api"],
     )?;
 
     let sync_mode = req.sync_mode.as_deref().unwrap_or("idle");
@@ -249,7 +250,7 @@ pub async fn list_accounts(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let rows: Vec<AccountResponse> = sqlx::query_as(
-        "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts ORDER BY created_at",
+        "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts ORDER BY created_at",
     )
     .fetch_all(&user_db)
     .await
@@ -476,14 +477,54 @@ pub async fn sync_status(
     }
 
     let status = state.sync_manager.account_status(&account_id).await;
+    let (synced, total) = account_sync_progress(&user_db, &account_id, status.total).await?;
     Ok(Json(json!({
         "account_id": account_id,
         "state": status.state,
         "last_synced_at": status.last_synced_at,
         "error": status.error,
-        "synced": status.synced,
-        "total": status.total,
+        "synced": synced,
+        "total": total,
     })))
+}
+
+async fn account_sync_progress(
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+    fallback_total: i64,
+) -> Result<(i64, i64), AppError> {
+    let provider_kind: String =
+        sqlx::query_scalar("SELECT provider_kind FROM email_accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_one(db)
+            .await?;
+
+    let synced: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) \
+         FROM messages m \
+         JOIN folders f ON f.id = m.folder_id \
+         WHERE m.account_id = ? AND f.sync_enabled = 1 AND m.is_deleted = 0",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+
+    let discovered_remote: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) \
+         FROM remote_message_ids r \
+         JOIN folders f ON f.account_id = r.account_id AND f.full_path = r.folder_path \
+         WHERE r.account_id = ? AND f.sync_enabled = 1",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+
+    let total = match provider_kind.as_str() {
+        "gmail_api" | "outlook_api" => synced.max(discovered_remote),
+        _ => synced.max(fallback_total),
+    };
+
+    Ok((synced, total))
 }
 
 pub async fn trigger_sync(
@@ -655,7 +696,7 @@ async fn get_account_row(
 ) -> Result<AccountResponse, AppError> {
     let row: Option<AccountResponse> =
         sqlx::query_as(
-            "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts WHERE id = ?",
+            "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts WHERE id = ?",
         )
         .bind(account_id)
         .fetch_optional(db)

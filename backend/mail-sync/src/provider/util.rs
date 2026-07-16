@@ -2,6 +2,7 @@
 
 use crate::session::FetchedMessage;
 use mailparse::MailHeaderMap;
+use mailquill_core::header::decode_header_words;
 
 /// Build a `FetchedMessage` from a raw RFC 2822 message (or bare header
 /// block). `body` keeps the full raw message when `include_body` is set,
@@ -25,7 +26,7 @@ pub fn fetched_from_raw(
 
     if let Ok((headers, _)) = mailparse::parse_headers(raw) {
         let h = |name: &str| headers.get_first_value(name);
-        msg.subject = h("Subject").unwrap_or_default();
+        msg.subject = decode_header_words(&h("Subject").unwrap_or_default());
         msg.from_addr = h("From").unwrap_or_default();
         msg.to_addrs = h("To").unwrap_or_default();
         msg.cc_addrs = h("Cc").unwrap_or_default();

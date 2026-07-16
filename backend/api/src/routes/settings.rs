@@ -16,6 +16,11 @@ pub struct UserSettingsResponse {
     default_calendar_id: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct PublicConfigResponse {
+    remote_image_proxy_enabled: bool,
+}
+
 #[derive(Deserialize)]
 pub struct PatchSettingsRequest {
     pgp_discovery_wkd_enabled: Option<bool>,
@@ -41,6 +46,12 @@ pub async fn get_settings(
         pgp_discovery_keyserver_enabled: ks,
         load_external_images: images,
         default_calendar_id,
+    }))
+}
+
+pub async fn public_config(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    Ok(Json(PublicConfigResponse {
+        remote_image_proxy_enabled: state.remote_image_proxy_enabled,
     }))
 }
 

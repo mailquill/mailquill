@@ -6,12 +6,14 @@ import { useClickOutside } from '@/shared/hooks/useClickOutside'
 import { useSyncStatuses, useTriggerSync } from '@/shared/hooks/useAccounts'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { relativeFromNow } from '@/shared/lib/format'
+import { startOAuthRedirect } from '@/shared/lib/oauth'
 import type { SyncStatus } from '@/shared/types'
 
-type Phase = 'syncing' | 'error' | 'idle'
+type Phase = 'syncing' | 'reauth' | 'error' | 'idle'
 
 function phaseOf(status?: SyncStatus): Phase {
   if (status?.state === 'syncing') return 'syncing'
+  if (status?.state === 'reauth_required') return 'reauth'
   if (status?.state === 'error') return 'error'
   return 'idle'
 }
@@ -32,7 +34,11 @@ function ProgressBar({ phase, synced, total }: { phase: Phase; synced: number; t
   const pct =
     phase === 'syncing' ? (total > 0 ? Math.min(100, Math.round((synced / total) * 100)) : 8) : 100
   const color =
-    phase === 'error' ? 'bg-destructive' : phase === 'syncing' ? 'bg-primary' : 'bg-[#16a34a]'
+    phase === 'error' || phase === 'reauth'
+      ? 'bg-destructive'
+      : phase === 'syncing'
+        ? 'bg-primary'
+        : 'bg-[#16a34a]'
   return (
     <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-secondary">
       <div className={cn('h-full rounded-full transition-all', color)} style={{ width: `${pct}%` }} />
@@ -48,6 +54,7 @@ export function SyncStatusMenu() {
   const triggerSync = useTriggerSync()
 
   const anySyncing = statuses.some((s) => s.status?.state === 'syncing')
+  const anyReauth = statuses.some((s) => s.status?.state === 'reauth_required')
   const anyError = statuses.some((s) => s.status?.state === 'error')
   const active = statuses.filter((s) => s.status?.state === 'syncing')
   const aggSynced = active.reduce((n, s) => n + (s.status?.synced ?? 0), 0)
@@ -58,24 +65,27 @@ export function SyncStatusMenu() {
     .sort()
     .at(-1)
   const overallPhase = visualPhase(
-    anySyncing ? 'syncing' : anyError ? 'error' : 'idle',
+    anyReauth ? 'reauth' : anySyncing ? 'syncing' : anyError ? 'error' : 'idle',
     aggSynced,
     aggTotal,
   )
 
   function refreshAll() {
-    statuses.forEach(({ account }) => triggerSync.mutate(account.id))
+    statuses
+      .filter(({ status }) => status?.state !== 'reauth_required')
+      .forEach(({ account }) => triggerSync.mutate(account.id))
   }
 
   function statusLabel(phase: Phase): string {
     if (phase === 'syncing') return t('syncMenu.syncing')
+    if (phase === 'reauth') return t('syncMenu.reauthRequired')
     if (phase === 'error') return t('syncMenu.error')
     return t('syncMenu.noNewMessages')
   }
 
   function statusColor(phase: Phase): string {
     if (phase === 'syncing') return 'text-primary'
-    if (phase === 'error') return 'text-destructive'
+    if (phase === 'error' || phase === 'reauth') return 'text-destructive'
     return 'text-[#16a34a]'
   }
 
@@ -83,13 +93,23 @@ export function SyncStatusMenu() {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        title={t('syncMenu.title')}
+        aria-label={overallPhase === 'reauth' ? t('syncMenu.reauthRequired') : t('syncMenu.title')}
+        title={overallPhase === 'reauth' ? t('syncMenu.reauthRequired') : t('syncMenu.title')}
         className={cn(
-          'flex size-9 items-center justify-center rounded-lg border border-border text-secondary-foreground transition-colors hover:bg-secondary',
+          'relative flex size-9 items-center justify-center rounded-lg border border-border text-secondary-foreground transition-colors hover:bg-secondary',
           open ? 'bg-secondary' : 'bg-card',
         )}
       >
-        <RefreshCw className={cn('size-4', overallPhase === 'syncing' && 'animate-spin text-primary')} />
+        <RefreshCw
+          className={cn(
+            'size-4',
+            overallPhase === 'syncing' && 'animate-spin text-primary',
+            (overallPhase === 'error' || overallPhase === 'reauth') && 'text-destructive',
+          )}
+        />
+        {overallPhase === 'reauth' && (
+          <span className="absolute right-1 top-1 size-2 rounded-full bg-destructive" />
+        )}
       </button>
 
       {open && (
@@ -112,7 +132,7 @@ export function SyncStatusMenu() {
             <div className="flex items-start gap-2.5">
               {overallPhase === 'syncing' ? (
                 <RefreshCw className="mt-0.5 size-5 shrink-0 animate-spin text-primary" />
-              ) : overallPhase === 'error' ? (
+              ) : overallPhase === 'error' || overallPhase === 'reauth' ? (
                 <AlertCircle className="mt-0.5 size-5 shrink-0 text-destructive" />
               ) : (
                 <CheckCircle2 className="mt-0.5 size-5 shrink-0 text-[#16a34a]" />
@@ -140,6 +160,7 @@ export function SyncStatusMenu() {
                 const total = status?.total ?? 0
                 const phase = visualPhase(phaseOf(status), synced, total)
                 const color = accountColor(account.id)
+                const reauthProvider = oauthProviderFromStatus(status)
                 return (
                   <div key={account.id} className="flex items-start gap-3">
                     <span
@@ -159,7 +180,21 @@ export function SyncStatusMenu() {
                       </div>
                       <ProgressBar phase={phase} synced={synced} total={total} />
                       <div className="mt-1 text-[11px] text-muted-foreground">
-                        {t('syncMenu.messages', { synced, total })}
+                        {phase === 'reauth' ? (
+                          <span className="flex items-center justify-between gap-2">
+                            <span>{t('syncMenu.reauthDescription')}</span>
+                            {reauthProvider && (
+                              <button
+                                className="shrink-0 font-semibold text-[#2563eb] hover:underline"
+                                onClick={() => startOAuthRedirect(reauthProvider, account.id)}
+                              >
+                                {t('syncMenu.reconnect')}
+                              </button>
+                            )}
+                          </span>
+                        ) : (
+                          t('syncMenu.messages', { synced, total })
+                        )}
                       </div>
                     </div>
                   </div>
@@ -174,4 +209,10 @@ export function SyncStatusMenu() {
       )}
     </div>
   )
+}
+
+function oauthProviderFromStatus(status?: SyncStatus): 'google' | 'microsoft' | null {
+  if (status?.state !== 'reauth_required') return null
+  const provider = status.error?.split(':', 2)[1]
+  return provider === 'google' || provider === 'microsoft' ? provider : null
 }

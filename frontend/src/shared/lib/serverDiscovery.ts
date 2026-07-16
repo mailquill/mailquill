@@ -43,6 +43,13 @@ interface ProviderDef {
   caldavUrl: string
 }
 
+export type ProviderPresetId = 'auto' | 'gmail' | 'outlook' | 'yahoo' | 'webde' | 'gmxde' | 'gmxnet' | 'imap'
+
+export interface ProviderPresetOption {
+  id: ProviderPresetId
+  label: string
+}
+
 // Known providers keyed by domain. {email}/{domain} are substituted at lookup.
 const SRV_PROVIDERS: Record<string, ProviderDef> = (() => {
   const G: ProviderDef = { name: 'Google', oauth: true, imapHost: 'imap.gmail.com', imapPort: 993, imapSecurity: 'ssl', smtpHost: 'smtp.gmail.com', smtpPort: 465, smtpSecurity: 'ssl', carddavUrl: 'https://www.googleapis.com/carddav/v1/principals/{email}/lists/default/', caldavUrl: 'https://apidata.googleusercontent.com/caldav/v2/{email}/events/' }
@@ -71,6 +78,26 @@ const SRV_PROVIDERS: Record<string, ProviderDef> = (() => {
     'zoho.com': ZO, 'zoho.eu': ZOEU, 'zohomail.eu': ZOEU, 'fastmail.com': FM,
   }
 })()
+
+const PRESET_PROVIDER_KEYS: Record<Exclude<ProviderPresetId, 'auto' | 'imap'>, string> = {
+  gmail: 'gmail.com',
+  outlook: 'outlook.com',
+  yahoo: 'yahoo.com',
+  webde: 'web.de',
+  gmxde: 'gmx.de',
+  gmxnet: 'gmx.net',
+}
+
+export const PROVIDER_PRESET_OPTIONS: ProviderPresetOption[] = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'gmail', label: 'Gmail / Google Workspace' },
+  { id: 'outlook', label: 'Outlook / Microsoft 365' },
+  { id: 'yahoo', label: 'Yahoo' },
+  { id: 'webde', label: 'WEB.DE' },
+  { id: 'gmxde', label: 'GMX.de' },
+  { id: 'gmxnet', label: 'GMX.net' },
+  { id: 'imap', label: 'Regular IMAP' },
+]
 
 export const ACCT_COLORS = ['#2563EB', '#DC2626', '#EA580C', '#D97706', '#16A34A', '#0D9488', '#0EA5E9', '#7C3AED', '#DB2777', '#475569']
 
@@ -101,11 +128,33 @@ export function discoverServers(email: string, isExchange = false): DiscoverResu
   }
 }
 
+export function discoverServersForProvider(email: string, preset: ProviderPresetId): DiscoverResult {
+  if (preset === 'auto') return discoverServers(email)
+  if (preset === 'imap') {
+    const domain = (email.split('@')[1] || '').toLowerCase()
+    return {
+      imapHost: 'imap.' + domain, imapPort: 993, imapSecurity: 'ssl', imapUser: email,
+      smtpHost: 'smtp.' + domain, smtpPort: 587, smtpSecurity: 'starttls', smtpUser: email,
+      carddavUrl: 'https://dav.' + domain + '/carddav/', caldavUrl: 'https://dav.' + domain + '/caldav/',
+      source: 'provider', provider: 'IMAP', oauth: false,
+    }
+  }
+  const provider = SRV_PROVIDERS[PRESET_PROVIDER_KEYS[preset]]
+  const domain = (email.split('@')[1] || '').toLowerCase()
+  const sub = (s: string) => (s || '').replace(/\{email\}/g, email).replace(/\{domain\}/g, domain)
+  return {
+    imapHost: provider.imapHost, imapPort: provider.imapPort, imapSecurity: provider.imapSecurity, imapUser: email,
+    smtpHost: provider.smtpHost, smtpPort: provider.smtpPort, smtpSecurity: provider.smtpSecurity, smtpUser: email,
+    carddavUrl: sub(provider.carddavUrl), caldavUrl: sub(provider.caldavUrl),
+    source: 'provider', provider: provider.name, oauth: !!provider.oauth,
+  }
+}
+
 interface RemoteEndpoint {
   host: string
   port: number
   security: Security
-  source: 'srv' | 'ispdb' | 'probe'
+  source: 'srv' | 'ispdb' | 'mx' | 'probe'
 }
 
 interface RemoteDiscoverResponse {
@@ -124,12 +173,16 @@ export async function discoverServersAsync(email: string, isExchange = false): P
   try {
     const d = await apiGet<RemoteDiscoverResponse>(`/discover?email=${encodeURIComponent(email)}`)
     if (d.imap && d.smtp) {
+      const providerName = d.provider || local.provider
+      const isGoogleWorkspace = /google|gmail/i.test(providerName)
+      const isMicrosoft365 = /microsoft|outlook|office 365/i.test(providerName)
       return {
         ...local,
         imapHost: d.imap.host, imapPort: d.imap.port, imapSecurity: d.imap.security,
         smtpHost: d.smtp.host, smtpPort: d.smtp.port, smtpSecurity: d.smtp.security,
         source: 'dns',
-        provider: d.provider || local.provider,
+        provider: providerName,
+        oauth: isGoogleWorkspace || isMicrosoft365 || local.oauth,
       }
     }
   } catch {

@@ -9,9 +9,9 @@ not with a third party.
 
 - **Multi-account unified inbox** — IMAP/SMTP accounts side by side, with
   conversation threading, a collapsible folder tree, and per-account views.
-- **OAuth & plain IMAP** — connect Gmail and Outlook via OAuth2/XOAUTH2 or any
-  IMAP server manually, with automatic server autodiscovery. Gmail label
-  handling (archive/move) goes through the Gmail API; everything else is IMAP.
+- **OAuth & plain IMAP** — connect Gmail through the Gmail API, Outlook via
+  OAuth2/XOAUTH2, or any IMAP server manually, with automatic server
+  autodiscovery.
 - **Typo-tolerant search** — SQLite FTS5 full-text search with fuzzy matching,
   so "Decatlon" still finds "Decathlon".
 - **Phishing detection** — SPF/DKIM/DMARC checks, display-name spoofing,
@@ -50,7 +50,7 @@ cargo dev
 
 Configuration (`CREDENTIAL_ENCRYPTION_KEY`, `JWT_SECRET`, …) is read from `.env`
 in the repository root. The backend serves the embedded frontend and API on
-`http://localhost:8080`.
+`http://localhost:8765` with the repo-local development `.env`.
 
 `make run` and `./scripts/start.sh` are Unix-only equivalents. To reuse an
 already-built `frontend/dist` and skip the frontend build, run
@@ -78,7 +78,8 @@ cargo run -p api
 | `CREDENTIAL_ENCRYPTION_KEY` | yes | 64 hex chars used for AES-256-GCM credential encryption. |
 | `JWT_SECRET` | yes | Secret used to sign 15-minute access tokens. |
 | `DATA_DIR` | no | Storage directory for app and per-user databases. Defaults to `./data`. |
-| `APP_BASE_URL` | no | Public backend base URL used for OAuth redirect URIs. Defaults to `http://localhost:8080`. |
+| `SERVER_PORT` | no | Backend bind port. The repo-local development `.env` uses `8765` to avoid common `8080` collisions. |
+| `APP_BASE_URL` | no | Public backend base URL used for OAuth redirect URIs. The repo-local development `.env` uses `http://localhost:8765`. |
 | `GOOGLE_OAUTH_CLIENT_ID` | for Gmail OAuth | Google OAuth application client ID. |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | for Gmail OAuth | Google OAuth application client secret. |
 | `MICROSOFT_OAUTH_CLIENT_ID` | for Outlook OAuth | Microsoft OAuth application client ID. |
@@ -86,10 +87,13 @@ cargo run -p api
 
 ## OAuth Apps
 
+For the full provider setup guide, including redirect URIs, scopes, and
+troubleshooting, see [docs/oauth-gmail-outlook.md](docs/oauth-gmail-outlook.md).
+
 Google:
 
 1. Create an OAuth client in Google Cloud Console.
-2. Enable Gmail API access for the project.
+2. Enable Gmail API access for the same project as the OAuth client.
 3. Add `{APP_BASE_URL}/api/auth/oauth/google/callback` as an authorized redirect URI.
 4. Configure `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`.
 
@@ -114,7 +118,7 @@ pnpm build
 
 ## Live E2E Checks
 
-These checks run against a started Mailquill server. Set `MAILQUILL_BASE_URL` when the server is not on `http://127.0.0.1:8080`.
+These checks run against a started Mailquill server. Set `MAILQUILL_BASE_URL` when the server is not on `http://127.0.0.1:8765`.
 
 Plain IMAP sync, search, and archive:
 
@@ -142,7 +146,7 @@ node scripts/e2e/gmail-xoauth2-read-reply.mjs
 CSP browser-console verification with a locally installed Chromium or Chrome:
 
 ```bash
-MAILQUILL_APP_URL=http://127.0.0.1:8080 \
+MAILQUILL_APP_URL=http://127.0.0.1:8765 \
 CHROME_PATH=/usr/bin/chromium \
 node scripts/e2e/csp-console-check.mjs
 ```

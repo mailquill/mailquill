@@ -38,6 +38,10 @@ pub struct Settings {
     pub openphish_enabled: bool,
     #[serde(default = "default_openphish_feed_url")]
     pub openphish_feed_url: String,
+    /// Proxy remote email images through the backend after user approval.
+    /// Disabled by default; direct browser image loading is used unless enabled.
+    #[serde(default)]
+    pub remote_image_proxy_enabled: bool,
 }
 
 fn default_data_dir() -> String {

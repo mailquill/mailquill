@@ -28,6 +28,7 @@ import { useMoveMessage, useUnifiedCounts } from '@/shared/hooks/useMessages'
 import { useContactAccounts, useContacts } from '@/shared/hooks/useContacts'
 import { useCalendars, useUpdateCalendar, useDeleteCalendar } from '@/shared/hooks/useCalendar'
 import { AddCalendarDialog } from '@/widgets/AddCalendarDialog'
+import { CalendarEditDialog } from '@/features/calendar'
 import { useModuleNav } from '@/shared/hooks/useModuleNav'
 import { useUiPrefs } from '@/shared/hooks/useUiPrefs'
 import { buildFolderTree, folderLeafLabel, folderIcon, type FolderNode } from '@/shared/lib/folders'
@@ -358,7 +359,13 @@ function CalendarNav() {
   const [addOpen, setAddOpen] = useState(false)
 
   const row = (c: Calendar) => (
-    <CalendarRow key={c.id} calendar={c} shown={!hiddenCalendars.includes(c.id)} onToggle={() => toggleCalendar(c.id)} />
+    <CalendarRow
+      key={c.id}
+      calendar={c}
+      account={accounts.find((account) => account.id === c.account_id)}
+      shown={!hiddenCalendars.includes(c.id)}
+      onToggle={() => toggleCalendar(c.id)}
+    />
   )
 
   // Group by owning account (preserving calendar order); local calendars (no
@@ -417,15 +424,22 @@ function CalendarNav() {
   )
 }
 
-function CalendarRow({ calendar: c, shown, onToggle }: { calendar: Calendar; shown: boolean; onToggle: () => void }) {
+function CalendarRow({
+  calendar: c,
+  account,
+  shown,
+  onToggle,
+}: {
+  calendar: Calendar
+  account?: Account
+  shown: boolean
+  onToggle: () => void
+}) {
   const { t } = useTranslation()
   const updateCalendar = useUpdateCalendar()
   const deleteCalendar = useDeleteCalendar()
+  const [editOpen, setEditOpen] = useState(false)
 
-  function rename() {
-    const name = window.prompt(t('sidebar.renameCalendar'), c.name)?.trim()
-    if (name && name !== c.name) updateCalendar.mutate({ id: c.id, name })
-  }
   function remove() {
     if (window.confirm(t('sidebar.deleteCalendarConfirm', { name: c.name }))) deleteCalendar.mutate(c.id)
   }
@@ -454,8 +468,9 @@ function CalendarRow({ calendar: c, shown, onToggle }: { calendar: Calendar; sho
         />
       </label>
       <button
-        onClick={rename}
-        title={t('sidebar.renameCalendar')}
+        onClick={() => setEditOpen(true)}
+        title={t('sidebar.editCalendar')}
+        aria-label={t('sidebar.editCalendar')}
         className="ml-1 shrink-0 p-0.5 text-[#94a3b8] opacity-0 transition-opacity hover:text-white group-hover:opacity-100"
       >
         <Pencil className="size-3.5" />
@@ -467,6 +482,9 @@ function CalendarRow({ calendar: c, shown, onToggle }: { calendar: Calendar; sho
       >
         <Trash2 className="size-3.5" />
       </button>
+      {editOpen && (
+        <CalendarEditDialog open calendar={c} account={account} onClose={() => setEditOpen(false)} />
+      )}
     </div>
   )
 }

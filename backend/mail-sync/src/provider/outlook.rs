@@ -25,6 +25,7 @@ const MAX_DISCOVERY_PAGES: u32 = 50;
 pub struct OutlookProvider {
     rest: Rest,
     ids: IdMap,
+    account_id: String,
 }
 
 impl OutlookProvider {
@@ -41,6 +42,7 @@ impl OutlookProvider {
         Ok(Self {
             rest: Rest::new(token),
             ids: IdMap::new(db, config.account_id.clone()),
+            account_id: config.account_id.clone(),
         })
     }
 
@@ -213,7 +215,10 @@ impl MailProvider for OutlookProvider {
         for (uid, remote_id) in self.ids.resolve_set(folder, uid_set).await? {
             match self.fetch_metadata(uid, &remote_id).await {
                 Ok(m) => out.push(m),
-                Err(e) => tracing::warn!("outlook: metadata fetch failed for {remote_id}: {e}"),
+                Err(e) => tracing::warn!(
+                    "outlook: metadata fetch failed: account={} folder={folder} uid_set={uid_set} remote_id={remote_id} err={e}",
+                    self.account_id
+                ),
             }
         }
         Ok(out)
@@ -249,7 +254,10 @@ impl MailProvider for OutlookProvider {
                     ));
                 }
                 (Err(e), _) | (_, Err(e)) => {
-                    tracing::warn!("outlook: full fetch failed for {remote_id}: {e}");
+                    tracing::warn!(
+                        "outlook: full fetch failed: account={} folder={folder} uid_set={uid_set} uid={uid} remote_id={remote_id} err={e}",
+                        self.account_id
+                    );
                 }
             }
         }

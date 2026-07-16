@@ -1,5 +1,5 @@
-use db::pool::UserDbPool;
 use contact_sync::ContactSyncManager;
+use db::pool::UserDbPool;
 use mail_sync::manager::SyncManager;
 use mailquill_core::{blob::BlobStore, crypto::CredentialKey, jwt::JwtKey};
 use sqlx::SqlitePool;
@@ -19,7 +19,9 @@ pub struct VapidConfig {
 #[derive(Clone)]
 pub struct UserEvent {
     pub user_id: String,
-    /// JSON payload (same shape as the web-push payload).
+    /// SSE event name (`message`, `sync`, ...).
+    pub event_type: String,
+    /// JSON payload for the named event.
     pub payload: String,
 }
 
@@ -45,4 +47,6 @@ pub struct AppState {
     pub web_push_client: Option<Arc<IsahcWebPushClient>>,
     /// Broadcast of new-message events to connected SSE clients.
     pub events: broadcast::Sender<UserEvent>,
+    /// Whether approved remote email images should be fetched through the backend.
+    pub remote_image_proxy_enabled: bool,
 }

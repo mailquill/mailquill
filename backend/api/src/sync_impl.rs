@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use mail_sync::manager::{NewMessageNotification, SyncAppState, SyncManager};
+use mail_sync::manager::{
+    NewMessageNotification, SyncAppState, SyncManager, SyncStatusNotification,
+};
 use mailquill_core::{blob::BlobStore, crypto::CredentialKey};
 use web_push::{
     ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushClient,
@@ -30,12 +32,17 @@ impl SyncAppState for AppState {
         self.sync_manager.clone()
     }
 
-    async fn fresh_oauth_token(&self, user_id: &str, account_id: &str) -> Option<String> {
-        let user_db = self.user_db_pool.get(user_id).await.ok()?;
-        crate::oauth_tokens::fresh_access_token(&self.credential_key, &user_db, account_id)
+    async fn fresh_oauth_token(
+        &self,
+        user_id: &str,
+        account_id: &str,
+    ) -> Result<Option<String>, String> {
+        let user_db = self
+            .user_db_pool
+            .get(user_id)
             .await
-            .ok()
-            .flatten()
+            .map_err(|error| error.to_string())?;
+        crate::oauth_tokens::fresh_access_token(&self.credential_key, &user_db, account_id).await
     }
 
     async fn notify_new_message(
@@ -56,6 +63,7 @@ impl SyncAppState for AppState {
         // even without web push). Errors mean no subscriber — ignore.
         let _ = self.events.send(crate::state::UserEvent {
             user_id: user_id.to_owned(),
+            event_type: "message".to_owned(),
             payload: String::from_utf8_lossy(&payload).into_owned(),
         });
 
@@ -106,6 +114,20 @@ impl SyncAppState for AppState {
             }
         }
 
+        Ok(())
+    }
+
+    async fn notify_sync_status(
+        &self,
+        user_id: &str,
+        status: SyncStatusNotification,
+    ) -> Result<(), String> {
+        let payload = serde_json::to_string(&status).map_err(|error| error.to_string())?;
+        let _ = self.events.send(crate::state::UserEvent {
+            user_id: user_id.to_owned(),
+            event_type: "sync".to_owned(),
+            payload,
+        });
         Ok(())
     }
 }

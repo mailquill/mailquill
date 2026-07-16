@@ -1,6 +1,7 @@
 use async_imap::{error::Error as ImapError, Authenticator, Session};
 use base64::Engine;
 use futures::TryStreamExt;
+use mailquill_core::header::decode_header_words;
 use native_tls::TlsConnector;
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsStream;
@@ -153,10 +154,10 @@ pub async fn idle_once(
     Ok((session, activity))
 }
 
-/// Build XOAUTH2 SASL string: base64("user=<user>\x01auth=Bearer <token>\x01\x01")
+/// Build the raw XOAUTH2 SASL payload. `async-imap` base64-encodes the
+/// authenticator response before sending it to the server.
 pub fn build_xoauth2_sasl(username: &str, token: &str) -> String {
-    let raw = format!("user={username}\x01auth=Bearer {token}\x01\x01");
-    base64::engine::general_purpose::STANDARD.encode(raw)
+    format!("user={username}\x01auth=Bearer {token}\x01\x01")
 }
 
 /// List all IMAP folders.
@@ -393,7 +394,7 @@ fn parse_fetch(msg: &async_imap::types::Fetch, include_body: bool) -> Option<Fet
 
     if let Some(env) = msg.envelope() {
         if let Some(subject) = env.subject.as_ref() {
-            fetched.subject = decode_words(&bytes_to_string(subject));
+            fetched.subject = decode_header_words(&bytes_to_string(subject));
         }
         if let Some(from) = env.from.as_ref().and_then(|v| v.first()) {
             fetched.from_addr = format_address(from);
@@ -460,26 +461,13 @@ fn format_address(addr: &async_imap::imap_proto::types::Address) -> String {
     let name = addr
         .name
         .as_ref()
-        .map(|b| decode_words(&bytes_to_string(b)))
+        .map(|b| decode_header_words(&bytes_to_string(b)))
         .unwrap_or_default();
 
     if name.is_empty() {
         format!("{mailbox}@{host}")
     } else {
         format!("{name} <{mailbox}@{host}>")
-    }
-}
-
-/// Decode RFC 2047 encoded-words (e.g. `=?UTF-8?B?...?=`) in a header value.
-/// IMAP ENVELOPE returns raw header text, so subjects and display names arrive
-/// still encoded; mailparse decodes encoded-words via `get_value`.
-fn decode_words(value: &str) -> String {
-    if !value.contains("=?") {
-        return value.to_owned();
-    }
-    match mailparse::parse_header(format!("X: {value}").as_bytes()) {
-        Ok((h, _)) => h.get_value(),
-        Err(_) => value.to_owned(),
     }
 }
 
@@ -582,4 +570,15 @@ pub async fn append_to_sent(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_xoauth2_sasl;
+
+    #[test]
+    fn xoauth2_sasl_payload_is_not_preencoded() {
+        let sasl = build_xoauth2_sasl("user@example.com", "token");
+        assert_eq!(sasl, "user=user@example.com\x01auth=Bearer token\x01\x01");
+    }
 }

@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { getAccessToken } from '@/shared/api'
 import { getStoredPushSubscriptionId } from '@/shared/hooks/usePushNotifications'
+import type { SyncStatus } from '@/shared/types'
 
 interface PushPayload {
   title?: string
@@ -19,13 +21,26 @@ interface PushPayload {
  */
 export function useMailNotifications(enabled: boolean) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   useEffect(() => {
-    if (!enabled || typeof EventSource === 'undefined') return
+    if (typeof EventSource === 'undefined') return
 
     let source: EventSource | null = null
     let retry: ReturnType<typeof setTimeout> | undefined
+    let refresh: ReturnType<typeof setTimeout> | undefined
     let closed = false
+
+    const scheduleMailRefresh = () => {
+      if (refresh) clearTimeout(refresh)
+      refresh = setTimeout(() => {
+        refresh = undefined
+        queryClient.invalidateQueries({ queryKey: ['folders'] })
+        queryClient.invalidateQueries({ queryKey: ['unified'] })
+        queryClient.invalidateQueries({ queryKey: ['unified-counts'] })
+        queryClient.invalidateQueries({ queryKey: ['folder-messages'] })
+      }, 500)
+    }
 
     const connect = () => {
       const token = getAccessToken()
@@ -36,7 +51,10 @@ export function useMailNotifications(enabled: boolean) {
       source = new EventSource(`/api/events?token=${encodeURIComponent(token)}`)
 
       source.addEventListener('message', (event) => {
+        scheduleMailRefresh()
+
         // The SW already notifies when web push is active; avoid duplicates.
+        if (!enabled) return
         if (getStoredPushSubscriptionId()) return
         if (document.visibilityState === 'visible') return
         if (Notification.permission !== 'granted') return
@@ -59,6 +77,25 @@ export function useMailNotifications(enabled: boolean) {
         }
       })
 
+      source.addEventListener('sync', (event) => {
+        let status: SyncStatus
+        try {
+          status = JSON.parse((event as MessageEvent).data) as SyncStatus
+        } catch {
+          return
+        }
+        if (!status.account_id) return
+        const previous = queryClient.getQueryData<SyncStatus>(['sync-status', status.account_id])
+        queryClient.setQueryData(['sync-status', status.account_id], status)
+        if (
+          previous?.state !== status.state ||
+          previous?.synced !== status.synced ||
+          previous?.total !== status.total
+        ) {
+          scheduleMailRefresh()
+        }
+      })
+
       source.onerror = () => {
         // Token may have expired or the connection dropped; reconnect with a
         // fresh token after a short delay.
@@ -73,7 +110,8 @@ export function useMailNotifications(enabled: boolean) {
     return () => {
       closed = true
       if (retry) clearTimeout(retry)
+      if (refresh) clearTimeout(refresh)
       source?.close()
     }
-  }, [enabled, navigate])
+  }, [enabled, navigate, queryClient])
 }

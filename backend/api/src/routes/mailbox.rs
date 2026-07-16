@@ -284,6 +284,13 @@ pub async fn list_folders(
         return Err(AppError::NotFound);
     }
 
+    let provider_kind: String =
+        sqlx::query_scalar("SELECT provider_kind FROM email_accounts WHERE id = ?")
+            .bind(&account_id)
+            .fetch_one(&user_db)
+            .await?;
+    let uses_provider_ids = matches!(provider_kind.as_str(), "gmail_api" | "outlook_api");
+
     let rows: Vec<(String, String, String, String, i64, i64)> = sqlx::query_as(
         "SELECT id, name, full_path, folder_type, unread_count, sync_enabled FROM folders WHERE account_id = ? ORDER BY folder_type, full_path",
     )
@@ -295,19 +302,30 @@ pub async fn list_folders(
         .into_iter()
         .map(
             |(id, name, full_path, folder_type, unread_count, sync_enabled)| {
-                // `full_path` stays the raw IMAP identifier (used for commands and
-                // routing); `folder_name`/`folder_name_server` carry the decoded and
-                // raw leaf names for display.
-                let raw_leaf = full_path
+                // `full_path` stays the provider-native identifier used for
+                // routing/commands. API providers use opaque IDs there, so the
+                // display path must come from the provider's folder/label name.
+                let display_path = if uses_provider_ids {
+                    name.clone()
+                } else {
+                    full_path.clone()
+                };
+                let raw_leaf = display_path
                     .rsplit('/')
                     .next()
-                    .unwrap_or(&full_path)
+                    .unwrap_or(&display_path)
                     .to_string();
+                let folder_name = if uses_provider_ids {
+                    raw_leaf.clone()
+                } else {
+                    crate::imap_utf7::decode(&raw_leaf)
+                };
                 json!({
                     "id": id,
                     "name": name,
                     "full_path": full_path,
-                    "folder_name": crate::imap_utf7::decode(&raw_leaf),
+                    "folder_display_path": display_path,
+                    "folder_name": folder_name,
                     "folder_name_server": raw_leaf,
                     "folder_type": folder_type,
                     "unread_count": unread_count,

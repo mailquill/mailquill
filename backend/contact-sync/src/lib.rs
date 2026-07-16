@@ -240,7 +240,10 @@ pub async fn sync_carddav_with_tls_options(
     Ok(contacts.into_iter().map(|card| card.contact).collect())
 }
 
-pub async fn discover_carddav_addressbook(base_url: &str, auth: &DavAuth) -> Result<String, String> {
+pub async fn discover_carddav_addressbook(
+    base_url: &str,
+    auth: &DavAuth,
+) -> Result<String, String> {
     let c = client()?;
     discover_addressbook(&c, base_url, auth)
         .await
@@ -261,7 +264,16 @@ pub async fn put_carddav_contact(
     raw_vcard: &str,
 ) -> Result<(), String> {
     let c = client()?;
-    dav(&c, "PUT", href, auth, "0", "text/vcard; charset=utf-8", raw_vcard).await?;
+    dav(
+        &c,
+        "PUT",
+        href,
+        auth,
+        "0",
+        "text/vcard; charset=utf-8",
+        raw_vcard,
+    )
+    .await?;
     Ok(())
 }
 
@@ -328,7 +340,10 @@ async fn discover_addressbook(c: &reqwest::Client, base: &str, auth: &DavAuth) -
     )
     .await
     .ok()?;
-    let principal = resolve(base, &first_href_in_elem(&principal_xml, b"current-user-principal")?)?;
+    let principal = resolve(
+        base,
+        &first_href_in_elem(&principal_xml, b"current-user-principal")?,
+    )?;
 
     let home_xml = dav(
         c,
@@ -341,7 +356,10 @@ async fn discover_addressbook(c: &reqwest::Client, base: &str, auth: &DavAuth) -
     )
     .await
     .ok()?;
-    let home = resolve(base, &first_href_in_elem(&home_xml, b"addressbook-home-set")?)?;
+    let home = resolve(
+        base,
+        &first_href_in_elem(&home_xml, b"addressbook-home-set")?,
+    )?;
 
     let list_xml = dav(
         c,
@@ -440,26 +458,30 @@ pub async fn graph_update_contact(
     contact: &ParsedContact,
 ) -> Result<(), String> {
     let c = client()?;
-    c.patch(format!("https://graph.microsoft.com/v1.0/me/contacts/{remote_id}"))
-        .bearer_auth(access_token)
-        .json(&to_graph_contact(contact))
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+    c.patch(format!(
+        "https://graph.microsoft.com/v1.0/me/contacts/{remote_id}"
+    ))
+    .bearer_auth(access_token)
+    .json(&to_graph_contact(contact))
+    .send()
+    .await
+    .map_err(explain_transport_error)?
+    .error_for_status()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub async fn graph_delete_contact(access_token: &str, remote_id: &str) -> Result<(), String> {
     let c = client()?;
-    c.delete(format!("https://graph.microsoft.com/v1.0/me/contacts/{remote_id}"))
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+    c.delete(format!(
+        "https://graph.microsoft.com/v1.0/me/contacts/{remote_id}"
+    ))
+    .bearer_auth(access_token)
+    .send()
+    .await
+    .map_err(explain_transport_error)?
+    .error_for_status()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -471,7 +493,10 @@ pub async fn google_connections(
     let mut url = Url::parse("https://people.googleapis.com/v1/people/me/connections")
         .map_err(|e| e.to_string())?;
     url.query_pairs_mut()
-        .append_pair("personFields", "names,emailAddresses,phoneNumbers,addresses,organizations,biographies,photos")
+        .append_pair(
+            "personFields",
+            "names,emailAddresses,phoneNumbers,addresses,organizations,biographies,photos",
+        )
         .append_pair("requestSyncToken", "true");
     if let Some(token) = sync_token {
         url.query_pairs_mut().append_pair("syncToken", token);
@@ -529,27 +554,34 @@ pub async fn google_update_contact(
     contact: &ParsedContact,
 ) -> Result<(), String> {
     let c = client()?;
-    c.patch(format!("https://people.googleapis.com/v1/{resource_name}:updateContact"))
-        .bearer_auth(access_token)
-        .query(&[("updatePersonFields", "names,emailAddresses,phoneNumbers,addresses,organizations,biographies")])
-        .json(&to_google_contact(contact))
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+    c.patch(format!(
+        "https://people.googleapis.com/v1/{resource_name}:updateContact"
+    ))
+    .bearer_auth(access_token)
+    .query(&[(
+        "updatePersonFields",
+        "names,emailAddresses,phoneNumbers,addresses,organizations,biographies",
+    )])
+    .json(&to_google_contact(contact))
+    .send()
+    .await
+    .map_err(explain_transport_error)?
+    .error_for_status()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub async fn google_delete_contact(access_token: &str, resource_name: &str) -> Result<(), String> {
     let c = client()?;
-    c.delete(format!("https://people.googleapis.com/v1/{resource_name}:deleteContact"))
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
+    c.delete(format!(
+        "https://people.googleapis.com/v1/{resource_name}:deleteContact"
+    ))
+    .bearer_auth(access_token)
+    .send()
+    .await
+    .map_err(explain_transport_error)?
+    .error_for_status()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -562,7 +594,8 @@ pub fn parse_vcard(raw: &str) -> Option<ParsedContact> {
             }
             if contact.given_name.is_none() || contact.family_name.is_none() {
                 if let Some(name) = &card.name {
-                    contact.family_name = contact.family_name.or_else(|| name.value.first().cloned());
+                    contact.family_name =
+                        contact.family_name.or_else(|| name.value.first().cloned());
                     contact.given_name = contact.given_name.or_else(|| name.value.get(1).cloned());
                 }
             }
@@ -608,7 +641,9 @@ pub fn parse_vcard(raw: &str) -> Option<ParsedContact> {
             contact.title = contact
                 .title
                 .or_else(|| card.title.first().map(|p| p.value.clone()));
-            contact.notes = contact.notes.or_else(|| card.note.first().map(|p| p.value.clone()));
+            contact.notes = contact
+                .notes
+                .or_else(|| card.note.first().map(|p| p.value.clone()));
             contact.uid = contact.uid.trim().to_owned();
             if contact.uid.is_empty() {
                 contact.uid = card
@@ -656,7 +691,11 @@ pub fn contact_to_vcard(contact: &ParsedContact) -> String {
         "VERSION:4.0".to_string(),
         format!("UID:{}", escape_vcard_value(&uid)),
         format!("FN:{}", escape_vcard_value(&display_name)),
-        format!("N:{};{};;;", escape_vcard_value(&family), escape_vcard_value(&given)),
+        format!(
+            "N:{};{};;;",
+            escape_vcard_value(&family),
+            escape_vcard_value(&given)
+        ),
     ];
     if let Some(org) = &contact.org {
         out.push(format!("ORG:{}", escape_vcard_value(org)));
@@ -762,10 +801,19 @@ fn google_contact(value: &Value) -> ParsedContact {
         })
         .collect();
     ParsedContact {
-        uid: value["resourceName"].as_str().unwrap_or_default().to_owned(),
-        display_name: name.and_then(|n| n["displayName"].as_str()).map(str::to_owned),
-        given_name: name.and_then(|n| n["givenName"].as_str()).map(str::to_owned),
-        family_name: name.and_then(|n| n["familyName"].as_str()).map(str::to_owned),
+        uid: value["resourceName"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        display_name: name
+            .and_then(|n| n["displayName"].as_str())
+            .map(str::to_owned),
+        given_name: name
+            .and_then(|n| n["givenName"].as_str())
+            .map(str::to_owned),
+        family_name: name
+            .and_then(|n| n["familyName"].as_str())
+            .map(str::to_owned),
         org: value["organizations"]
             .as_array()
             .and_then(|orgs| orgs.first())
@@ -1112,9 +1160,7 @@ fn resolve(base: &str, href: &str) -> Option<String> {
         .map(|u| u.to_string())
 }
 
-fn label_from_parameters(
-    parameters: Option<&vcard4::parameter::Parameters>,
-) -> Option<String> {
+fn label_from_parameters(parameters: Option<&vcard4::parameter::Parameters>) -> Option<String> {
     parameters?
         .types
         .as_ref()?
@@ -1145,11 +1191,14 @@ fn optional_string(value: &str) -> Option<String> {
 }
 
 fn display_name_from_parts(contact: &ParsedContact) -> Option<String> {
-    let name = [contact.given_name.as_deref(), contact.family_name.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let name = [
+        contact.given_name.as_deref(),
+        contact.family_name.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
     optional_string(&name).or_else(|| contact.emails.first().map(|email| email.value.clone()))
 }
 

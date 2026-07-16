@@ -11,6 +11,7 @@ pub mod messages;
 pub mod oauth;
 pub mod pgp;
 pub mod push_subscriptions;
+pub mod remote_content;
 pub mod rules;
 pub mod search;
 pub mod send;

@@ -37,7 +37,9 @@ pub async fn events_stream(
         if event.user_id != user_id {
             return None;
         }
-        Some(Ok(Event::default().event("message").data(event.payload)))
+        Some(Ok(Event::default()
+            .event(event.event_type)
+            .data(event.payload)))
     });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(30))))

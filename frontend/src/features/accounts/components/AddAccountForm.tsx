@@ -22,9 +22,12 @@ import { startOAuthRedirect } from '@/shared/lib/oauth'
 import {
   SETTINGS_EMAIL_RE,
   ACCT_COLORS,
+  PROVIDER_PRESET_OPTIONS,
   discoverServersAsync,
+  discoverServersForProvider,
   serverDefaults,
   type DiscoverResult,
+  type ProviderPresetId,
   type Security,
 } from '@/shared/lib/serverDiscovery'
 import { FieldLabel, Swatches, ServerGroup, SrvField, type AccountFormState } from './AccountFields'
@@ -70,6 +73,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
   const [data, setData] = useState<AccountFormState>(emptyAccountForm)
   const [phase, setPhase] = useState<'idle' | 'detecting' | 'done'>('idle')
   const [result, setResult] = useState<DiscoverResult | null>(null)
+  const [providerPreset, setProviderPreset] = useState<ProviderPresetId>('auto')
   const [oauthOk, setOauthOk] = useState(false)
   const detectSeq = useRef(0)
 
@@ -83,15 +87,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
   const oauthProvider: 'google' | 'microsoft' | null =
     result?.oauth && /google/i.test(result.provider) ? 'google' : result?.oauth ? 'microsoft' : null
 
-  async function runDetect() {
-    setStep(2)
-    setPhase('detecting')
-    setResult(null)
-    setOauthOk(false)
-    const requested = ++detectSeq.current
-    const d = await discoverServersAsync(data.email)
-    // Ignore stale results when the user went back and re-ran detection.
-    if (requested !== detectSeq.current) return
+  function applyDiscovery(d: DiscoverResult) {
     setData((prev) => ({
       ...prev,
       imapHost: d.imapHost, imapPort: String(d.imapPort), imapSecurity: d.imapSecurity, imapUser: d.imapUser,
@@ -101,6 +97,38 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
     }))
     setResult(d)
     setPhase('done')
+  }
+
+  async function runDetect() {
+    setStep(2)
+    setPhase('detecting')
+    setResult(null)
+    setOauthOk(false)
+    const requested = ++detectSeq.current
+    const d = providerPreset === 'auto'
+      ? await discoverServersAsync(data.email)
+      : discoverServersForProvider(data.email, providerPreset)
+    // Ignore stale results when the user went back and re-ran detection.
+    if (requested !== detectSeq.current) return
+    applyDiscovery(d)
+  }
+
+  async function chooseProvider(preset: ProviderPresetId) {
+    setProviderPreset(preset)
+    if (!SETTINGS_EMAIL_RE.test(data.email)) return
+    setPhase('detecting')
+    const requested = ++detectSeq.current
+    const d = preset === 'auto'
+      ? await discoverServersAsync(data.email)
+      : discoverServersForProvider(data.email, preset)
+    if (requested !== detectSeq.current) return
+    applyDiscovery(d)
+  }
+
+  const providerOptionLabel = (option: { id: ProviderPresetId; label: string }) => {
+    if (option.id === 'auto') return t('wiz.autoProvider')
+    if (option.id === 'imap') return t('wiz.regularImap')
+    return option.label
   }
 
   function finish(trustCert?: TlsCertInfo) {
@@ -217,6 +245,14 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
                 </div>
               </div>
               <SrvSummary data={data} />
+              <div className="rounded-[9px] border border-border bg-card px-3.5 py-3">
+                <FieldLabel>{t('wiz.manualProvider')}</FieldLabel>
+                <Select value={providerPreset} onChange={(e) => chooseProvider(e.currentTarget.value as ProviderPresetId)}>
+                  {PROVIDER_PRESET_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>{providerOptionLabel(option)}</option>
+                  ))}
+                </Select>
+              </div>
               {oauthProvider && (
                 <div className="flex items-center gap-3 rounded-[9px] border border-[#bfdbfe] bg-[var(--mq-row-open)] px-3.5 py-3">
                   <ShieldAlert className="size-[18px] shrink-0 text-[#2563eb]" />
@@ -234,13 +270,23 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
           )}
 
           {phase === 'done' && !known && (
-            <div className="flex items-start gap-3 rounded-[10px] border border-[#d97706]/30 bg-[#d97706]/10 px-4 py-3.5">
-              <span className="flex size-[34px] shrink-0 items-center justify-center rounded-full bg-[#d97706]">
-                <AlertCircle className="size-[18px] text-white" />
-              </span>
-              <div className="flex-1">
-                <div className="text-[14px] font-bold text-foreground">{t('wiz.notFound')}</div>
-                <div className="mt-0.5 text-[12.5px] leading-snug text-secondary-foreground">{t('wiz.notFoundSub')}</div>
+            <div className="flex flex-col gap-3.5">
+              <div className="flex items-start gap-3 rounded-[10px] border border-[#d97706]/30 bg-[#d97706]/10 px-4 py-3.5">
+                <span className="flex size-[34px] shrink-0 items-center justify-center rounded-full bg-[#d97706]">
+                  <AlertCircle className="size-[18px] text-white" />
+                </span>
+                <div className="flex-1">
+                  <div className="text-[14px] font-bold text-foreground">{t('wiz.notFound')}</div>
+                  <div className="mt-0.5 text-[12.5px] leading-snug text-secondary-foreground">{t('wiz.notFoundSub')}</div>
+                </div>
+              </div>
+              <div className="rounded-[9px] border border-border bg-card px-3.5 py-3">
+                <FieldLabel>{t('wiz.manualProvider')}</FieldLabel>
+                <Select value={providerPreset} onChange={(e) => chooseProvider(e.currentTarget.value as ProviderPresetId)}>
+                  {PROVIDER_PRESET_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>{providerOptionLabel(option)}</option>
+                  ))}
+                </Select>
               </div>
             </div>
           )}

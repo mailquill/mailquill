@@ -235,10 +235,12 @@ pub async fn trigger_sync(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     require_account(&user_db, &id).await?;
-    sqlx::query("UPDATE contact_accounts SET sync_status = 'syncing', sync_error = NULL WHERE id = ?")
-        .bind(&id)
-        .execute(&user_db)
-        .await?;
+    sqlx::query(
+        "UPDATE contact_accounts SET sync_status = 'syncing', sync_error = NULL WHERE id = ?",
+    )
+    .bind(&id)
+    .execute(&user_db)
+    .await?;
     spawn_contact_sync_task(state, user.0, id, true).await;
     Ok(Json(SyncStatus {
         status: "syncing".to_owned(),
@@ -299,7 +301,11 @@ pub async fn list_contacts(
             .await?
         }
     };
-    Ok(Json(rows.into_iter().map(row_to_contact).collect::<Result<Vec<_>, _>>()?))
+    Ok(Json(
+        rows.into_iter()
+            .map(row_to_contact)
+            .collect::<Result<Vec<_>, _>>()?,
+    ))
 }
 
 pub async fn search_contacts(
@@ -333,7 +339,11 @@ pub async fn search_contacts(
     .bind(format!("{trimmed}%"))
     .fetch_all(&user_db)
     .await?;
-    Ok(Json(rows.into_iter().map(row_to_contact).collect::<Result<Vec<_>, _>>()?))
+    Ok(Json(
+        rows.into_iter()
+            .map(row_to_contact)
+            .collect::<Result<Vec<_>, _>>()?,
+    ))
 }
 
 pub async fn create_contact(
@@ -392,7 +402,14 @@ pub async fn update_contact(
         photo_reference: None,
         raw_vcard: existing.raw_vcard,
     };
-    write_remote(&user_db, &state, &existing.account_id, Some(&existing.uid), &mut contact).await?;
+    write_remote(
+        &user_db,
+        &state,
+        &existing.account_id,
+        Some(&existing.uid),
+        &mut contact,
+    )
+    .await?;
     upsert_contact(&user_db, &existing.account_id, contact).await?;
     Ok(Json(fetch_contact(&user_db, &id).await?))
 }
@@ -443,11 +460,13 @@ pub async fn get_photo(
         .put(&key, bytes.clone())
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    sqlx::query("UPDATE contacts SET photo_blob_key = ?, updated_at = datetime('now') WHERE id = ?")
-        .bind(&key)
-        .bind(&id)
-        .execute(&user_db)
-        .await?;
+    sqlx::query(
+        "UPDATE contacts SET photo_blob_key = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&key)
+    .bind(&id)
+    .execute(&user_db)
+    .await?;
     Ok(binary_response(bytes, &content_type))
 }
 
@@ -456,11 +475,13 @@ async fn sync_contact_account(
     state: &AppState,
     account_id: &str,
 ) -> Result<(), String> {
-    sqlx::query("UPDATE contact_accounts SET sync_status = 'syncing', sync_error = NULL WHERE id = ?")
-        .bind(account_id)
-        .execute(db)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE contact_accounts SET sync_status = 'syncing', sync_error = NULL WHERE id = ?",
+    )
+    .bind(account_id)
+    .execute(db)
+    .await
+    .map_err(|e| e.to_string())?;
     let result = sync_contact_account_inner(db, state, account_id).await;
     match &result {
         Ok(()) => {
@@ -499,7 +520,8 @@ pub async fn spawn_contact_sync_task(
             let mut should_run = run_immediately;
             loop {
                 if !should_run {
-                    tokio::time::sleep(std::time::Duration::from_secs(CONTACT_SYNC_INTERVAL_SECS)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(CONTACT_SYNC_INTERVAL_SECS))
+                        .await;
                 }
                 should_run = false;
                 let status = match state.user_db_pool.get(&user_id).await {
@@ -612,8 +634,10 @@ async fn upsert_contact(
     if contact.raw_vcard.is_none() {
         contact.raw_vcard = Some(contact_sync::contact_to_vcard(&contact));
     }
-    let emails = serde_json::to_string(&contact.emails).map_err(|e| AppError::Internal(e.to_string()))?;
-    let phones = serde_json::to_string(&contact.phones).map_err(|e| AppError::Internal(e.to_string()))?;
+    let emails =
+        serde_json::to_string(&contact.emails).map_err(|e| AppError::Internal(e.to_string()))?;
+    let phones =
+        serde_json::to_string(&contact.phones).map_err(|e| AppError::Internal(e.to_string()))?;
     let addresses =
         serde_json::to_string(&contact.addresses).map_err(|e| AppError::Internal(e.to_string()))?;
     let id: String = sqlx::query_scalar(
@@ -662,7 +686,8 @@ async fn write_remote(
     let creds = decrypt_credentials(state, &encrypted).map_err(AppError::BadGateway)?;
     match provider.as_str() {
         "cardav" => {
-            let base = base_url.ok_or_else(|| AppError::Unprocessable("base_url is required".into()))?;
+            let base =
+                base_url.ok_or_else(|| AppError::Unprocessable("base_url is required".into()))?;
             let auth = dav_auth(&auth_scheme, &creds).map_err(AppError::BadGateway)?;
             let raw = contact_sync::contact_to_vcard(contact);
             let href = carddav_href(&base, existing_uid.unwrap_or(&contact.uid));
@@ -699,7 +724,11 @@ async fn write_remote(
                     .map_err(AppError::BadGateway)?;
             }
         }
-        _ => return Err(AppError::Unprocessable("unsupported contact provider".into())),
+        _ => {
+            return Err(AppError::Unprocessable(
+                "unsupported contact provider".into(),
+            ))
+        }
     }
     Ok(())
 }
@@ -720,7 +749,8 @@ async fn delete_remote(
     let creds = decrypt_credentials(state, &encrypted).map_err(AppError::BadGateway)?;
     match provider.as_str() {
         "cardav" => {
-            let base = base_url.ok_or_else(|| AppError::Unprocessable("base_url is required".into()))?;
+            let base =
+                base_url.ok_or_else(|| AppError::Unprocessable("base_url is required".into()))?;
             let auth = dav_auth(&auth_scheme, &creds).map_err(AppError::BadGateway)?;
             contact_sync::delete_carddav_contact(&carddav_href(&base, uid), &auth)
                 .await
@@ -742,7 +772,11 @@ async fn delete_remote(
                 .await
                 .map_err(AppError::BadGateway)?;
         }
-        _ => return Err(AppError::Unprocessable("unsupported contact provider".into())),
+        _ => {
+            return Err(AppError::Unprocessable(
+                "unsupported contact provider".into(),
+            ))
+        }
     }
     Ok(())
 }
@@ -767,11 +801,13 @@ async fn require_account(db: &sqlx::SqlitePool, id: &str) -> Result<(), AppError
 }
 
 async fn fetch_contact(db: &sqlx::SqlitePool, id: &str) -> Result<Contact, AppError> {
-    let row: ContactRow = sqlx::query_as(&format!("SELECT {SELECT_CONTACT} FROM contacts WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(db)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let row: ContactRow = sqlx::query_as(&format!(
+        "SELECT {SELECT_CONTACT} FROM contacts WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
     row_to_contact(row)
 }
 
@@ -825,7 +861,10 @@ fn decrypt_credentials(state: &AppState, encrypted: &[u8]) -> Result<Value, Stri
 fn dav_auth(auth_scheme: &str, creds: &Value) -> Result<contact_sync::DavAuth, String> {
     if auth_scheme == "oauth2" {
         return Ok(contact_sync::DavAuth::Bearer(
-            creds["access_token"].as_str().unwrap_or_default().to_owned(),
+            creds["access_token"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
         ));
     }
     Ok(contact_sync::DavAuth::Basic {
@@ -868,7 +907,10 @@ async fn photo_from_vcard(raw_vcard: &str) -> Result<Option<(Bytes, String)>, Ap
             .map_err(|e| AppError::Unprocessable(e.to_string()))?;
         let content_type = key
             .split(';')
-            .find_map(|part| part.strip_prefix("MEDIATYPE=").or_else(|| part.strip_prefix("TYPE=")))
+            .find_map(|part| {
+                part.strip_prefix("MEDIATYPE=")
+                    .or_else(|| part.strip_prefix("TYPE="))
+            })
             .map(str::to_owned)
             .unwrap_or_else(|| "image/jpeg".to_owned());
         return Ok(Some((Bytes::from(bytes), content_type)));

@@ -117,6 +117,7 @@ async fn main() {
         vapid,
         web_push_client,
         events,
+        remote_image_proxy_enabled: settings.remote_image_proxy_enabled,
     };
 
     // Re-start sync tasks for existing accounts (needs the assembled AppState as
@@ -142,6 +143,11 @@ async fn main() {
         // SSE: EventSource can't set an Authorization header, so this validates
         // a `?token=` query parameter itself (like oauth_start above).
         .route("/events", get(routes::events::events_stream))
+        .route("/config/public", get(routes::settings::public_config))
+        .route(
+            "/remote-content/image",
+            get(routes::remote_content::remote_image),
+        )
         .route(
             "/auth/me",
             get(routes::auth::me).layer(axum_middleware::from_fn_with_state(
@@ -296,7 +302,7 @@ async fn main() {
         )
         .route(
             "/calendar-accounts/{id}",
-            delete(routes::calendar::delete_account),
+            post(routes::calendar::sync_account).delete(routes::calendar::delete_account),
         )
         .route(
             "/calendar-accounts/{id}/sync-status",
@@ -470,12 +476,19 @@ async fn restart_existing_accounts(state: &AppState, data_dir: &str) {
                 .start_account(account_id, user_id.clone(), Arc::new(state.clone()))
                 .await;
         }
-        let contact_account_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM contact_accounts")
-            .fetch_all(&db)
-            .await
-            .unwrap_or_default();
+        let contact_account_ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM contact_accounts")
+                .fetch_all(&db)
+                .await
+                .unwrap_or_default();
         for account_id in contact_account_ids {
-            routes::contacts::spawn_contact_sync_task(state.clone(), user_id.clone(), account_id, true).await;
+            routes::contacts::spawn_contact_sync_task(
+                state.clone(),
+                user_id.clone(),
+                account_id,
+                true,
+            )
+            .await;
         }
     }
 }

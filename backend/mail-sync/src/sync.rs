@@ -25,7 +25,7 @@ pub async fn run_sync_task(
     let db = match app_state.user_db(&user_id).await {
         Ok(db) => db,
         Err(e) => {
-            error!("sync task: cannot open user db: {e}");
+            error!("sync task: account={account_id} user={user_id} cannot open user db: {e}");
             return;
         }
     };
@@ -86,17 +86,17 @@ pub async fn run_sync_task(
                     }
                     Some(SyncCommand::IMapMove { user_id: uid, uid: msg_uid, src_folder, dest_folder, expunge }) => {
                         if let Err(e) = do_imap_move(&account_id, &uid, msg_uid, &src_folder, &dest_folder, expunge, &app_state).await {
-                            warn!("IMAP move failed: {e}");
+                            warn!("IMAP move failed: account={account_id} user={uid} uid={msg_uid} folder={src_folder} dest={dest_folder} expunge={expunge} err={e}");
                         }
                     }
                     Some(SyncCommand::IMapFlag { user_id: uid, uid: msg_uid, folder, flag, set }) => {
                         if let Err(e) = do_imap_flag(&account_id, &uid, msg_uid, &folder, &flag, set, &app_state).await {
-                            warn!("IMAP flag failed: {e}");
+                            warn!("IMAP flag failed: account={account_id} user={uid} uid={msg_uid} folder={folder} flag={flag} set={set} err={e}");
                         }
                     }
                     Some(SyncCommand::IMapExpunge { user_id: uid, uid: msg_uid, folder }) => {
                         if let Err(e) = do_imap_expunge(&account_id, &uid, msg_uid, &folder, &app_state).await {
-                            warn!("IMAP expunge failed: {e}");
+                            warn!("IMAP expunge failed: account={account_id} user={uid} uid={msg_uid} folder={folder} err={e}");
                         }
                     }
                 }
@@ -106,12 +106,17 @@ pub async fn run_sync_task(
 }
 
 async fn do_sync(account_id: &str, user_id: &str, app: &Arc<dyn SyncAppState>) {
+    if app.sync_manager().account_status(account_id).await.state == "reauth_required" {
+        return;
+    }
+
     // Mark syncing but keep the last known progress counters — sync_account
     // recomputes them as soon as it has the new totals. Resetting to 0/0 here
     // would make a manual refresh flash "0 / 0" until that recompute lands.
     app.sync_manager()
         .set_state(account_id, "syncing", None, None)
         .await;
+    publish_sync_status(account_id, user_id, app).await;
 
     let result = sync_account(account_id, user_id, app).await;
 
@@ -127,11 +132,35 @@ async fn do_sync(account_id: &str, user_id: &str, app: &Arc<dyn SyncAppState>) {
                 .await;
         }
         Err(e) => {
-            error!("sync error for account={account_id}: {e}");
-            app.sync_manager()
-                .set_state(account_id, "error", None, Some(e.to_string()))
-                .await;
+            let error = e.to_string();
+            if error.starts_with("oauth_reauthentication_required:") {
+                warn!("sync paused for account={account_id}: OAuth reauthentication required");
+                app.sync_manager()
+                    .set_state(account_id, "reauth_required", None, Some(error))
+                    .await;
+            } else {
+                error!("sync error for account={account_id}: {error}");
+                app.sync_manager()
+                    .set_state(account_id, "error", None, Some(error))
+                    .await;
+            }
         }
+    }
+    publish_sync_status(account_id, user_id, app).await;
+}
+
+async fn publish_sync_status(account_id: &str, user_id: &str, app: &Arc<dyn SyncAppState>) {
+    let status = app.sync_manager().account_status(account_id).await;
+    let notification = crate::manager::SyncStatusNotification {
+        account_id: account_id.to_owned(),
+        state: status.state,
+        last_synced_at: status.last_synced_at,
+        error: status.error,
+        synced: status.synced,
+        total: status.total,
+    };
+    if let Err(error) = app.notify_sync_status(user_id, notification).await {
+        warn!("sync status SSE failed: account={account_id} error={error}");
     }
 }
 
@@ -142,12 +171,13 @@ async fn sync_account(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let db = app.user_db(user_id).await?;
 
-    let body_sync_mode: String =
-        sqlx::query_scalar("SELECT body_sync_mode FROM email_accounts WHERE id = ?")
+    let (body_sync_mode, provider_kind): (String, String) =
+        sqlx::query_as("SELECT body_sync_mode, provider_kind FROM email_accounts WHERE id = ?")
             .bind(account_id)
             .fetch_optional(&db)
             .await?
             .ok_or("account not found")?;
+    let provider_kind = ProviderKind::parse(&provider_kind);
 
     let mut provider = open_provider(account_id, user_id, app).await?;
 
@@ -155,13 +185,15 @@ async fn sync_account(
     // and toggle-able in settings, regardless of whether it's synced.
     let folders = provider.list_folders().await?;
     for folder in &folders {
+        let default_sync_enabled = default_folder_sync_enabled(provider_kind, &folder.folder_type);
         sqlx::query(
-            "INSERT INTO folders (account_id, name, full_path, folder_type) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, full_path) DO UPDATE SET name = excluded.name, folder_type = excluded.folder_type",
+            "INSERT INTO folders (account_id, name, full_path, folder_type, sync_enabled) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, full_path) DO UPDATE SET name = excluded.name, folder_type = excluded.folder_type",
         )
         .bind(account_id)
         .bind(&folder.name)
         .bind(&folder.full_path)
         .bind(&folder.folder_type)
+        .bind(default_sync_enabled as i64)
         .execute(&db)
         .await?;
     }
@@ -176,10 +208,11 @@ async fn sync_account(
     .unwrap_or_default()
     .into_iter()
     .collect();
-    let synced_folders: Vec<&crate::session::FolderInfo> = folders
+    let mut synced_folders: Vec<&crate::session::FolderInfo> = folders
         .iter()
         .filter(|f| enabled.contains(&f.full_path))
         .collect();
+    synced_folders.sort_by_key(|f| folder_sync_priority(&f.folder_type));
 
     // Progress total: sum of server-reported message counts across synced
     // folders. A cheap status pre-pass gives a stable denominator before the
@@ -204,6 +237,7 @@ async fn sync_account(
     app.sync_manager()
         .set_progress(account_id, already, total)
         .await;
+    publish_sync_status(account_id, user_id, app).await;
 
     // Sync each enabled folder
     for folder in &synced_folders {
@@ -212,6 +246,7 @@ async fn sync_account(
             user_id,
             &folder.full_path,
             &body_sync_mode,
+            provider_kind,
             total,
             provider.as_mut(),
             &db,
@@ -219,12 +254,47 @@ async fn sync_account(
         )
         .await
         {
-            warn!("folder sync error: folder={} err={e}", folder.full_path);
+            warn!(
+                "folder sync error: account={account_id} folder={} folder_type={} err={e}",
+                folder.full_path, folder.folder_type
+            );
         }
     }
 
     let _ = provider.close().await;
     Ok(())
+}
+
+fn default_folder_sync_enabled(provider_kind: ProviderKind, folder_type: &str) -> bool {
+    if provider_kind == ProviderKind::GmailApi {
+        // Gmail API drafts are special resources and can return transport/body
+        // decode errors through the messages endpoint. Keep the primary sync
+        // focused on real mailbox traffic; Drafts can be enabled manually after
+        // the API path grows first-class draft support.
+        matches!(folder_type, "INBOX" | "SENT")
+    } else if provider_kind == ProviderKind::GmailImap {
+        // Gmail exposes labels as IMAP folders, including "[Gmail]/All Mail"
+        // as ARCHIVE. Syncing every label by default duplicates messages across
+        // folders and makes first backfill painfully slow. Keep the mailbox
+        // useful immediately; custom labels and All Mail remain opt-in in
+        // Settings > Accounts > Synced folders.
+        matches!(folder_type, "INBOX" | "SENT" | "DRAFTS")
+    } else {
+        true
+    }
+}
+
+fn folder_sync_priority(folder_type: &str) -> u8 {
+    match folder_type {
+        "INBOX" => 0,
+        "DRAFTS" => 1,
+        "SENT" => 2,
+        "ARCHIVE" => 3,
+        "CUSTOM" => 4,
+        "SPAM" => 5,
+        "TRASH" => 6,
+        _ => 7,
+    }
 }
 
 /// Load the connection config for an account, plus its provider kind. Shared by
@@ -235,28 +305,49 @@ async fn load_provider_config(
     app: &Arc<dyn SyncAppState>,
 ) -> Result<(ProviderConfig, ProviderKind), Box<dyn std::error::Error + Send + Sync>> {
     let db = app.user_db(user_id).await?;
-    let row: Option<(Vec<u8>, String, i64, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT credentials_encrypted, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
+    let row: Option<(Vec<u8>, String, String, i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT credentials_encrypted, primary_email, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
     )
     .bind(account_id)
     .fetch_optional(&db)
     .await?;
 
-    let (creds_enc, host, port, auth_scheme, tls_cert, kind) = row.ok_or("account not found")?;
+    let (creds_enc, primary_email, host, port, auth_scheme, tls_cert, kind) =
+        row.ok_or("account not found")?;
     let creds_bytes = app.credential_key().decrypt(&creds_enc)?;
     let creds: serde_json::Value = serde_json::from_slice(&creds_bytes)?;
 
     // Prefer a freshly refreshed OAuth token over the stored one (the stored
     // access token may be expired; the api layer refreshes and persists it).
-    let oauth_access_token = match app.fresh_oauth_token(user_id, account_id).await {
+    let oauth_access_token = match app
+        .fresh_oauth_token(user_id, account_id)
+        .await
+        .map_err(std::io::Error::other)?
+    {
         Some(token) => Some(token),
         None => creds["oauth_access_token"].as_str().map(|s| s.to_owned()),
     };
 
+    let mut username = creds["imap_username"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&primary_email)
+        .trim()
+        .to_owned();
+    if auth_scheme == "xoauth2" && username == "oauth@pending" {
+        return Err(
+            "OAuth account is still pending; reconnect it to store the real mailbox address".into(),
+        );
+    }
+    if auth_scheme == "xoauth2" && username.is_empty() {
+        return Err("OAuth account is missing an IMAP username; reconnect it".into());
+    }
+    username.make_ascii_lowercase();
+
     let config = ProviderConfig {
         host,
         port: port as u16,
-        username: creds["imap_username"].as_str().unwrap_or("").to_owned(),
+        username,
         password: creds["imap_password"].as_str().unwrap_or("").to_owned(),
         oauth_access_token,
         auth_scheme,
@@ -382,6 +473,7 @@ async fn sync_folder(
     user_id: &str,
     folder_path: &str,
     body_sync_mode: &str,
+    provider_kind: ProviderKind,
     total: i64,
     provider: &mut dyn MailProvider,
     db: &sqlx::SqlitePool,
@@ -408,7 +500,9 @@ async fn sync_folder(
     // Handle UIDVALIDITY change — purge and full re-sync (task 4.5)
     if let Some(sv) = stored_uidvalidity {
         if sv != server_uidvalidity as i64 {
-            warn!("UIDVALIDITY changed for folder={folder_path}, purging and re-syncing");
+            warn!(
+                "UIDVALIDITY changed: account={account_id} folder={folder_path} old={sv} new={server_uidvalidity}; purging and re-syncing"
+            );
             sqlx::query("DELETE FROM messages WHERE folder_id = ?")
                 .bind(&folder_id)
                 .execute(db)
@@ -432,7 +526,11 @@ async fn sync_folder(
     // written — on large mailboxes (tens of thousands of messages) that stalls
     // or times out, so nothing is committed. Chunking keeps each fetch small,
     // commits progress per chunk, and lets messages stream into the UI.
-    const UID_CHUNK: u32 = 500;
+    let uid_chunk: u32 = if provider_kind == ProviderKind::GmailApi {
+        200
+    } else {
+        500
+    };
     // IMAP UIDs are u32; last_uid is stored as i64. Work in u32 for the walk.
     let prev_last_uid: u32 = last_uid.unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
     let uid_start: u32 = prev_last_uid + 1;
@@ -480,22 +578,19 @@ async fn sync_folder(
 
     let mut chunk_start = uid_start;
     while chunk_start <= highest {
-        let chunk_end = chunk_start.saturating_add(UID_CHUNK - 1).min(highest);
+        let chunk_end = chunk_start.saturating_add(uid_chunk - 1).min(highest);
         let uid_set = format!("{}:{}", chunk_start, chunk_end);
 
-        let messages = if body_sync_mode == "full" {
+        let mut messages = if body_sync_mode == "full" {
             // Full sync: fetch complete raw messages (task 4.3)
             provider.fetch_full(folder_path, &uid_set).await?
         } else {
             // Lazy sync: fetch headers only (task 4.2)
             provider.fetch_headers(folder_path, &uid_set).await?
         };
+        messages.sort_by_key(|msg| msg.uid);
 
         for msg in &messages {
-            if msg.uid > max_uid as u32 {
-                max_uid = msg.uid as i64;
-            }
-
             let thread_id = assign_thread_id(
                 msg.message_id.as_deref(),
                 msg.in_reply_to.as_deref(),
@@ -661,20 +756,36 @@ async fn sync_folder(
 
             if should_notify {
                 let notification = NewMessageNotification {
-                    message_id: msg_db_id,
+                    message_id: msg_db_id.clone(),
                     account_id: account_id.to_owned(),
                     account_name: account_name.clone(),
                     sender: msg.from_addr.clone(),
                     subject: msg.subject.clone(),
                 };
                 if let Err(e) = app.notify_new_message(user_id, notification).await {
-                    warn!("web push notification failed: {e}");
+                    warn!(
+                        "web push notification failed: account={account_id} folder={folder_path} message={msg_db_id} err={e}"
+                    );
                 }
             }
         }
 
         // Persist progress after each chunk (task 4.14) so messages stream into
         // the UI and an interrupted sync resumes from the last committed UID.
+        // Only advance through a contiguous run of locally stored UIDs: API
+        // providers may return partial chunks during quota/backpressure events,
+        // and moving past a gap would permanently skip that message.
+        let chunk_uids: Vec<i64> = sqlx::query_scalar(
+            "SELECT uid FROM messages WHERE folder_id = ? AND uid BETWEEN ? AND ? ORDER BY uid",
+        )
+        .bind(&folder_id)
+        .bind(chunk_start as i64)
+        .bind(chunk_end as i64)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        max_uid = contiguous_uid(max_uid, &chunk_uids);
+
         let unread_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_read = 0 AND is_deleted = 0",
         )
@@ -703,6 +814,7 @@ async fn sync_folder(
         app.sync_manager()
             .set_progress(account_id, synced, total)
             .await;
+        publish_sync_status(account_id, user_id, app).await;
 
         if chunk_end >= highest {
             break;
@@ -711,6 +823,21 @@ async fn sync_folder(
     }
 
     Ok(())
+}
+
+fn contiguous_uid(current: i64, sorted_uids: &[i64]) -> i64 {
+    let mut next = current;
+    for uid in sorted_uids {
+        if *uid <= next {
+            continue;
+        }
+        if *uid == next + 1 {
+            next = *uid;
+        } else {
+            break;
+        }
+    }
+    next
 }
 
 async fn process_calendar_parts(db: &sqlx::SqlitePool, message_id: &str, parts: &[String]) {
@@ -934,4 +1061,53 @@ async fn do_imap_expunge(
     provider.delete_permanently(folder, uid).await?;
     let _ = provider.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_folder_sync_enabled, folder_sync_priority, ProviderKind};
+
+    #[test]
+    fn gmail_defaults_skip_archive_and_custom_labels() {
+        assert!(default_folder_sync_enabled(
+            ProviderKind::GmailImap,
+            "INBOX"
+        ));
+        assert!(default_folder_sync_enabled(ProviderKind::GmailImap, "SENT"));
+        assert!(default_folder_sync_enabled(
+            ProviderKind::GmailImap,
+            "DRAFTS"
+        ));
+        assert!(!default_folder_sync_enabled(
+            ProviderKind::GmailImap,
+            "ARCHIVE"
+        ));
+        assert!(!default_folder_sync_enabled(
+            ProviderKind::GmailImap,
+            "CUSTOM"
+        ));
+        assert!(!default_folder_sync_enabled(
+            ProviderKind::GmailApi,
+            "CUSTOM"
+        ));
+        assert!(!default_folder_sync_enabled(
+            ProviderKind::GmailApi,
+            "DRAFTS"
+        ));
+        assert!(default_folder_sync_enabled(ProviderKind::Imap, "CUSTOM"));
+    }
+
+    #[test]
+    fn sync_priority_starts_with_inbox() {
+        assert!(folder_sync_priority("INBOX") < folder_sync_priority("SENT"));
+        assert!(folder_sync_priority("SENT") < folder_sync_priority("CUSTOM"));
+        assert!(folder_sync_priority("CUSTOM") < folder_sync_priority("TRASH"));
+    }
+
+    #[test]
+    fn contiguous_uid_stops_before_gaps() {
+        assert_eq!(super::contiguous_uid(10, &[11, 12, 14, 15]), 12);
+        assert_eq!(super::contiguous_uid(10, &[8, 10, 11, 12]), 12);
+        assert_eq!(super::contiguous_uid(10, &[12, 13]), 10);
+    }
 }

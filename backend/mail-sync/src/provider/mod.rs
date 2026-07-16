@@ -2,9 +2,9 @@
 //!
 //! The sync pipeline (sync.rs), threading, and phishing analysis are already
 //! transport-agnostic — this trait makes the mailbox I/O pluggable too. IMAP
-//! is the only working implementation today; Gmail API and Microsoft Graph
-//! (Outlook) are compile-complete stubs that return `NotImplemented` so the
-//! call sites can be wired up before the implementations land.
+//! is the baseline implementation. Gmail also has a REST API implementation;
+//! Microsoft Graph is wired through the same abstraction but is enabled only
+//! when its provider is selected for an account.
 //!
 //! Design notes for implementors:
 //! - Folders are addressed by their provider-native path on every call; an
@@ -36,13 +36,14 @@ pub enum ProviderError {
     Session(#[from] SessionError),
     #[error("not implemented for this provider: {0}")]
     NotImplemented(&'static str),
+    #[error("http {status}: {body}")]
+    Http { status: u16, body: String },
     #[error("{0}")]
     Other(String),
 }
 
 /// Which backend an account talks to. Stored per account (currently every
-/// account is `Imap`; the column/wizard support comes with the first API
-/// provider).
+/// account can choose the backend that should own sync and send behavior).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProviderKind {
     #[default]

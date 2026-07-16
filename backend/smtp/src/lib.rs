@@ -7,6 +7,7 @@ use lettre::{
     },
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SmtpError {
@@ -282,10 +283,16 @@ fn build_transport(req: &SendRequest) -> Result<AsyncSmtpTransport<Tokio1Executo
         .build_native()
         .map_err(|e| SmtpError::Build(e.to_string()))?;
 
+    let tls = if uses_implicit_tls(req.smtp_port) {
+        Tls::Wrapper(tls_params)
+    } else {
+        Tls::Required(tls_params)
+    };
     let mut transport_builder = AsyncSmtpTransport::<Tokio1Executor>::relay(&req.smtp_host)
         .map_err(|e| SmtpError::Build(e.to_string()))?
         .port(req.smtp_port)
-        .tls(Tls::Required(tls_params));
+        .tls(tls)
+        .timeout(Some(Duration::from_secs(30)));
 
     transport_builder = match req.auth_scheme.as_str() {
         "xoauth2" => {
@@ -304,7 +311,22 @@ fn build_transport(req: &SendRequest) -> Result<AsyncSmtpTransport<Tokio1Executo
     Ok(transport_builder.build())
 }
 
+fn uses_implicit_tls(port: u16) -> bool {
+    port == 465
+}
+
 fn build_xoauth2_sasl(username: &str, token: &str) -> String {
     let raw = format!("user={username}\x01auth=Bearer {token}\x01\x01");
     base64::engine::general_purpose::STANDARD.encode(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uses_implicit_tls;
+
+    #[test]
+    fn smtp_465_uses_implicit_tls() {
+        assert!(uses_implicit_tls(465));
+        assert!(!uses_implicit_tls(587));
+    }
 }

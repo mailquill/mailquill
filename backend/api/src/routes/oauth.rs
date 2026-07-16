@@ -27,11 +27,22 @@ pub struct OAuthStartQuery {
     /// Short-lived access token, passed in the query because a full-page
     /// redirect to the provider cannot send an Authorization header.
     token: String,
+    /// Existing account to reconnect after a revoked refresh token.
+    account_id: Option<String>,
+    /// Return to the calendar after consent and activate Google Calendar sync.
+    calendar: Option<bool>,
+}
+
+#[derive(Debug)]
+struct OAuthProfile {
+    email: String,
+    name: Option<String>,
 }
 
 /// Temporary PKCE verifier store (in-memory, keyed by CSRF state token).
 /// Production use: persist in Redis or app DB.
-pub type PkceStore = Mutex<HashMap<String, (String, PkceCodeVerifier, String)>>;
+pub type PkceStore =
+    Mutex<HashMap<String, (String, PkceCodeVerifier, String, Option<String>, bool)>>;
 
 pub fn new_pkce_store() -> PkceStore {
     Mutex::new(HashMap::new())
@@ -63,15 +74,18 @@ fn provider_scopes(provider: &str) -> Vec<Scope> {
     match provider {
         PROVIDER_GOOGLE => vec![
             Scope::new("https://mail.google.com/".into()),
+            Scope::new("https://www.googleapis.com/auth/calendar.events".into()),
+            Scope::new("https://www.googleapis.com/auth/calendar.calendarlist.readonly".into()),
             Scope::new("email".into()),
             Scope::new("profile".into()),
         ],
         // Graph API scopes (accounts run as provider_kind = outlook_api). The
-        // v2 endpoint issues a token for ONE resource — a switch back to
-        // IMAP/SMTP (outlook.office.com scopes) needs re-consent.
+        // v2 endpoint issues a token for ONE resource; switching this account
+        // to IMAP/SMTP would need re-consent with outlook.office.com scopes.
         PROVIDER_MICROSOFT => vec![
             Scope::new("https://graph.microsoft.com/Mail.ReadWrite".into()),
             Scope::new("https://graph.microsoft.com/Mail.Send".into()),
+            Scope::new("https://graph.microsoft.com/User.Read".into()),
             Scope::new("offline_access".into()),
             Scope::new("email".into()),
         ],
@@ -119,6 +133,26 @@ pub async fn oauth_start(
             .validate(&query.token)
             .map_err(|_| AppError::Unauthorized)?,
     );
+    if let Some(account_id) = query.account_id.as_deref() {
+        let user_db = state.user_db_pool.get(&user.0).await?;
+        let credentials: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT credentials_encrypted FROM email_accounts WHERE id = ?")
+                .bind(account_id)
+                .fetch_optional(&user_db)
+                .await?;
+        let credentials = credentials.ok_or(AppError::NotFound)?;
+        let decrypted = state
+            .credential_key
+            .decrypt(&credentials)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        let stored: serde_json::Value = serde_json::from_slice(&decrypted)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        if stored["provider"].as_str() != Some(provider.as_str()) {
+            return Err(AppError::Unprocessable(
+                "OAuth provider does not match the account".into(),
+            ));
+        }
+    }
     let client = build_client(&provider, &state)?;
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -139,7 +173,13 @@ pub async fn oauth_start(
     let state_val = csrf_token.secret().clone();
     pkce_store.lock().await.insert(
         state_val.clone(),
-        (provider.clone(), pkce_verifier, user.0.clone()),
+        (
+            provider.clone(),
+            pkce_verifier,
+            user.0.clone(),
+            query.account_id,
+            query.calendar.unwrap_or(false),
+        ),
     );
 
     Ok(Redirect::temporary(auth_url.as_str()))
@@ -151,11 +191,12 @@ pub async fn oauth_callback(
     Query(params): Query<OAuthCallbackQuery>,
     axum::extract::Extension(pkce_store): axum::extract::Extension<std::sync::Arc<PkceStore>>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (stored_provider, pkce_verifier, user_id) = pkce_store
-        .lock()
-        .await
-        .remove(&params.state)
-        .ok_or(AppError::Unauthorized)?;
+    let (stored_provider, pkce_verifier, user_id, reconnect_account_id, calendar_requested) =
+        pkce_store
+            .lock()
+            .await
+            .remove(&params.state)
+            .ok_or(AppError::Unauthorized)?;
 
     if stored_provider != provider {
         return Err(AppError::Unauthorized);
@@ -180,8 +221,14 @@ pub async fn oauth_callback(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(3600);
 
+    let profile = fetch_oauth_profile(&provider, &access_token).await?;
+    crate::validate::email("oauth email", &profile.email)?;
+    let display_email = profile.email.to_lowercase();
+
     // Encrypt and store OAuth refresh token
     let creds = serde_json::json!({
+        "imap_username": display_email,
+        "smtp_username": display_email,
         "oauth_access_token": access_token,
         "oauth_refresh_token": refresh_token,
         "oauth_expires_at": expires_at,
@@ -193,11 +240,7 @@ pub async fn oauth_callback(
         .encrypt(&creds_bytes)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // Upsert the OAuth credentials for this user's account (email from token introspection not done here;
-    // the frontend will pass the email when creating the account via POST /accounts with auth_scheme=xoauth2)
     let user_db = state.user_db_pool.get(&user_id).await?;
-    // Email must be provided by user when setting up account via POST /accounts
-    let account_email = "oauth@pending".to_owned();
 
     let imap_host = match provider.as_str() {
         PROVIDER_GOOGLE => "imap.gmail.com",
@@ -210,31 +253,101 @@ pub async fn oauth_callback(
         _ => return Err(AppError::NotFound),
     };
 
-    // OAuth accounts sync/send over IMAP/SMTP+XOAUTH2. Gmail additionally uses
-    // the Gmail API for label handling (move/archive/delete) via the
-    // gmail_imap hybrid; Outlook is plain IMAP.
+    // OAuth accounts prefer provider APIs where the implementation is complete.
+    // Gmail syncs and sends through the Gmail API. Outlook keeps the existing
+    // IMAP/SMTP path until the Graph provider is enabled end-to-end.
     let provider_kind = match provider.as_str() {
-        PROVIDER_GOOGLE => "gmail_imap",
+        PROVIDER_GOOGLE => "gmail_api",
         PROVIDER_MICROSOFT => "imap",
         _ => return Err(AppError::NotFound),
     };
 
-    let account_id: String = sqlx::query_scalar(
-        "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, provider_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+    let display_name = oauth_display_name(&provider, &profile, &display_email);
+    let pending_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM email_accounts WHERE primary_email = 'oauth@pending' AND provider_kind = ? ORDER BY created_at DESC LIMIT 1",
     )
-    .bind(format!("{} ({})", if provider == PROVIDER_GOOGLE { "Gmail" } else { "Outlook" }, &account_email))
-    .bind(&account_email)
-    .bind(imap_host)
-    .bind(993i64)
-    .bind("xoauth2")
-    .bind(smtp_host)
-    .bind(587i64)
-    .bind("xoauth2")
-    .bind(&encrypted)
-    .bind("lazy")
     .bind(provider_kind)
-    .fetch_one(&user_db)
+    .fetch_optional(&user_db)
     .await?;
+
+    let account_id = if let Some(reconnect_id) = reconnect_account_id {
+        let current_email: Option<String> =
+            sqlx::query_scalar("SELECT primary_email FROM email_accounts WHERE id = ?")
+                .bind(&reconnect_id)
+                .fetch_optional(&user_db)
+                .await?;
+        let current_email = current_email.ok_or(AppError::NotFound)?;
+        if !current_email.eq_ignore_ascii_case(&display_email) {
+            return Err(AppError::Unprocessable(
+                "OAuth identity does not match the account email".into(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE email_accounts SET imap_host = ?, imap_port = ?, imap_auth_scheme = ?, smtp_host = ?, smtp_port = ?, smtp_auth_scheme = ?, credentials_encrypted = ?, provider_kind = ? WHERE id = ?",
+        )
+        .bind(imap_host)
+        .bind(993i64)
+        .bind("xoauth2")
+        .bind(smtp_host)
+        .bind(587i64)
+        .bind("xoauth2")
+        .bind(&encrypted)
+        .bind(provider_kind)
+        .bind(&reconnect_id)
+        .execute(&user_db)
+        .await?;
+        reconnect_id
+    } else if let Some(pending_id) = pending_id {
+        sqlx::query(
+            "UPDATE email_accounts SET display_name = ?, primary_email = ?, imap_host = ?, imap_port = ?, imap_auth_scheme = ?, smtp_host = ?, smtp_port = ?, smtp_auth_scheme = ?, credentials_encrypted = ?, body_sync_mode = ?, provider_kind = ? WHERE id = ?",
+        )
+        .bind(&display_name)
+        .bind(&display_email)
+        .bind(imap_host)
+        .bind(993i64)
+        .bind("xoauth2")
+        .bind(smtp_host)
+        .bind(587i64)
+        .bind("xoauth2")
+        .bind(&encrypted)
+        .bind("lazy")
+        .bind(provider_kind)
+        .bind(&pending_id)
+        .execute(&user_db)
+        .await?;
+        pending_id
+    } else {
+        sqlx::query_scalar(
+            "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, provider_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        )
+        .bind(&display_name)
+        .bind(&display_email)
+        .bind(imap_host)
+        .bind(993i64)
+        .bind("xoauth2")
+        .bind(smtp_host)
+        .bind(587i64)
+        .bind("xoauth2")
+        .bind(&encrypted)
+        .bind("lazy")
+        .bind(provider_kind)
+        .fetch_one(&user_db)
+        .await?
+    };
+
+    if provider == PROVIDER_GOOGLE {
+        if let Err(error) = crate::routes::calendar::connect_google_account(
+            &user_db,
+            &state,
+            &account_id,
+            &display_name,
+            &encrypted,
+        )
+        .await
+        {
+            tracing::warn!(account_id, %error, "google calendar connection failed");
+        }
+    }
 
     state
         .sync_manager
@@ -247,7 +360,67 @@ pub async fn oauth_callback(
 
     let redirect_base =
         std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let destination = if calendar_requested && provider == PROVIDER_GOOGLE {
+        format!("/mail/calendar?connected={account_id}")
+    } else {
+        format!("/mail/accounts?connected={account_id}")
+    };
     Ok(Redirect::temporary(&format!(
-        "{redirect_base}/mail/accounts?connected={account_id}"
+        "{redirect_base}{destination}"
     )))
+}
+
+async fn fetch_oauth_profile(provider: &str, access_token: &str) -> Result<OAuthProfile, AppError> {
+    let client = reqwest::Client::new();
+    let url = match provider {
+        PROVIDER_GOOGLE => "https://openidconnect.googleapis.com/v1/userinfo",
+        PROVIDER_MICROSOFT => "https://graph.microsoft.com/v1.0/me",
+        _ => return Err(AppError::NotFound),
+    };
+
+    let body: serde_json::Value = client
+        .get(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("oauth profile request: {e}")))?
+        .error_for_status()
+        .map_err(|e| AppError::BadGateway(format!("oauth profile response: {e}")))?
+        .json()
+        .await
+        .map_err(|e| AppError::BadGateway(format!("oauth profile parse: {e}")))?;
+
+    let email = match provider {
+        PROVIDER_GOOGLE => body["email"].as_str(),
+        PROVIDER_MICROSOFT => body["mail"]
+            .as_str()
+            .or_else(|| body["userPrincipalName"].as_str()),
+        _ => None,
+    }
+    .filter(|s| !s.trim().is_empty())
+    .ok_or_else(|| AppError::BadGateway("oauth profile did not include an email".into()))?
+    .trim()
+    .to_owned();
+
+    let name = match provider {
+        PROVIDER_GOOGLE => body["name"].as_str(),
+        PROVIDER_MICROSOFT => body["displayName"].as_str(),
+        _ => None,
+    }
+    .filter(|s| !s.trim().is_empty())
+    .map(|s| s.trim().to_owned());
+
+    Ok(OAuthProfile { email, name })
+}
+
+fn oauth_display_name(provider: &str, profile: &OAuthProfile, email: &str) -> String {
+    let provider_name = if provider == PROVIDER_GOOGLE {
+        "Gmail"
+    } else {
+        "Outlook"
+    };
+    match profile.name.as_deref() {
+        Some(name) => format!("{name} ({email})"),
+        None => format!("{provider_name} ({email})"),
+    }
 }

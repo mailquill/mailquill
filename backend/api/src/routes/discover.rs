@@ -44,7 +44,7 @@ pub struct Endpoint {
     /// `ssl` (implicit TLS) or `starttls`, matching the values the account
     /// form already uses.
     pub security: &'static str,
-    /// `srv` or `probe`, for UI display and debugging.
+    /// `srv`, `ispdb`, `mx`, or `probe`, for UI display and debugging.
     pub source: &'static str,
 }
 
@@ -53,6 +53,34 @@ pub struct IspdbConfig {
     pub provider: Option<String>,
     pub imap: Option<Endpoint>,
     pub smtp: Option<Endpoint>,
+}
+
+fn endpoint(host: &str, port: u16, security: &'static str, source: &'static str) -> Endpoint {
+    Endpoint {
+        host: host.to_owned(),
+        port,
+        security,
+        source,
+    }
+}
+
+fn hosted_provider_from_mx(mx: &[String]) -> Option<IspdbConfig> {
+    let has = |needle: &str| mx.iter().any(|host| host.ends_with(needle));
+    if has(".google.com") || has(".googlemail.com") {
+        return Some(IspdbConfig {
+            provider: Some("Google Workspace".to_owned()),
+            imap: Some(endpoint("imap.gmail.com", 993, "ssl", "mx")),
+            smtp: Some(endpoint("smtp.gmail.com", 465, "ssl", "mx")),
+        });
+    }
+    if has(".protection.outlook.com") {
+        return Some(IspdbConfig {
+            provider: Some("Microsoft 365".to_owned()),
+            imap: Some(endpoint("outlook.office365.com", 993, "ssl", "mx")),
+            smtp: Some(endpoint("smtp.office365.com", 587, "starttls", "mx")),
+        });
+    }
+    None
 }
 
 fn security_from_socket_type(socket_type: &str) -> Option<&'static str> {
@@ -414,6 +442,11 @@ pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoRespons
 
     if imap.is_none() || smtp.is_none() {
         let mx = mx_targets(&resolver, &domain).await;
+        if let Some(cfg) = hosted_provider_from_mx(&mx) {
+            provider = provider.or(cfg.provider);
+            imap = imap.or(cfg.imap);
+            smtp = smtp.or(cfg.smtp);
+        }
 
         // Custom domain hosted at a known provider: ask the ISPDB about the
         // MX target's parent domain (mail.example-isp.com → example-isp.com).
@@ -454,4 +487,21 @@ pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoRespons
     Ok(Json(
         json!({ "domain": domain, "provider": provider, "imap": imap, "smtp": smtp }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hosted_provider_from_mx;
+
+    #[test]
+    fn detects_google_workspace_from_mx() {
+        let mx = vec![
+            "aspmx.l.google.com".to_owned(),
+            "alt1.aspmx.l.google.com".to_owned(),
+        ];
+        let cfg = hosted_provider_from_mx(&mx).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("Google Workspace"));
+        assert_eq!(cfg.imap.unwrap().host, "imap.gmail.com");
+        assert_eq!(cfg.smtp.unwrap().host, "smtp.gmail.com");
+    }
 }

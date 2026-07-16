@@ -66,7 +66,10 @@ impl GmailImapProvider {
                     let _ = self.ids.set(folder, uid, &remote).await;
                 }
             }
-            Err(e) => tracing::warn!("gmail X-GM-MSGID fetch failed for {folder}: {e}"),
+            Err(e) => tracing::warn!(
+                "gmail X-GM-MSGID fetch failed: account={} folder={folder} uid_set={uid_set} err={e}",
+                self.account_id
+            ),
         }
     }
 

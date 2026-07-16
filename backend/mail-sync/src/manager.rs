@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::{collections::HashMap, sync::Arc};
 use tokio::{
     sync::{mpsc, Mutex},
@@ -84,23 +85,22 @@ impl SyncManager {
         // The task gets its own sender so the IMAP IDLE child can queue polls.
         let self_tx = tx.clone();
 
-        let handle = tokio::spawn(async move {
-            crate::sync::run_sync_task(account_id_clone, user_id_clone, rx, self_tx, app_state)
-                .await;
-        });
-
         let mut tasks = self.tasks.lock().await;
         // Stop any existing task for this account
         if let Some(old) = tasks.remove(&account_id) {
             let _ = old.tx.send(SyncCommand::Shutdown).await;
             old.handle.abort();
         }
-        tasks.insert(account_id.clone(), AccountTask { tx, handle });
-
         self.statuses
             .lock()
             .await
-            .insert(account_id, SyncStatus::default());
+            .insert(account_id.clone(), SyncStatus::default());
+
+        let handle = tokio::spawn(async move {
+            crate::sync::run_sync_task(account_id_clone, user_id_clone, rx, self_tx, app_state)
+                .await;
+        });
+        tasks.insert(account_id, AccountTask { tx, handle });
     }
 
     /// Start sync with minimal context (used at server restart).
@@ -256,6 +256,16 @@ pub struct NewMessageNotification {
     pub subject: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SyncStatusNotification {
+    pub account_id: String,
+    pub state: String,
+    pub last_synced_at: Option<String>,
+    pub error: Option<String>,
+    pub synced: i64,
+    pub total: i64,
+}
+
 /// Trait implemented by AppState so mail-sync doesn't depend on api types.
 #[async_trait::async_trait]
 pub trait SyncAppState: Send + Sync + 'static {
@@ -271,10 +281,22 @@ pub trait SyncAppState: Send + Sync + 'static {
         Ok(())
     }
 
+    async fn notify_sync_status(
+        &self,
+        _user_id: &str,
+        _status: SyncStatusNotification,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// A currently valid OAuth access token for the account, refreshed if
     /// necessary. `None` for accounts without OAuth credentials. The api
     /// crate implements the actual refresh (it owns the client secrets).
-    async fn fresh_oauth_token(&self, _user_id: &str, _account_id: &str) -> Option<String> {
-        None
+    async fn fresh_oauth_token(
+        &self,
+        _user_id: &str,
+        _account_id: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
     }
 }

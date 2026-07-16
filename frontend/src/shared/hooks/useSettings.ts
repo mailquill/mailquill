@@ -1,6 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/shared/api'
-import type { AllowedImageSender, BrandEntry, Settings } from '@/shared/types'
+import type { AllowedImageSender, BrandEntry, PublicConfig, Settings } from '@/shared/types'
+
+export function usePublicConfig() {
+  return useQuery({
+    queryKey: ['public-config'],
+    queryFn: () => apiGet<PublicConfig>('/config/public'),
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+}
 
 export function useSettings() {
   return useQuery({

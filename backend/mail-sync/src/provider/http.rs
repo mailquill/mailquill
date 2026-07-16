@@ -3,7 +3,9 @@
 use super::ProviderError;
 use serde_json::Value;
 use std::time::Duration;
+use tokio::time;
 
+#[derive(Clone)]
 pub struct Rest {
     client: reqwest::Client,
     token: String,
@@ -29,12 +31,33 @@ impl Rest {
         }
         let body = res.text().await.unwrap_or_default();
         let excerpt: String = body.chars().take(300).collect();
-        Err(ProviderError::Other(format!("http {status}: {excerpt}")))
+        Err(ProviderError::Http {
+            status: status.as_u16(),
+            body: excerpt,
+        })
     }
 
     pub async fn get_json(&self, url: &str) -> Result<Value, ProviderError> {
+        match self.get_json_once(url).await {
+            Ok(value) => Ok(value),
+            Err(e) if is_decode_error(&e) => {
+                time::sleep(Duration::from_millis(500)).await;
+                self.get_json_once(url).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn get_json_once(&self, url: &str) -> Result<Value, ProviderError> {
         let res = self.auth(self.client.get(url)).send().await.map_err(wrap)?;
-        Ok(Self::check(res).await?.json().await.map_err(wrap)?)
+        let bytes = Self::check(res).await?.bytes().await.map_err(wrap)?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            let excerpt = String::from_utf8_lossy(&bytes)
+                .chars()
+                .take(300)
+                .collect::<String>();
+            ProviderError::Other(format!("json decode failed for {url}: {e}; body={excerpt}"))
+        })
     }
 
     pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, ProviderError> {
@@ -109,4 +132,11 @@ impl Rest {
 
 fn wrap(e: reqwest::Error) -> ProviderError {
     ProviderError::Other(e.to_string())
+}
+
+fn is_decode_error(error: &ProviderError) -> bool {
+    match error {
+        ProviderError::Other(message) => message.contains("error decoding response body"),
+        _ => false,
+    }
 }

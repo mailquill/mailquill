@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/compo
 import { useAccounts } from '@/shared/hooks/useAccounts'
 import { useCreateCalendar, useCaldavDiscover, type CaldavDiscoverResponse } from '@/shared/hooks/useCalendar'
 import { useSyncDav } from '@/shared/hooks/useDav'
+import { CaldavErrorAlert } from '@/features/caldav-errors'
 
 type CalKind = 'local' | 'caldav'
 
@@ -18,7 +19,7 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
   const createCalendar = useCreateCalendar()
   const {
     data: discoverData,
-    isError: discoverError,
+    error: discoverError,
     isPending: discoverPending,
     mutate: discoverCalendars,
     reset: resetDiscover,
@@ -198,7 +199,11 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
                   />
                   <span>{t('calendar.acceptInvalidTls')}</span>
                 </label>
-                {discoverError && <p className="text-[12px] text-red-500">{t('calendar.discoverFailed')}</p>}
+                {discoverError && (
+                  <div className="mt-3">
+                    <CaldavErrorAlert error={discoverError} />
+                  </div>
+                )}
               </Field>
             </>
           )}

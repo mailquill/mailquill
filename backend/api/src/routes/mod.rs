@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod auth;
+mod caldav_error;
 pub mod calendar;
 pub mod contacts;
 pub mod dav;

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/compo
 import { apiGet } from '@/shared/api'
 import { DavSyncButton } from '@/widgets/DavSyncButton'
 import { RecipientChips } from '@/features/compose'
+import { CaldavErrorAlert } from '@/features/caldav-errors'
 import {
   useCalendarAccounts,
   useCalendars,
@@ -146,6 +147,7 @@ function CalendarAccountsStrip() {
   })
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
+    createAccount.reset()
     setForm((f) => ({ ...f, [key]: value }))
   }
 
@@ -213,6 +215,11 @@ function CalendarAccountsStrip() {
               />
               <span>{t('calendar.acceptInvalidTls')}</span>
             </label>
+          )}
+          {form.type === 'caldav' && createAccount.error && (
+            <div className="md:col-span-full">
+              <CaldavErrorAlert error={createAccount.error} />
+            </div>
           )}
         </div>
       )}

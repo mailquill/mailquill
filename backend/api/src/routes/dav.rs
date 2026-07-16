@@ -425,7 +425,7 @@ pub async fn caldav_discover(
             .unwrap_or(stored_accept_invalid_tls),
     )
     .await
-    .map_err(AppError::Internal)?;
+    .map_err(super::caldav_error::curated_caldav_error)?;
     let calendars: Vec<DiscoveredCalendarResponse> = discovered
         .into_iter()
         .map(|calendar| DiscoveredCalendarResponse {

@@ -149,6 +149,12 @@ export class ApiError extends Error {
     return typeof error === 'string' ? error : null
   }
 
+  /** Stable machine-readable error code supplied by the server, when available. */
+  get code(): string | null {
+    const code = this.json?.code
+    return typeof code === 'string' ? code : null
+  }
+
   /** The full parsed JSON body, for errors carrying structured payloads. */
   get json(): Record<string, unknown> | null {
     try {

@@ -200,7 +200,11 @@ pub async fn create_account(
             .bind(&id)
             .execute(&user_db)
             .await;
-        return Err(AppError::Unprocessable(err));
+        return Err(if req.account_type == "caldav" {
+            super::caldav_error::curated_caldav_error(err)
+        } else {
+            AppError::BadGateway(err)
+        });
     }
 
     let account = fetch_account(&user_db, &id).await?;

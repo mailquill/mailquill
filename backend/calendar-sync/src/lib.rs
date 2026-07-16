@@ -6,7 +6,11 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::Method;
 use serde_json::Value;
+use std::error::Error as StdError;
 use url::Url;
+
+/// Stable marker used by API callers to distinguish certificate validation failures.
+pub const TLS_CERTIFICATE_ERROR_PREFIX: &str = "tls certificate validation failed";
 
 #[derive(Clone)]
 pub enum DavAuth {
@@ -105,6 +109,9 @@ fn apply_auth(rb: reqwest::RequestBuilder, auth: &DavAuth) -> reqwest::RequestBu
 }
 
 fn explain_transport_error(err: reqwest::Error) -> String {
+    if error_chain_contains_certificate_failure(&err) {
+        return format!("{TLS_CERTIFICATE_ERROR_PREFIX}: {err}");
+    }
     if err.is_timeout() {
         return format!("request timed out: {err}");
     }
@@ -112,6 +119,32 @@ fn explain_transport_error(err: reqwest::Error) -> String {
         return format!("connection failed: {err}");
     }
     format!("request failed: {err}")
+}
+
+fn error_chain_contains_certificate_failure(mut err: &(dyn StdError + 'static)) -> bool {
+    loop {
+        let message = err.to_string().to_ascii_lowercase();
+        let mentions_certificate = message.contains("certificate") || message.contains("cert ");
+        let indicates_validation_failure = [
+            "invalid",
+            "not valid",
+            "expired",
+            "unknown issuer",
+            "hostname",
+            "name mismatch",
+            "verify",
+            "verification",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle));
+        if mentions_certificate && indicates_validation_failure {
+            return true;
+        }
+        let Some(source) = err.source() else {
+            return false;
+        };
+        err = source;
+    }
 }
 
 async fn dav(
@@ -1436,4 +1469,25 @@ fn resolve(base: &str, href: &str) -> Option<String> {
         .join(href)
         .ok()
         .map(|u| u.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_chain_contains_certificate_failure;
+
+    #[test]
+    fn identifies_certificate_validation_failures() {
+        let error = std::io::Error::other(
+            "invalid peer certificate: certificate not valid for name mail.example.test",
+        );
+
+        assert!(error_chain_contains_certificate_failure(&error));
+    }
+
+    #[test]
+    fn leaves_other_connection_failures_unclassified() {
+        let error = std::io::Error::other("connection refused");
+
+        assert!(!error_chain_contains_certificate_failure(&error));
+    }
 }

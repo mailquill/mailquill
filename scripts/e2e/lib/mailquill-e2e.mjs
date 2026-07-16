@@ -19,7 +19,7 @@ export function assert(condition, message) {
 }
 
 export function baseUrl() {
-  return optionalEnv('MAILQUILL_BASE_URL', 'http://127.0.0.1:8080').replace(/\/$/, '')
+  return optionalEnv('MAILQUILL_BASE_URL', 'http://127.0.0.1:8765').replace(/\/$/, '')
 }
 
 export async function request(path, options = {}) {

@@ -233,8 +233,8 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
             .collect()
     };
 
-    let mut counts: HashMap<String, (i64, i64)> = HashMap::new();
-    let mut participants: HashMap<String, Vec<String>> = HashMap::new();
+    let mut counts: HashMap<(String, String), (i64, i64)> = HashMap::new();
+    let mut participants: HashMap<(String, String), Vec<String>> = HashMap::new();
 
     if !thread_ids.is_empty() {
         let placeholders = vec!["?"; thread_ids.len()].join(",");
@@ -248,25 +248,25 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
         // Archive) counts once toward the thread size; COALESCE keeps rows that
         // have no Message-ID distinct by their row id.
         let sql = format!(
-            "SELECT thread_id, COUNT(DISTINCT COALESCE(message_id_header, id)), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 GROUP BY thread_id",
+            "SELECT thread_id, folder_id, COUNT(DISTINCT COALESCE(message_id_header, id)), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 GROUP BY thread_id, folder_id",
         );
-        let mut q = sqlx::query_as::<_, (String, i64, i64)>(&sql);
+        let mut q = sqlx::query_as::<_, (String, String, i64, i64)>(&sql);
         for id in &thread_ids {
             q = q.bind(id);
         }
-        for (tid, size, unread) in q.fetch_all(db).await? {
-            counts.insert(tid, (size, unread));
+        for (tid, folder_id, size, unread) in q.fetch_all(db).await? {
+            counts.insert((tid, folder_id), (size, unread));
         }
 
         let sql_p = format!(
-            "SELECT thread_id, from_addr FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 ORDER BY internal_date ASC",
+            "SELECT thread_id, folder_id, from_addr FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 ORDER BY internal_date ASC",
         );
-        let mut qp = sqlx::query_as::<_, (String, String)>(&sql_p);
+        let mut qp = sqlx::query_as::<_, (String, String, String)>(&sql_p);
         for id in &thread_ids {
             qp = qp.bind(id);
         }
-        for (tid, addr) in qp.fetch_all(db).await? {
-            let v = participants.entry(tid).or_default();
+        for (tid, folder_id, addr) in qp.fetch_all(db).await? {
+            let v = participants.entry((tid, folder_id)).or_default();
             if v.len() < 3 && !v.contains(&addr) {
                 v.push(addr);
             }
@@ -295,12 +295,13 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
 
             let (thread_size, thread_unread, thread_participants) = match &thread_id {
                 Some(tid) => {
+                    let key = (tid.clone(), folder_id.clone());
                     let (size, unread) = counts
-                        .get(tid)
+                        .get(&key)
                         .copied()
                         .unwrap_or((1, if is_read { 0 } else { 1 }));
                     let p = participants
-                        .get(tid)
+                        .get(&key)
                         .cloned()
                         .unwrap_or_else(|| vec![from_addr.clone()]);
                     (size, unread, p)
@@ -331,4 +332,87 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
         .collect();
 
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unified_page;
+    use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+
+    async fn test_db() -> SqlitePool {
+        let db = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE folders (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                full_path TEXT NOT NULL,
+                folder_type TEXT NOT NULL,
+                unread_count INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                uid INTEGER NOT NULL,
+                message_id_header TEXT,
+                thread_id TEXT,
+                subject TEXT NOT NULL DEFAULT '',
+                snippet TEXT NOT NULL DEFAULT '',
+                from_addr TEXT NOT NULL DEFAULT '',
+                internal_date TEXT NOT NULL,
+                is_read INTEGER NOT NULL DEFAULT 0,
+                is_flagged INTEGER NOT NULL DEFAULT 0,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                list_id TEXT,
+                phishing_verdict TEXT
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX idx_msg_thread ON messages(thread_id)")
+            .execute(&db)
+            .await
+            .unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn thread_unread_is_scoped_to_rendered_folder() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO folders (id, account_id, full_path, folder_type) VALUES
+             ('inbox', 'acc', 'INBOX', 'INBOX'),
+             ('label', 'acc', 'Label_1', 'CUSTOM')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages
+             (id, account_id, folder_id, uid, message_id_header, thread_id, subject, from_addr, internal_date, is_read)
+             VALUES
+             ('m1', 'acc', 'inbox', 1, '<same@example>', 'thread-a', 'Read copy', 'a@example.com', '2026-01-02T00:00:00Z', 1),
+             ('m2', 'acc', 'label', 1, '<same@example>', 'thread-a', 'Unread label copy', 'a@example.com', '2026-01-01T00:00:00Z', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let page = unified_page(&db, Some("inbox"), Some("acc"), None, 50, false)
+            .await
+            .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].is_read);
+        assert_eq!(page.items[0].thread_unread, 0);
+    }
 }

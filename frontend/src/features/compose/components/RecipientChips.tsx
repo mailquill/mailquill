@@ -80,8 +80,8 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus }:
         onClick={(e) => (e.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}
       >
         {value.map((addr) => {
-          const valid = isValidEmail(addr)
           const { name, email } = parseFromAddr(addr)
+          const valid = isValidEmail(email)
           return (
             <span
               key={addr}

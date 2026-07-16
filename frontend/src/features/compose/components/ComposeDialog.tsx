@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueries } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import { Bold, Italic, Underline, Strikethrough, List, ListOrdered, Lock, Paperclip, Send, ShieldCheck, TriangleAlert, Type, X } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/components/ui/dialog'
 import { Button } from '@/shared/components/ui/button'
@@ -8,11 +9,11 @@ import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
 import { Select } from '@/shared/components/ui/select'
 import { cn } from '@/shared/lib/utils'
-import { apiGet } from '@/shared/api'
+import { apiGet, ApiError } from '@/shared/api'
 import { useAccounts } from '@/shared/hooks/useAccounts'
 import { useSendMessage } from '@/shared/hooks/useMessages'
 import { useOnlineStatus } from '@/shared/hooks/useOnlineStatus'
-import { useDiscoverKey, usePgpKeys, type ContactKey } from '@/shared/hooks/usePgp'
+import { usePgpKeys, type DiscoveryResponse } from '@/shared/hooks/usePgp'
 import {
   encryptText,
   getUnlockedKey,
@@ -24,6 +25,7 @@ import {
 import type { Account, AccountAlias, AttachmentInput, Message } from '@/shared/types'
 import type { ComposeInitialState } from '../types'
 import { isValidEmail } from '@/shared/lib/email'
+import { messagePlain } from '@/shared/lib/messageSource'
 import { RecipientChips } from './RecipientChips'
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -69,14 +71,18 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
   const senderData = useSenderIdentityData(accounts)
   const identities = senderData.groups.flatMap((group) => group.identities)
   const sendMessage = useSendMessage()
-  const discoverKey = useDiscoverKey()
   const { data: pgpKeys = [] } = usePgpKeys()
   const sourceMessage = initialState.sourceMessage
+  const sourceEncrypted =
+    hasInlinePgpMessage(sourceMessage?.body_text) ||
+    hasInlinePgpMessage(sourceMessage?.body_html) ||
+    hasPgpMime(sourceMessage?.body_text) ||
+    hasPgpMime(sourceMessage?.body_html)
 
   const initialTo =
     initialState.to ??
     (initialState.mode === 'reply' && sourceMessage ? parseAddressList(sourceMessage.from_addr) : [])
-  const initialBody = buildBody(initialState.mode, sourceMessage)
+  const initialBody = buildBody(initialState.mode, sourceMessage, t)
 
   const [from, setFrom] = useState('')
   const [to, setTo] = useState<string[]>(initialTo)
@@ -90,12 +96,13 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
   const [plainText, setPlainText] = useState(false)
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
-  const [recipientKeys, setRecipientKeys] = useState<Record<string, ContactKey | null>>({})
-  const [sign, setSign] = useState(false)
-  const [encrypt, setEncrypt] = useState(false)
+  const [signOverride, setSignOverride] = useState<boolean | null>(null)
+  const [encryptOverride, setEncryptOverride] = useState<boolean | null>(null)
   const [cryptoError, setCryptoError] = useState<string | null>(null)
 
-  const selectedIdentity = identities.find((identity) => identityKey(identity) === from) ?? identities[0]
+  const defaultFrom = identities.length ? defaultFromIdentity(initialState, identities) : ''
+  const effectiveFrom = from || defaultFrom
+  const selectedIdentity = identities.find((identity) => identityKey(identity) === effectiveFrom) ?? identities[0]
   const selectedAccount = selectedIdentity
     ? accounts.find((account) => account.id === selectedIdentity.accountId)
     : undefined
@@ -103,6 +110,8 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
     (selectedAccount?.pgp_key_id ? pgpKeys.find((key) => key.id === selectedAccount.pgp_key_id) : undefined) ??
     pgpKeys.find((key) => key.is_primary) ??
     pgpKeys[0]
+  const sign = signOverride ?? Boolean(sourceEncrypted || selectedAccount?.sign_by_default)
+  const encrypt = encryptOverride ?? sourceEncrypted
   const title =
     initialState.mode === 'reply'
       ? t('action.reply')
@@ -110,17 +119,33 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
         ? t('action.forward')
         : t('compose.newMessage')
 
-  const allRecipients = [...to, ...cc, ...bcc]
-  const recipientsValid = to.length > 0 && allRecipients.every(isValidEmail)
+  const allRecipients = useMemo(() => [...to, ...cc, ...bcc], [bcc, cc, to])
+  const recipientsValid =
+    to.length > 0 && allRecipients.every((recipient) => isValidEmail(parseAddr(recipient)))
   const uniqueRecipients = useMemo(
-    () => Array.from(new Set(allRecipients.map((item) => item.trim().toLowerCase()).filter(isValidEmail))),
-    [bcc, cc, to],
+    () =>
+      Array.from(
+        new Set(
+          allRecipients
+            .map((recipient) => parseAddr(recipient).trim().toLowerCase())
+            .filter(isValidEmail),
+        ),
+      ),
+    [allRecipients],
   )
-  const missingRecipientKeys = encrypt
-    ? uniqueRecipients.filter((recipient) => recipientKeys[recipient] === null)
-    : []
-  const sourceEncrypted = hasInlinePgpMessage(sourceMessage?.body_text) || hasInlinePgpMessage(sourceMessage?.body_html) || hasPgpMime(sourceMessage?.body_text) || hasPgpMime(sourceMessage?.body_html)
-
+  const recipientKeyQueries = useQueries({
+    queries: uniqueRecipients.map((recipient) => ({
+      queryKey: ['key-discovery', recipient],
+      queryFn: () => apiGet<DiscoveryResponse>(`/keys/discover?email=${encodeURIComponent(recipient)}`),
+      enabled: open && encrypt,
+      staleTime: Number.POSITIVE_INFINITY,
+    })),
+  })
+  const keyDiscoveryPending = encrypt && recipientKeyQueries.some((query) => query.isPending || query.isFetching)
+  const missingRecipientKeys =
+    encrypt && !keyDiscoveryPending
+      ? uniqueRecipients.filter((_recipient, index) => !recipientKeyQueries[index]?.data?.key)
+      : []
   useEffect(() => {
     // Seed the editor only when opening or switching back to rich mode — not on
     // every keystroke, which would reset the caret.
@@ -129,31 +154,6 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, plainText])
-
-  useEffect(() => {
-    if (!open) return
-    setSign(Boolean(sourceEncrypted || selectedAccount?.sign_by_default))
-    setEncrypt(Boolean(sourceEncrypted))
-  }, [open, selectedAccount?.sign_by_default, sourceEncrypted])
-
-  useEffect(() => {
-    if (!open || !uniqueRecipients.length) return
-    let cancelled = false
-    for (const recipient of uniqueRecipients) {
-      if (recipient in recipientKeys) continue
-      discoverKey
-        .mutateAsync(recipient)
-        .then((result) => {
-          if (!cancelled) setRecipientKeys((current) => ({ ...current, [recipient]: result.key ?? null }))
-        })
-        .catch(() => {
-          if (!cancelled) setRecipientKeys((current) => ({ ...current, [recipient]: null }))
-        })
-    }
-    return () => {
-      cancelled = true
-    }
-  }, [discoverKey, open, recipientKeys, uniqueRecipients])
 
   function applyFormat(command: RichCommand) {
     editorRef.current?.focus()
@@ -188,10 +188,12 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
       }
       if (encrypt) {
         if (!primaryPgpKey) throw new Error('compose.noSigningKey')
-        if (missingRecipientKeys.length) throw new Error('compose.missingRecipientKeys')
-        const recipientPublicKeys = uniqueRecipients
-          .map((recipient) => recipientKeys[recipient]?.public_key_data)
-          .filter(Boolean) as string[]
+        const recipientPublicKeys = recipientKeyQueries
+          .map((query) => query.data?.key?.public_key_data)
+          .filter((key): key is string => Boolean(key))
+        if (keyDiscoveryPending || recipientPublicKeys.length !== uniqueRecipients.length) {
+          throw new Error('compose.missingRecipientKeys')
+        }
         text = await encryptText(text, [...recipientPublicKeys, primaryPgpKey.public_key_armored], privateKeyArmored)
         nextHtml = undefined
         pgpMimeMode = 'encrypted'
@@ -236,16 +238,16 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
 
   return (
     <Dialog open={open} onClose={onClose}>
-      <DialogContent className="w-[min(860px,calc(100vw-2rem))] max-w-none">
-        <DialogHeader>
+      <DialogContent className="flex h-[min(820px,90vh)] w-[min(860px,calc(100vw-2rem))] max-w-none flex-col overflow-hidden p-0">
+        <DialogHeader className="mb-0 shrink-0 border-b border-border px-6 pb-3 pt-5">
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
 
-        <div className="flex flex-col gap-3.5">
+        <div className="shrink-0 space-y-3.5 px-6 py-4">
           <Field id="compose-from" label={t('compose.from')}>
             <Select
               id="compose-from"
-              value={from || (identities[0] ? identityKey(identities[0]) : '')}
+              value={effectiveFrom}
               onChange={(event) => setFrom(event.currentTarget.value)}
             >
               {senderData.groups.map((group) => (
@@ -355,7 +357,7 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
             <button
               type="button"
               aria-pressed={sign}
-              onClick={() => setSign((value) => !value)}
+              onClick={() => setSignOverride(!sign)}
               className={cn(
                 'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12px] font-semibold transition-colors',
                 sign ? 'bg-primary text-primary-foreground' : 'text-secondary-foreground hover:bg-secondary',
@@ -367,7 +369,7 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
             <button
               type="button"
               aria-pressed={encrypt}
-              onClick={() => setEncrypt((value) => !value)}
+              onClick={() => setEncryptOverride(!encrypt)}
               className={cn(
                 'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12px] font-semibold transition-colors',
                 encrypt ? 'bg-primary text-primary-foreground' : 'text-secondary-foreground hover:bg-secondary',
@@ -382,24 +384,28 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
               <input className="sr-only" type="file" multiple onChange={(event) => handleFiles(event.currentTarget.files)} />
             </label>
           </div>
+        </div>
 
+        <div className="min-h-0 flex-1 px-6 pb-4">
           {plainText ? (
             <textarea
               aria-label={t('compose.body')}
               value={bodyText}
               onChange={(e) => setBodyText(e.currentTarget.value)}
-              className="min-h-56 resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-[13px] leading-6 outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="h-full min-h-0 w-full resize-none overflow-y-auto rounded-md border border-input bg-background px-3 py-2 font-mono text-[13px] leading-6 outline-none focus-visible:ring-1 focus-visible:ring-ring"
             />
           ) : (
             <div
               ref={editorRef}
               contentEditable
               aria-label={t('compose.body')}
-              className="min-h-56 rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="h-full min-h-0 overflow-y-auto rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onInput={(event) => setBodyHtml(event.currentTarget.innerHTML)}
             />
           )}
+        </div>
 
+        <div className="shrink-0 space-y-3 border-t border-border px-6 pb-5 pt-3">
           {attachments.length ? (
             <div className="flex flex-wrap gap-2">
               {attachments.map((attachment) => (
@@ -423,20 +429,28 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
           {attachmentError ? <p className="text-sm text-destructive">{attachmentError}</p> : null}
           {encrypt && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-[12.5px] text-muted-foreground">
-              {missingRecipientKeys.length ? (
+              {keyDiscoveryPending ? (
+                <Lock className="size-4 animate-pulse" aria-hidden="true" />
+              ) : missingRecipientKeys.length ? (
                 <TriangleAlert className="size-4 text-destructive" aria-hidden="true" />
               ) : (
                 <Lock className="size-4" aria-hidden="true" />
               )}
               <span>
-                {missingRecipientKeys.length
+                {keyDiscoveryPending
+                  ? t('compose.discoveringKeys')
+                  : missingRecipientKeys.length
                   ? t('compose.missingKeys', { emails: missingRecipientKeys.join(', ') })
                   : t('compose.allKeysReady')}
               </span>
             </div>
           )}
           {cryptoError ? <p className="text-sm text-destructive">{cryptoError}</p> : null}
-          {sendMessage.error ? <p className="text-sm text-destructive">{t('compose.sendFailed')}</p> : null}
+          {sendMessage.error ? (
+            <p className="text-sm text-destructive">
+              {t('compose.sendFailed')} {sendErrorDetail(sendMessage.error)}
+            </p>
+          ) : null}
 
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={onClose}>
@@ -445,7 +459,14 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
             <Button
               type="button"
               onClick={handleSend}
-              disabled={sendMessage.isPending || !selectedIdentity || !recipientsValid || !isOnline || missingRecipientKeys.length > 0}
+              disabled={
+                sendMessage.isPending ||
+                !selectedIdentity ||
+                !recipientsValid ||
+                !isOnline ||
+                keyDiscoveryPending ||
+                missingRecipientKeys.length > 0
+              }
             >
               <Send className="size-4" aria-hidden="true" />
               {!isOnline ? t('compose.noConnection') : sendMessage.isPending ? t('compose.sending') : t('compose.send')}
@@ -489,8 +510,32 @@ function identityKey(identity: SenderIdentity): string {
   return `${identity.accountId}|${identity.email}`
 }
 
+function defaultFromIdentity(initialState: ComposeInitialState, identities: SenderIdentity[]): string {
+  const sourceMessage = initialState.sourceMessage
+  if (!sourceMessage || initialState.mode !== 'reply') return identityKey(identities[0])
+
+  const accountIdentities = identities.filter((identity) => identity.accountId === sourceMessage.account_id)
+  const candidates = parseAddressList(`${sourceMessage.to_addrs},${sourceMessage.cc_addrs}`).map((address) =>
+    address.toLowerCase(),
+  )
+
+  for (const candidate of candidates) {
+    const match = accountIdentities.find((identity) => identity.email.toLowerCase() === candidate)
+    if (match) return identityKey(match)
+  }
+
+  const primary = accountIdentities.find((identity) => identity.isPrimary)
+  return identityKey(primary ?? accountIdentities[0] ?? identities[0])
+}
+
 function toAttachmentInput(attachment: AttachmentDraft): AttachmentInput {
   return { filename: attachment.filename, content_type: attachment.content_type, data: attachment.data }
+}
+
+function sendErrorDetail(error: unknown): string {
+  if (error instanceof ApiError) return error.detail ?? error.message
+  if (error instanceof Error) return error.message
+  return ''
 }
 
 function buildSubject(mode: ComposeInitialState['mode'], message?: Message): string {
@@ -500,11 +545,32 @@ function buildSubject(mode: ComposeInitialState['mode'], message?: Message): str
   return ''
 }
 
-function buildBody(mode: ComposeInitialState['mode'], message?: Message): string {
+function buildBody(mode: ComposeInitialState['mode'], message: Message | undefined, t: TFunction): string {
   if (!message || mode === 'new') return ''
-  const quoted = escapeHtml(message.body_text ?? message.snippet)
-  const heading = mode === 'reply' ? 'On previous message:' : 'Forwarded message:'
-  return `<p><br></p><blockquote>${heading}<br>${quoted}</blockquote>`
+  const quoted = escapeHtml(messagePlain(message)).replaceAll(/\r?\n/g, '<br>')
+  if (mode === 'reply') {
+    return `<p><br></p><blockquote>${escapeHtml(t('compose.previousMessage'))}<br>${quoted}</blockquote>`
+  }
+
+  const date = formatForwardedDate(message.date ?? message.internal_date)
+  const headerRows = [
+    [t('compose.forwardedFrom'), message.from_addr],
+    [t('compose.forwardedDate'), date],
+    [t('compose.forwardedSubject'), message.subject],
+    [t('compose.forwardedTo'), message.to_addrs],
+    ...(message.cc_addrs ? [[t('compose.forwardedCc'), message.cc_addrs]] : []),
+  ]
+    .map(([label, value]) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`)
+    .join('')
+
+  return `<p><br></p><div>---------- ${escapeHtml(t('compose.forwardedMessage'))} ---------</div>${headerRows}<div><br></div><div>${quoted}</div>`
+}
+
+function formatForwardedDate(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 function parseAddressList(value: string): string[] {

@@ -37,7 +37,6 @@ export function useUnifiedCounts() {
   return useQuery({
     queryKey: ['unified-counts'],
     queryFn: () => apiGet<UnifiedCounts>('/mailbox/unified/counts'),
-    refetchInterval: 30_000,
   })
 }
 

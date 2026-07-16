@@ -57,7 +57,7 @@ export function folderRank(folder: Folder): number {
 
 export function sortFolders(folders: Folder[]): Folder[] {
   return [...folders].sort(
-    (a, b) => folderRank(a) - folderRank(b) || a.full_path.localeCompare(b.full_path),
+    (a, b) => folderRank(a) - folderRank(b) || folderTreePath(a).localeCompare(folderTreePath(b)),
   )
 }
 
@@ -86,15 +86,16 @@ export function buildFolderTree(folders: Folder[]): FolderNode[] {
   const sorted = sortFolders(folders)
   const byPath = new Map<string, FolderNode>()
   for (const folder of sorted) {
-    byPath.set(folder.full_path, { folder, depth: 0, children: [] })
+    byPath.set(folderTreePath(folder), { folder, depth: 0, children: [] })
   }
   const roots: FolderNode[] = []
   // `sorted` lists every parent before its children (a path sorts before its
   // own sub-paths), so a parent's depth is set by the time a child reads it.
   for (const folder of sorted) {
-    const node = byPath.get(folder.full_path)!
-    const i = folder.full_path.lastIndexOf(PATH_SEP)
-    const parent = i > 0 ? byPath.get(folder.full_path.slice(0, i)) : undefined
+    const path = folderTreePath(folder)
+    const node = byPath.get(path)!
+    const i = path.lastIndexOf(PATH_SEP)
+    const parent = i > 0 ? byPath.get(path.slice(0, i)) : undefined
     if (parent) {
       node.depth = parent.depth + 1
       parent.children.push(node)
@@ -103,6 +104,10 @@ export function buildFolderTree(folders: Folder[]): FolderNode[] {
     }
   }
   return roots
+}
+
+function folderTreePath(folder: Folder): string {
+  return folder.folder_display_path || folder.full_path
 }
 
 /** Pre-order flatten, parents before children — for renderers that indent by

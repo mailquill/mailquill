@@ -6,9 +6,9 @@ import path from 'path'
 import { version } from './package.json'
 
 // In dev the Vite server (default :5173) must forward API calls to the Rust
-// backend (default :8080); the production build is self-served by the backend,
-// so no proxy is needed there. Override the target with VITE_API_TARGET.
-const API_TARGET = process.env.VITE_API_TARGET ?? 'http://127.0.0.1:8080'
+// backend. The repo-local .env uses :8765 to avoid the common :8080 collision;
+// production builds are self-served by the backend. Override with VITE_API_TARGET.
+const API_TARGET = process.env.VITE_API_TARGET ?? 'http://127.0.0.1:8765'
 
 export default defineConfig({
   // package.json is the single source of truth for the app version.

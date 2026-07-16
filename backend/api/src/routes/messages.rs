@@ -218,16 +218,18 @@ pub async fn get_message(
     // Thread summary
     let (thread_size, thread_unread) = if let Some(ref tid) = row.thread_id {
         let size: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_deleted = 0",
+            "SELECT COUNT(DISTINCT COALESCE(message_id_header, id)) FROM messages WHERE thread_id = ? AND folder_id = ? AND is_deleted = 0",
         )
         .bind(tid)
+        .bind(&row.folder_id)
         .fetch_one(&user_db)
         .await
         .unwrap_or(1);
         let unread: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages WHERE thread_id = ? AND is_read = 0 AND is_deleted = 0",
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ? AND folder_id = ? AND is_read = 0 AND is_deleted = 0",
         )
         .bind(tid)
+        .bind(&row.folder_id)
         .fetch_one(&user_db)
         .await
         .unwrap_or(0);
@@ -534,23 +536,23 @@ pub async fn mark_not_spam(
     let user_db = state.user_db_pool.get(&user.0).await?;
     let (account_id, uid, src_folder) = get_message_location(&user_db, &message_id).await?;
 
-    let src_type: Option<String> = sqlx::query_scalar(
-        "SELECT f.folder_type FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.id = ?",
-    )
-    .bind(&message_id)
-    .fetch_optional(&user_db)
-    .await?;
-    if !matches!(src_type.as_deref(), Some("SPAM" | "JUNK")) {
-        return Err(AppError::NotFound);
-    }
-
-    let inbox_path: Option<String> = sqlx::query_scalar(
-        "SELECT full_path FROM folders WHERE account_id = ? AND folder_type = 'INBOX' ORDER BY full_path LIMIT 1",
+    let inbox: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, full_path FROM folders WHERE account_id = ? AND folder_type = 'INBOX' ORDER BY full_path LIMIT 1",
     )
     .bind(&account_id)
     .fetch_optional(&user_db)
     .await?;
-    let inbox_path = inbox_path.ok_or(AppError::NotFound)?;
+    let (inbox_id, inbox_path) = inbox.ok_or(AppError::NotFound)?;
+
+    if src_folder.eq_ignore_ascii_case(&inbox_path) {
+        sqlx::query("UPDATE messages SET folder_id = ?, is_deleted = 0 WHERE id = ?")
+            .bind(&inbox_id)
+            .bind(&message_id)
+            .execute(&user_db)
+            .await?;
+        refresh_unread_counts(&user_db).await;
+        return Ok(StatusCode::NO_CONTENT);
+    }
 
     state
         .sync_manager
@@ -622,14 +624,14 @@ async fn fetch_body_on_demand(
     uid: u32,
 ) -> Result<(Option<String>, Option<String>), AppError> {
     // Get account credentials + backend kind
-    let row: Option<(Vec<u8>, String, i64, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT credentials_encrypted, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
+    let row: Option<(Vec<u8>, String, String, i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT credentials_encrypted, primary_email, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
     )
     .bind(&account_id)
     .fetch_optional(user_db)
     .await?;
 
-    let (creds_enc, host, port, auth_scheme, imap_tls_cert, provider_kind) =
+    let (creds_enc, primary_email, host, port, auth_scheme, imap_tls_cert, provider_kind) =
         row.ok_or(AppError::NotFound)?;
     let creds_bytes = state
         .credential_key
@@ -652,13 +654,28 @@ async fn fetch_body_on_demand(
             .await
         {
             Ok(Some(token)) => Some(token),
-            _ => creds["oauth_access_token"].as_str().map(|s| s.to_owned()),
+            Ok(None) => creds["oauth_access_token"].as_str().map(|s| s.to_owned()),
+            Err(error) if crate::oauth_tokens::is_reauth_required(&error) => {
+                return Err(AppError::Unprocessable(
+                    "oauth_reauthentication_required".into(),
+                ));
+            }
+            Err(error) => {
+                return Err(AppError::BadGateway(format!(
+                    "oauth token refresh failed: {error}"
+                )));
+            }
         };
 
     let config = mail_sync::provider::ProviderConfig {
         host,
         port: port as u16,
-        username: creds["imap_username"].as_str().unwrap_or("").to_owned(),
+        username: creds["imap_username"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&primary_email)
+            .trim()
+            .to_ascii_lowercase(),
         password: creds["imap_password"].as_str().unwrap_or("").to_owned(),
         oauth_access_token,
         auth_scheme,

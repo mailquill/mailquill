@@ -18,7 +18,7 @@ export function MailLayout() {
   const isOnline = useOnlineStatus()
   const navigate = useNavigate()
   // Watch background syncs app-wide: auto-refresh folders/messages on completion.
-  useSyncActivity({ watch: true })
+  useSyncActivity()
   const sidebarWidth = useUiPrefs((s) => s.sidebarWidth)
   const setSidebarWidth = useUiPrefs((s) => s.setSidebarWidth)
   // Foreground desktop notifications (SSE), alongside service-worker push.

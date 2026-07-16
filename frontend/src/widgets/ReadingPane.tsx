@@ -16,6 +16,7 @@ import {
   Download,
   Code,
   FileText,
+  Paperclip,
   ImageOff,
   List,
   ChevronDown,
@@ -33,8 +34,8 @@ import {
   messageRawEml,
   downloadEml,
 } from '@/shared/lib/messageSource'
-import { apiGetBlob } from '@/shared/api'
-import { blockRemoteContent } from '@/shared/lib/remoteContent'
+import { apiGetBlob, getAccessToken } from '@/shared/api'
+import { blockRemoteContent, proxyRemoteContent } from '@/shared/lib/remoteContent'
 import {
   useArchiveThread,
   useDeleteThread,
@@ -49,10 +50,10 @@ import {
 } from '@/shared/hooks/useMessages'
 import { useMeetingInvitations, useRsvpInvitation } from '@/shared/hooks/useCalendar'
 import { useContactSearch } from '@/shared/hooks/useContacts'
-import { useAddAllowedImageSender, useImageAllowlist, useSettings } from '@/shared/hooks/useSettings'
+import { useAddAllowedImageSender, useImageAllowlist, usePublicConfig, useSettings } from '@/shared/hooks/useSettings'
 import { PgpMessagePanel } from '@/widgets/PgpMessagePanel'
 import type { MailOutletContext } from '@/pages/MailLayout'
-import type { MeetingInvitation, Message } from '@/shared/types'
+import type { MeetingInvitation, Message, MessageAttachment } from '@/shared/types'
 
 function ToolButton({
   label,
@@ -106,6 +107,8 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   const notSpam = useNotSpamMessage()
   const { openCompose } = useOutletContext<MailOutletContext>()
   const messages = useMemo(() => data?.messages ?? [], [data?.messages])
+  const lastMessageId = messages.at(-1)?.id ?? ''
+  const { data: lastMessageDetail, isLoading: isLastMessageLoading } = useMessage(lastMessageId)
   const firstMessage = messages[0]
 
   const defaultExpandedId = useMemo(() => {
@@ -132,7 +135,10 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   const fromEmail = parseFromAddr(firstMessage.from_addr).email
   const color = accountColor(firstMessage.account_id)
   const lastMessage = messages.at(-1)!
+  const lastMessageSource = lastMessageDetail ?? lastMessage
+  const lastMessageBodyReady = hasCompleteBody(lastMessageDetail)
   const lastMessageIsSpam = isSpamMessage(lastMessage)
+  const hasSpamMessages = messages.some(isSpamMessage)
 
   return (
     <article className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
@@ -194,6 +200,12 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
           <span className="rounded bg-secondary px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">
             {t('mail.messages', { count: messages.length })}
           </span>
+          {hasSpamMessages && (
+            <span className="inline-flex items-center gap-1 rounded border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[11px] font-bold text-amber-800 dark:text-amber-200">
+              <ShieldAlert className="size-3" aria-hidden="true" />
+              {t('mail.spamSuspected')}
+            </span>
+          )}
         </div>
       </div>
 
@@ -210,22 +222,25 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
 
         <div className="mt-1.5 flex shrink-0 gap-2.5">
           <button
-            onClick={() => openCompose({ mode: 'reply', sourceMessage: lastMessage })}
-            className="inline-flex h-9 items-center gap-2 rounded-md bg-[#2563eb] px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[#1d4ed8]"
+            onClick={() => openCompose({ mode: 'reply', sourceMessage: lastMessageSource })}
+            disabled={isLastMessageLoading || !lastMessageBodyReady}
+            className="inline-flex h-9 items-center gap-2 rounded-md bg-[#2563eb] px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[#1d4ed8] disabled:opacity-50"
           >
             <Reply className="size-[15px]" />
             {t('action.reply')}
           </button>
           <button
-            onClick={() => openCompose({ mode: 'reply', sourceMessage: lastMessage })}
-            className="inline-flex h-9 items-center gap-2 rounded-md border border-border bg-card px-4 text-[13px] font-semibold text-secondary-foreground transition-colors hover:bg-secondary"
+            onClick={() => openCompose({ mode: 'reply', sourceMessage: lastMessageSource })}
+            disabled={isLastMessageLoading || !lastMessageBodyReady}
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-border bg-card px-4 text-[13px] font-semibold text-secondary-foreground transition-colors hover:bg-secondary disabled:opacity-50"
           >
             <ReplyAll className="size-[15px]" />
             {t('action.replyAll')}
           </button>
           <button
-            onClick={() => openCompose({ mode: 'forward', sourceMessage: lastMessage })}
-            className="inline-flex h-9 items-center gap-2 rounded-md border border-border bg-card px-4 text-[13px] font-semibold text-secondary-foreground transition-colors hover:bg-secondary"
+            onClick={() => openCompose({ mode: 'forward', sourceMessage: lastMessageSource })}
+            disabled={isLastMessageLoading || !lastMessageBodyReady}
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-border bg-card px-4 text-[13px] font-semibold text-secondary-foreground transition-colors hover:bg-secondary disabled:opacity-50"
           >
             <Forward className="size-[15px]" />
             {t('action.forward')}
@@ -282,6 +297,32 @@ function PhishingBanner({ message }: { message: Message }) {
   )
 }
 
+function SpamBanner({ onNotSpam, pending }: { onNotSpam: () => void; pending: boolean }) {
+  const { t } = useTranslation()
+  return (
+    <div className="mb-3.5 flex flex-wrap items-center gap-3 rounded-md border border-amber-500/60 bg-amber-500/15 px-3 py-2.5 text-amber-950 dark:text-amber-100">
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
+        <ShieldAlert className="size-5" aria-hidden="true" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[13px] font-bold">{t('mail.spamSuspected')}</span>
+        <span className="block text-[12.5px] leading-relaxed text-amber-900/80 dark:text-amber-100/80">
+          {t('mail.spamSuspectedDescription')}
+        </span>
+      </span>
+      <button
+        type="button"
+        onClick={onNotSpam}
+        disabled={pending}
+        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-amber-600/40 bg-card px-3 text-[12px] font-bold text-foreground shadow-sm hover:bg-secondary disabled:opacity-50"
+      >
+        <ShieldCheck className="size-4" aria-hidden="true" />
+        {t('action.notSpam')}
+      </button>
+    </div>
+  )
+}
+
 type SourceView = 'html' | 'text' | 'headers' | 'raw'
 
 const VIEW_TABS: { id: SourceView; tkey: string; icon: typeof Code }[] = [
@@ -313,6 +354,7 @@ function MessageCard({
   const notSpam = useNotSpamMessage()
   const reanalyseMessage = useReanalyseMessage()
   const { data: settings } = useSettings()
+  const { data: publicConfig } = usePublicConfig()
   const { data: imageAllowlist } = useImageAllowlist()
   const addAllowedSender = useAddAllowedImageSender()
   const [showRemoteOnce, setShowRemoteOnce] = useState(false)
@@ -331,6 +373,13 @@ function MessageCard({
     () => (displayed.attachments ?? []).filter((a) => a.content_id),
     [displayed.attachments],
   )
+  const visibleAttachments = useMemo(() => {
+    const html = (displayed.body_html ?? '').toLowerCase()
+    return (displayed.attachments ?? []).filter((attachment) => {
+      const contentId = attachment.content_id?.toLowerCase()
+      return !contentId || !html.includes(`cid:${contentId}`)
+    })
+  }, [displayed.attachments, displayed.body_html])
   useEffect(() => {
     if (!expanded || !inlineAttachments.length) return
     let cancelled = false
@@ -377,17 +426,32 @@ function MessageCard({
     for (const [cid, url] of Object.entries(cidUrls)) {
       rawHtml = rawHtml.split(`cid:${cid}`).join(url)
     }
-    const content = allowRemote ? { html: rawHtml, blocked: false } : blockRemoteContent(rawHtml)
+    const content = allowRemote
+      ? {
+          html: publicConfig?.remote_image_proxy_enabled
+            ? proxyRemoteContent(rawHtml, getAccessToken())
+            : rawHtml,
+          blocked: false,
+        }
+      : blockRemoteContent(rawHtml)
     return displayed.phishing_verdict === 'phishing'
       ? { ...content, html: highlightMismatchedLinks(content.html) }
       : content
-  }, [expanded, view, displayed, allowRemote, cidUrls])
+  }, [expanded, view, displayed, allowRemote, cidUrls, publicConfig?.remote_image_proxy_enabled])
 
   return (
-    <section className="shrink-0 overflow-hidden rounded-lg border border-border bg-card">
+    <section
+      className={cn(
+        'shrink-0 overflow-hidden rounded-lg border bg-card',
+        isSpam ? 'border-amber-500/70 ring-1 ring-amber-500/20' : 'border-border',
+      )}
+    >
       <button
         type="button"
-        className="flex w-full items-start gap-3 px-4 py-3.5 text-left"
+        className={cn(
+          'flex w-full items-start gap-3 px-4 py-3.5 text-left',
+          isSpam && 'bg-amber-500/[0.07]',
+        )}
         onClick={() => setExpanded((v) => !v)}
       >
         <span
@@ -456,6 +520,12 @@ function MessageCard({
               <span className="truncate font-mono text-[12px] text-muted-foreground">({senderDomain})</span>
             )}
             <span className="truncate font-mono text-[12px] text-muted-foreground">{sender.email}</span>
+            {isSpam && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10.5px] font-bold text-amber-800 dark:text-amber-200">
+                <ShieldAlert className="size-3" aria-hidden="true" />
+                {t('mail.spamSuspected')}
+              </span>
+            )}
             <span className="ml-auto shrink-0 text-[12px] text-muted-foreground">
               {formatDate(message.internal_date)}
             </span>
@@ -471,6 +541,12 @@ function MessageCard({
 
       {expanded && (
         <div className="px-4 pb-4">
+          {isSpam && (
+            <SpamBanner
+              onNotSpam={() => notSpam.mutate(displayed.id, { onSuccess: () => onDeleted?.() })}
+              pending={notSpam.isPending}
+            />
+          )}
           <PhishingBanner message={displayed} />
           <div className="pl-[3.25rem]">
             <PgpMessagePanel message={displayed} />
@@ -517,6 +593,7 @@ function MessageCard({
 
           {/* content */}
           <div className="pl-[3.25rem]">
+            {visibleAttachments.length > 0 && <AttachmentList attachments={visibleAttachments} />}
             {view === 'html' && htmlContent.blocked && (
               <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-[12.5px] text-muted-foreground">
                 <ImageOff className="size-4 shrink-0" aria-hidden="true" />
@@ -586,10 +663,18 @@ function MessageCard({
             >
               <Star className={cn('size-4', displayed.is_flagged && 'fill-primary text-primary')} />
             </ToolButton>
-            <ToolButton label={t('action.reply')} onClick={() => openCompose({ mode: 'reply', sourceMessage: displayed })}>
+            <ToolButton
+              label={t('action.reply')}
+              onClick={() => openCompose({ mode: 'reply', sourceMessage: displayed })}
+              disabled={isLoading || !hasCompleteBody(detail)}
+            >
               <Reply className="size-4" />
             </ToolButton>
-            <ToolButton label={t('action.forward')} onClick={() => openCompose({ mode: 'forward', sourceMessage: displayed })}>
+            <ToolButton
+              label={t('action.forward')}
+              onClick={() => openCompose({ mode: 'forward', sourceMessage: displayed })}
+              disabled={isLoading || !hasCompleteBody(detail)}
+            >
               <Forward className="size-4" />
             </ToolButton>
             <ToolButton
@@ -625,6 +710,85 @@ function MessageCard({
 
 function isSpamMessage(message: Message) {
   return message.folder_type === 'SPAM' || message.folder_type === 'JUNK'
+}
+
+function hasCompleteBody(message: Message | undefined): boolean {
+  return Boolean(message && (message.body_available === true || message.body_html != null || message.body_text != null))
+}
+
+function AttachmentList({ attachments }: { attachments: MessageAttachment[] }) {
+  const { t, i18n } = useTranslation()
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [failedId, setFailedId] = useState<string | null>(null)
+
+  const downloadAttachment = async (attachment: MessageAttachment) => {
+    setDownloadingId(attachment.id)
+    setFailedId(null)
+    try {
+      const blob = await apiGetBlob(`/attachments/${attachment.id}`)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = attachment.filename?.split(/[\\/]/).pop() || t('mail.unnamedAttachment')
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch {
+      setFailedId(attachment.id)
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  return (
+    <section className="mb-3.5 rounded-md border border-border bg-secondary/30 px-3 py-2.5">
+      <div className="mb-2 flex items-center gap-1.5 text-[12.5px] font-bold text-secondary-foreground">
+        <Paperclip className="size-4" aria-hidden="true" />
+        {t('mail.attachments', { count: attachments.length })}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {attachments.map((attachment) => {
+          const filename = attachment.filename || t('mail.unnamedAttachment')
+          const failed = failedId === attachment.id
+          return (
+            <button
+              key={attachment.id}
+              type="button"
+              onClick={() => downloadAttachment(attachment)}
+              disabled={downloadingId === attachment.id}
+              className="group flex min-w-0 max-w-full items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2 text-left shadow-sm transition-colors hover:bg-secondary disabled:opacity-60"
+            >
+              <span className="flex size-8 shrink-0 items-center justify-center rounded bg-secondary text-muted-foreground group-hover:text-foreground">
+                <FileText className="size-4" aria-hidden="true" />
+              </span>
+              <span className="min-w-0">
+                <span className="block max-w-72 truncate text-[12.5px] font-semibold text-foreground">{filename}</span>
+                <span className={cn('block text-[11px]', failed ? 'text-destructive' : 'text-muted-foreground')}>
+                  {failed
+                    ? t('mail.attachmentDownloadFailed')
+                    : formatAttachmentSize(attachment.size_bytes, i18n.language) || attachment.content_type}
+                </span>
+              </span>
+              <Download className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
+            </button>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function formatAttachmentSize(size: number | null, locale: string): string | null {
+  if (size == null) return null
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = size
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: unit === 0 ? 0 : 1 }).format(value)} ${units[unit]}`
 }
 
 function RsvpCard({ messageId }: { messageId: string }) {
@@ -696,6 +860,153 @@ function downloadIcs(invitation: MeetingInvitation) {
   URL.revokeObjectURL(url)
 }
 
+type RgbColor = { red: number; green: number; blue: number; alpha: number }
+
+function parseRgbColor(value: string): RgbColor | null {
+  const channels = value.match(/[\d.]+/g)?.map(Number)
+  if (!channels || channels.length < 3) return null
+  return {
+    red: channels[0],
+    green: channels[1],
+    blue: channels[2],
+    alpha: channels[3] ?? 1,
+  }
+}
+
+function contrastRatio(foreground: RgbColor, background: RgbColor): number {
+  const composite = (channel: number, backgroundChannel: number) =>
+    channel * foreground.alpha + backgroundChannel * (1 - foreground.alpha)
+  const luminance = (color: RgbColor) => {
+    const linear = [color.red, color.green, color.blue].map((channel) => {
+      const value = channel / 255
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+    })
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+  }
+  const compositedForeground = {
+    red: composite(foreground.red, background.red),
+    green: composite(foreground.green, background.green),
+    blue: composite(foreground.blue, background.blue),
+    alpha: 1,
+  }
+  const lighter = Math.max(luminance(compositedForeground), luminance(background))
+  const darker = Math.min(luminance(compositedForeground), luminance(background))
+  return (lighter + 0.05) / (darker + 0.05)
+}
+
+function hasPaintedBackground(style: CSSStyleDeclaration): boolean {
+  const color = parseRgbColor(style.backgroundColor)
+  return style.backgroundImage !== 'none' || Boolean(color && color.alpha > 0)
+}
+
+type EmailColorProperty = 'background' | 'color'
+
+function styleDefinesColorProperty(style: CSSStyleDeclaration, property: EmailColorProperty): boolean {
+  if (property === 'color') return Boolean(style.getPropertyValue('color'))
+  return Boolean(style.getPropertyValue('background-color') || style.getPropertyValue('background-image'))
+}
+
+function rulesDefineColorProperty(
+  rules: CSSRuleList,
+  elements: Element[],
+  property: EmailColorProperty,
+  view: Window,
+): boolean {
+  for (const rule of rules) {
+    if (rule.type === CSSRule.MEDIA_RULE && !view.matchMedia((rule as CSSMediaRule).conditionText).matches) continue
+    if (rule.type === CSSRule.STYLE_RULE) {
+      const styleRule = rule as CSSStyleRule
+      let matches = false
+      try {
+        matches = elements.some((element) => element.matches(styleRule.selectorText))
+      } catch {
+        // Ignore selectors unsupported by the current browser.
+      }
+      if (matches && styleDefinesColorProperty(styleRule.style, property)) return true
+    }
+    const nestedRules = (rule as CSSRule & { cssRules?: CSSRuleList }).cssRules
+    if (nestedRules && rulesDefineColorProperty(nestedRules, elements, property, view)) return true
+  }
+  return false
+}
+
+function emailDefinesColorProperty(
+  doc: Document,
+  elements: [HTMLElement, HTMLElement],
+  property: EmailColorProperty,
+): boolean {
+  const [, body] = elements
+  if (property === 'color') {
+    if (body.hasAttribute('text')) return true
+  } else if (elements.some((element) => element.hasAttribute('bgcolor') || element.hasAttribute('background'))) {
+    return true
+  }
+  if (elements.some((element) => styleDefinesColorProperty(element.style, property))) return true
+
+  for (const sheet of doc.styleSheets) {
+    try {
+      if (rulesDefineColorProperty(sheet.cssRules, elements, property, doc.defaultView!)) return true
+    } catch {
+      // A cross-origin stylesheet cannot be inspected. Treat its colours as
+      // authored so the fallback never overrides rules we cannot verify.
+      return true
+    }
+  }
+  return false
+}
+
+function solidBackground(styles: CSSStyleDeclaration[]): RgbColor | null {
+  let result: RgbColor = { red: 255, green: 255, blue: 255, alpha: 1 }
+  let painted = false
+  for (const style of [...styles].reverse()) {
+    const color = parseRgbColor(style.backgroundColor)
+    if (!color || color.alpha <= 0) continue
+    result = {
+      red: color.red * color.alpha + result.red * (1 - color.alpha),
+      green: color.green * color.alpha + result.green * (1 - color.alpha),
+      blue: color.blue * color.alpha + result.blue * (1 - color.alpha),
+      alpha: 1,
+    }
+    painted = true
+  }
+  return painted ? result : null
+}
+
+function applyMissingEmailCanvas(doc: Document, iframe: HTMLIFrameElement) {
+  const body = doc.body
+  const root = doc.documentElement
+  if (!body || !root || !doc.defaultView) return
+
+  const bodyStyle = doc.defaultView.getComputedStyle(body)
+  const rootStyle = doc.defaultView.getComputedStyle(root)
+  const styles = [bodyStyle, rootStyle]
+  iframe.style.backgroundColor = ''
+
+  const elements: [HTMLElement, HTMLElement] = [root, body]
+  const backgroundDefined =
+    emailDefinesColorProperty(doc, elements, 'background') || styles.some(hasPaintedBackground)
+  const colorDefined = emailDefinesColorProperty(doc, elements, 'color')
+  if (backgroundDefined && colorDefined) return
+
+  const light = { red: 255, green: 255, blue: 255, alpha: 1 }
+  const dark = { red: 17, green: 24, blue: 39, alpha: 1 }
+
+  if (!backgroundDefined) {
+    const foreground = colorDefined ? parseRgbColor(bodyStyle.color) : dark
+    const background =
+      foreground && contrastRatio(foreground, light) < contrastRatio(foreground, dark) ? '#111827' : '#fff'
+    root.style.backgroundColor = background
+    iframe.style.backgroundColor = background
+  }
+
+  if (!colorDefined) {
+    const background = backgroundDefined ? solidBackground(styles) : light
+    const foreground =
+      background && contrastRatio(light, background) > contrastRatio(dark, background) ? '#fff' : '#111827'
+    body.style.color = foreground
+  }
+}
+
 /**
  * Renders email HTML in a sandboxed iframe that auto-sizes to its content so the
  * whole message is visible and the reading pane (not the iframe) scrolls.
@@ -754,6 +1065,7 @@ function HtmlBody({ html, title }: { html: string; title: string }) {
           a.setAttribute('target', '_blank')
           a.setAttribute('rel', 'noopener noreferrer')
         })
+        applyMissingEmailCanvas(doc, iframe)
       }
       apply()
       if (doc?.body) {
@@ -799,9 +1111,8 @@ function HtmlBody({ html, title }: { html: string; title: string }) {
       srcDoc={html}
       scrolling="no"
       style={{ height }}
-      // Background matches the reading pane (not white) so any few-px overshoot
-      // below the email body blends in across themes instead of showing a strip.
-      className="block w-full rounded-md border border-border bg-background"
+      // Default while the message document determines its own canvas.
+      className="block w-full rounded-md border border-border bg-white"
     />
   )
 }

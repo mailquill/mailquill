@@ -5,7 +5,7 @@
  */
 
 const REMOTE_URL = /^\s*(?:https?:)?\/\//i
-const CSS_REMOTE_URL = /url\(\s*(['"]?)\s*(?:https?:)?\/\/[^)'"]*\1\s*\)/gi
+const CSS_REMOTE_URL = /url\(\s*(['"]?)\s*((?:https?:)?\/\/[^)'"]*)\1\s*\)/gi
 
 export interface RemoteBlockResult {
   html: string
@@ -54,4 +54,64 @@ export function blockRemoteContent(html: string): RemoteBlockResult {
   })
 
   return { html: `<!DOCTYPE html>${doc.documentElement.outerHTML}`, blocked }
+}
+
+export function proxyRemoteContent(html: string, token: string | null): string {
+  if (!token) return html
+
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const proxyUrl = (raw: string) =>
+    `/api/remote-content/image?token=${encodeURIComponent(token)}&url=${encodeURIComponent(normalizeRemoteUrl(raw))}`
+
+  const proxyAttr = (el: Element, attr: string) => {
+    const value = el.getAttribute(attr)
+    if (value && REMOTE_URL.test(value)) {
+      el.setAttribute(attr, proxyUrl(value.trim()))
+    }
+  }
+
+  doc.querySelectorAll('img, source, input, video, audio').forEach((el) => {
+    proxyAttr(el, 'src')
+    proxyAttr(el, 'poster')
+    const srcset = el.getAttribute('srcset')
+    if (srcset) {
+      el.setAttribute('srcset', proxySrcset(srcset, proxyUrl))
+    }
+  })
+
+  doc.querySelectorAll('[background]').forEach((el) => proxyAttr(el, 'background'))
+
+  const proxyCss = (css: string) =>
+    css.replace(CSS_REMOTE_URL, (_match, quote: string, raw: string) => {
+      return `url(${quote}${proxyUrl(raw)}${quote})`
+    })
+
+  doc.querySelectorAll('[style]').forEach((el) => {
+    const style = el.getAttribute('style')
+    if (style) el.setAttribute('style', proxyCss(style))
+  })
+  doc.querySelectorAll('style').forEach((el) => {
+    const css = el.textContent
+    if (css) el.textContent = proxyCss(css)
+  })
+
+  return `<!DOCTYPE html>${doc.documentElement.outerHTML}`
+}
+
+function proxySrcset(srcset: string, proxyUrl: (url: string) => string): string {
+  return srcset
+    .split(',')
+    .map((candidate) => {
+      const trimmed = candidate.trim()
+      const [url, ...descriptor] = trimmed.split(/\s+/)
+      if (!REMOTE_URL.test(url)) return trimmed
+      return [proxyUrl(url), ...descriptor].join(' ')
+    })
+    .join(', ')
+}
+
+function normalizeRemoteUrl(url: string): string {
+  const trimmed = url.trim()
+  if (trimmed.startsWith('//')) return `${window.location.protocol}${trimmed}`
+  return trimmed
 }

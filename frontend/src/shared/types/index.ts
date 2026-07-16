@@ -11,6 +11,7 @@ export interface Account {
   body_sync_mode: string
   sync_interval_secs: number
   sync_mode: string
+  provider_kind: string
   created_at: string
   carddav_url?: string | null
   caldav_url?: string | null
@@ -32,6 +33,8 @@ export interface Folder {
   name: string
   /** Raw IMAP path (modified UTF-7), the identifier used for routing/commands. */
   full_path: string
+  /** Human-readable hierarchy path when provider identifiers are opaque. */
+  folder_display_path?: string
   /** Decoded leaf name for display, e.g. "Jülicher" (server-side decoded). */
   folder_name: string
   /** Raw leaf name as the server stores it. */
@@ -119,6 +122,10 @@ export interface Settings {
   default_calendar_id?: string | null
 }
 
+export interface PublicConfig {
+  remote_image_proxy_enabled: boolean
+}
+
 export interface AllowedImageSender {
   sender: string
   created_at: string
@@ -198,6 +205,9 @@ export interface Calendar {
   name: string
   color: string
   is_default?: boolean
+  dav_url: string | null
+  created_at: string
+  provider_type?: CalendarAccount['type'] | null
 }
 
 export interface CalendarAccount {

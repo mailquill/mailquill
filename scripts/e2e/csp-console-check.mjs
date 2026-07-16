@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { assert, optionalEnv } from './lib/mailquill-e2e.mjs'
 
-const appUrl = optionalEnv('MAILQUILL_APP_URL', optionalEnv('MAILQUILL_BASE_URL', 'http://127.0.0.1:8080'))
+const appUrl = optionalEnv('MAILQUILL_APP_URL', optionalEnv('MAILQUILL_BASE_URL', 'http://127.0.0.1:8765'))
 const chromePath = optionalEnv('CHROME_PATH', await findChrome())
 assert(chromePath, 'Set CHROME_PATH to a Chromium/Chrome executable')
 assert(typeof WebSocket === 'function', 'This script requires a Node runtime with global WebSocket support')

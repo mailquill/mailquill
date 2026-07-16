@@ -64,7 +64,6 @@ export function MessageRow({
 }: MessageRowProps) {
   const { t } = useTranslation()
   const density = useUiPrefs((s) => s.density)
-  const marker = useUiPrefs((s) => s.marker)
   const { name } = parseFromAddr(message.from_addr)
   const domain = fromDomain(message.from_addr)
   const listName = listIdToName(message.list_id)
@@ -80,8 +79,6 @@ export function MessageRow({
   const count = message.thread_size ?? 1
   const account = accountColor(message.account_id)
   const compact = density === 'compact'
-  const showStripe = marker !== 'dot'
-  const showAccountDot = marker !== 'stripe'
 
   return (
     <button
@@ -100,12 +97,10 @@ export function MessageRow({
         checked ? 'bg-[var(--mq-bulk)]' : isActive ? 'bg-[var(--mq-row-open)]' : 'bg-card hover:bg-secondary/60',
       )}
     >
-      {showStripe && (
-        <span
-          className="absolute bottom-0 left-0 top-0 w-[3px]"
-          style={{ backgroundColor: isActive ? '#2563EB' : account }}
-        />
-      )}
+      <span
+        className="absolute bottom-0 left-0 top-0 w-[3px]"
+        style={{ backgroundColor: isActive ? '#2563EB' : account }}
+      />
 
       <span className="mt-0.5 flex shrink-0 items-center gap-2">
         <span
@@ -163,14 +158,7 @@ export function MessageRow({
 
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex h-6 items-center gap-1.5">
-          {showAccountDot ? (
-            <span
-              className={cn('size-2 shrink-0 rounded-full', unread && 'ring-2 ring-[#2563eb]/30')}
-              style={{ backgroundColor: account }}
-            />
-          ) : (
-            unread && <span className="size-2 shrink-0 rounded-full bg-[#2563eb]" />
-          )}
+          {unread && <span className="size-2 shrink-0 rounded-full bg-[#2563eb]" />}
           <span
             className={cn(
               'max-w-[240px] truncate text-[13.5px]',

@@ -352,13 +352,20 @@ export function useMarkThreadRead() {
 }
 
 export function useSearchMessages(query: string, filters?: Record<string, string>) {
-  const params = new URLSearchParams(query ? { q: query, ...filters } : { ...filters })
   const hasFilters = !!filters && Object.keys(filters).length > 0
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ['search', query, filters],
-    queryFn: () =>
-      apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; next_cursor: string | null }>(`/search?${params}`)
-        .then(normalizeMessagePage),
+    queryFn: ({ pageParam }) => {
+      const params = new URLSearchParams(query ? { q: query, ...filters } : { ...filters })
+      if (pageParam) params.set('cursor', pageParam)
+      return apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; next_cursor: string | null }>(`/search?${params}`)
+        .then(normalizeMessagePage)
+    },
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    select: (data) => ({
+      messages: data.pages.flatMap((page) => page.messages),
+    }),
     enabled: query.trim().length > 1 || hasFilters,
   })
 }

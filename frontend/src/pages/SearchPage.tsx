@@ -21,7 +21,7 @@ export function SearchPage() {
     return out
   }, [searchParams])
 
-  const { data, isLoading } = useSearchMessages(query, filters)
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useSearchMessages(query, filters)
   const messages = data?.messages ?? []
 
   function handleSelect(message: Message) {
@@ -39,7 +39,14 @@ export function SearchPage() {
           <h1 className="text-lg font-semibold">{t('filter.results')}</h1>
           <p className="text-xs text-muted-foreground">{t('filter.matches', { count: messages.length })}</p>
         </header>
-        <MessageList messages={messages} onSelect={handleSelect} loading={isLoading} />
+        <MessageList
+          messages={messages}
+          onSelect={handleSelect}
+          loading={isLoading}
+          onLoadMore={fetchNextPage}
+          hasMore={hasNextPage}
+          loadingMore={isFetchingNextPage}
+        />
       </div>
       <div className="flex h-full items-center justify-center bg-background p-8 text-center text-sm text-muted-foreground">
         {t('filter.selectResult')}

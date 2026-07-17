@@ -37,41 +37,26 @@ pub async fn search(
     let mut conditions = vec!["m.is_deleted = 0".to_string()];
     let mut binds: Vec<String> = vec![];
 
-    // FTS full-text search. `rowid` is an INTEGER, so it must be decoded as i64
-    // — decoding it as String silently failed (unwrap_or_default), which is why
-    // search always returned nothing.
-    let fts_ids: Option<Vec<i64>> = if let Some(ref fts_q) = q.q {
-        if !fts_q.trim().is_empty() {
-            // Typo-tolerant: expand each query word with close vocabulary terms
-            // (e.g. "decatlon" → ("decatlon" OR "decathlon")).
-            let fts_query = expand_fuzzy_query(&user_db, fts_q).await;
-            let ids: Vec<i64> = sqlx::query_scalar(
-                "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT 1000",
-            )
-            .bind(&fts_query)
-            .fetch_all(&user_db)
-            .await
-            .unwrap_or_default();
-            Some(ids)
-        } else {
-            None
+    if let Some(fts_q) = q.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        // Keep MATCH inside the final query. Materialising and truncating rowids
+        // first made older messages disappear for common terms before filters
+        // and date ordering were applied. The LIKE fallbacks cover searchable
+        // metadata that is not part of the body-oriented FTS index.
+        conditions.push(
+            "(m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?) \
+             OR m.subject LIKE ? ESCAPE '\\' \
+             OR m.from_addr LIKE ? ESCAPE '\\' \
+             OR m.to_addrs LIKE ? ESCAPE '\\' \
+             OR m.cc_addrs LIKE ? ESCAPE '\\' \
+             OR m.snippet LIKE ? ESCAPE '\\' \
+             OR COALESCE(m.message_id_header, '') LIKE ? ESCAPE '\\')"
+                .to_string(),
+        );
+        binds.push(expand_fuzzy_query(&user_db, fts_q).await);
+        let pattern = like_pattern(fts_q);
+        for _ in 0..6 {
+            binds.push(pattern.clone());
         }
-    } else {
-        None
-    };
-
-    if let Some(ids) = &fts_ids {
-        if ids.is_empty() {
-            return Ok(Json(json!({ "items": [], "next_cursor": null })));
-        }
-        // Inline the rowids as integer literals: they come from our own DB, not
-        // user input, so there is nothing to escape.
-        let list = ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        conditions.push(format!("m.rowid IN ({list})"));
     }
 
     if let Some(ref from) = q.from {
@@ -220,18 +205,22 @@ pub async fn search(
 /// Max fuzzy alternatives added per query word (keeps the MATCH query bounded).
 const MAX_FUZZY_TERMS: usize = 8;
 
-/// Build a typo-tolerant FTS5 MATCH query from free-text input. Each word that
-/// is long enough is OR-expanded with the closest indexed terms (by Levenshtein
-/// distance) so small typos still match — "Decatlon" finds "Decathlon". Short
-/// or non-alphanumeric words are passed through verbatim (quoted).
+/// Build a prefix- and typo-tolerant FTS5 MATCH query from free-text input.
+/// Alphanumeric terms match complete tokens and longer continuations, while
+/// sufficiently long terms are OR-expanded with nearby indexed vocabulary.
 async fn expand_fuzzy_query(db: &sqlx::SqlitePool, raw: &str) -> String {
     let mut groups: Vec<String> = Vec::new();
     for word in raw.split_whitespace() {
         let lower = word.to_lowercase();
-        // Only fuzz alphanumeric words of 4+ chars; shorter/odd tokens stay exact.
-        let fuzzable = lower.chars().all(|c| c.is_alphanumeric()) && lower.chars().count() >= 4;
-        if !fuzzable {
+        let alphanumeric = lower.chars().all(|c| c.is_alphanumeric());
+        if !alphanumeric {
             groups.push(quote_term(&lower));
+            continue;
+        }
+        // Only fuzz words of 4+ chars; shorter terms still use prefix matching.
+        let fuzzable = lower.chars().count() >= 4;
+        if !fuzzable {
+            groups.push(quote_prefix_term(&lower));
             continue;
         }
         let max_dist = if lower.chars().count() <= 6 { 1 } else { 2 };
@@ -242,7 +231,7 @@ async fn expand_fuzzy_query(db: &sqlx::SqlitePool, raw: &str) -> String {
         }
         let ored = alts
             .iter()
-            .map(|t| quote_term(t))
+            .map(|t| quote_prefix_term(t))
             .collect::<Vec<_>>()
             .join(" OR ");
         groups.push(format!("({ored})"));
@@ -282,4 +271,60 @@ async fn nearest_terms(db: &sqlx::SqlitePool, word: &str, max_dist: usize) -> Ve
 /// Quote a bareword for an FTS5 query, escaping embedded double quotes.
 fn quote_term(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
+}
+
+fn quote_prefix_term(term: &str) -> String {
+    format!("{}*", quote_term(term))
+}
+
+fn like_pattern(term: &str) -> String {
+    let escaped = term
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_fuzzy_query, like_pattern};
+
+    async fn search_db() -> Result<sqlx::SqlitePool, sqlx::Error> {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+        sqlx::query(
+            "CREATE VIRTUAL TABLE messages_fts USING fts5(subject, from_addr, body_text, content='')",
+        )
+        .execute(&db)
+        .await?;
+        sqlx::query("CREATE VIRTUAL TABLE messages_vocab USING fts5vocab('messages_fts', 'row')")
+            .execute(&db)
+            .await?;
+        sqlx::query(
+            "INSERT INTO messages_fts(rowid, subject, from_addr, body_text) VALUES (1, 'Decathlon receipt', 'shop@example.test', '')",
+        )
+        .execute(&db)
+        .await?;
+        Ok(db)
+    }
+
+    #[tokio::test]
+    async fn free_text_query_matches_prefixes_and_typos() -> Result<(), sqlx::Error> {
+        let db = search_db().await?;
+
+        for raw in ["decat", "decatlon"] {
+            let query = expand_fuzzy_query(&db, raw).await;
+            let count: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                    .bind(query)
+                    .fetch_one(&db)
+                    .await?;
+            assert_eq!(count, 1, "query {raw:?} should find the indexed subject");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn like_fallback_treats_wildcards_as_literals() {
+        assert_eq!(like_pattern(r"100%_done\today"), r"%100\%\_done\\today%");
+    }
 }

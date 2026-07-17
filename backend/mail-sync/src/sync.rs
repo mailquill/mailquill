@@ -5,7 +5,7 @@ use tracing::{error, info, warn};
 use crate::{
     manager::{NewMessageNotification, SyncAppState, SyncCommand},
     mime::{compute_snippet, parse_mime},
-    provider::{self, MailProvider, ProviderConfig, ProviderKind},
+    provider::{self, MailProvider, ProviderConfig, ProviderError, ProviderKind},
     threading::assign_thread_id,
 };
 
@@ -183,7 +183,10 @@ async fn sync_account(
 
     // Discover folders (task 4.1). Every folder is upserted so it stays visible
     // and toggle-able in settings, regardless of whether it's synced.
-    let folders = provider.list_folders().await?;
+    let folders = provider
+        .list_folders()
+        .await
+        .map_err(|error| normalize_provider_error(provider_kind, error))?;
     for folder in &folders {
         let default_sync_enabled = default_folder_sync_enabled(provider_kind, &folder.folder_type);
         sqlx::query(
@@ -219,8 +222,13 @@ async fn sync_account(
     // backfill starts inserting rows.
     let mut total: i64 = 0;
     for folder in &synced_folders {
-        if let Ok(status) = provider.folder_status(&folder.full_path).await {
-            total += status.exists as i64;
+        match provider.folder_status(&folder.full_path).await {
+            Ok(status) => total += status.exists as i64,
+            Err(error) => {
+                if let Some(error) = oauth_reauthentication_error(provider_kind, &error) {
+                    return Err(error.into());
+                }
+            }
         }
     }
     // Count over the same set `total` covers: synced (enabled) folders, live
@@ -254,6 +262,9 @@ async fn sync_account(
         )
         .await
         {
+            if let Some(error) = oauth_reauthentication_error(provider_kind, e.as_ref()) {
+                return Err(error.into());
+            }
             warn!(
                 "folder sync error: account={account_id} folder={} folder_type={} err={e}",
                 folder.full_path, folder.folder_type
@@ -263,6 +274,31 @@ async fn sync_account(
 
     let _ = provider.close().await;
     Ok(())
+}
+
+fn normalize_provider_error(
+    provider_kind: ProviderKind,
+    error: ProviderError,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    match oauth_reauthentication_error(provider_kind, &error) {
+        Some(error) => error.into(),
+        None => Box::new(error),
+    }
+}
+
+fn oauth_reauthentication_error(
+    provider_kind: ProviderKind,
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<&'static str> {
+    let ProviderError::Http { status: 401, .. } = error.downcast_ref::<ProviderError>()? else {
+        return None;
+    };
+
+    match provider_kind {
+        ProviderKind::GmailApi => Some("oauth_reauthentication_required:google"),
+        ProviderKind::OutlookApi => Some("oauth_reauthentication_required:microsoft"),
+        ProviderKind::Imap | ProviderKind::GmailImap => None,
+    }
 }
 
 fn default_folder_sync_enabled(provider_kind: ProviderKind, folder_type: &str) -> bool {
@@ -1065,7 +1101,10 @@ async fn do_imap_expunge(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_folder_sync_enabled, folder_sync_priority, ProviderKind};
+    use super::{
+        default_folder_sync_enabled, folder_sync_priority, oauth_reauthentication_error,
+        ProviderError, ProviderKind,
+    };
 
     #[test]
     fn gmail_defaults_skip_archive_and_custom_labels() {
@@ -1109,5 +1148,39 @@ mod tests {
         assert_eq!(super::contiguous_uid(10, &[11, 12, 14, 15]), 12);
         assert_eq!(super::contiguous_uid(10, &[8, 10, 11, 12]), 12);
         assert_eq!(super::contiguous_uid(10, &[12, 13]), 10);
+    }
+
+    #[test]
+    fn api_unauthorized_errors_require_oauth_reauthentication() {
+        let unauthorized = ProviderError::Http {
+            status: 401,
+            body: "invalid credentials".into(),
+        };
+
+        assert_eq!(
+            oauth_reauthentication_error(ProviderKind::GmailApi, &unauthorized),
+            Some("oauth_reauthentication_required:google")
+        );
+        assert_eq!(
+            oauth_reauthentication_error(ProviderKind::OutlookApi, &unauthorized),
+            Some("oauth_reauthentication_required:microsoft")
+        );
+        assert_eq!(
+            oauth_reauthentication_error(ProviderKind::Imap, &unauthorized),
+            None
+        );
+    }
+
+    #[test]
+    fn non_authentication_http_errors_remain_folder_errors() {
+        let forbidden = ProviderError::Http {
+            status: 403,
+            body: "quota exceeded".into(),
+        };
+
+        assert_eq!(
+            oauth_reauthentication_error(ProviderKind::GmailApi, &forbidden),
+            None
+        );
     }
 }

@@ -2,12 +2,17 @@
 import { clientsClaim } from 'workbox-core'
 import { precacheAndRoute } from 'workbox-precaching'
 import { registerRoute } from 'workbox-routing'
-import { CacheFirst, NetworkFirst } from 'workbox-strategies'
+import { CacheFirst } from 'workbox-strategies'
+import { shouldCacheStaticRequest } from './shared/lib/serviceWorkerRoutes'
 
 clientsClaim()
 self.skipWaiting()
 
 precacheAndRoute(self.__WB_MANIFEST)
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(caches.delete('mailquill-api'))
+})
 
 // Runtime caching only in production. In dev these routes would intercept the
 // Vite HMR modules (script/style requests) and serve them CacheFirst, breaking
@@ -15,19 +20,15 @@ precacheAndRoute(self.__WB_MANIFEST)
 // notifications still work in dev (devOptions registers the SW there).
 if (import.meta.env.PROD) {
   registerRoute(
-    ({ request }) => ['script', 'style', 'font', 'image'].includes(request.destination),
+    ({ request, url }) => shouldCacheStaticRequest(request, url, self.location.origin),
     new CacheFirst({
       cacheName: 'mailquill-static',
     }),
   )
 
-  registerRoute(
-    ({ url }) => url.pathname.startsWith('/api/'),
-    new NetworkFirst({
-      cacheName: 'mailquill-api',
-      networkTimeoutSeconds: 3,
-    }),
-  )
+  // API responses are user-specific and may be streaming (notably /api/events).
+  // Let the browser handle them directly: Cache.put cannot store an active SSE
+  // body, and authenticated responses must not enter a service-worker cache.
 }
 
 self.addEventListener('push', (event) => {

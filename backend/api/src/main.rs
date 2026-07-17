@@ -25,7 +25,28 @@ use api::state::{AppState, VapidConfig};
 #[allow(dead_code)]
 struct FrontendAssets;
 
-const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; object-src 'none'";
+const PROXIED_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; object-src 'none'";
+const DIRECT_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: http: https:; connect-src 'self'; frame-src 'none'; object-src 'none'";
+
+fn content_security_policy(remote_image_proxy_enabled: bool) -> &'static str {
+    if remote_image_proxy_enabled {
+        PROXIED_IMAGE_CSP
+    } else {
+        DIRECT_IMAGE_CSP
+    }
+}
+
+fn content_security_policy_header(remote_image_proxy_enabled: bool) -> HeaderValue {
+    HeaderValue::from_static(content_security_policy(remote_image_proxy_enabled))
+}
+
+fn frontend_cache_control(path: &str) -> &'static str {
+    if path == "index.html" || path == "sw.js" {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    }
+}
 
 use clap::{Parser, Subcommand};
 
@@ -396,7 +417,7 @@ async fn main() {
         .layer(Extension(pkce_store))
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CSP),
+            content_security_policy_header(state.remote_image_proxy_enabled),
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -504,16 +525,11 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
     match FrontendAssets::get(path) {
         Some(content) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            let cache_control = if path == "index.html" {
-                "no-cache"
-            } else {
-                "public, max-age=31536000, immutable"
-            };
+            let cache_control = frontend_cache_control(path);
             axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", mime.as_ref())
                 .header("cache-control", cache_control)
-                .header("content-security-policy", CSP)
                 .body(axum::body::Body::from(content.data))
                 .unwrap()
         }
@@ -522,7 +538,6 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
                 .status(StatusCode::OK)
                 .header("content-type", "text/html")
                 .header("cache-control", "no-cache")
-                .header("content-security-policy", CSP)
                 .body(axum::body::Body::from(content.data))
                 .unwrap(),
             None => axum::response::Response::builder()
@@ -530,5 +545,68 @@ async fn serve_frontend(uri: axum::http::Uri) -> impl IntoResponse {
                 .body(axum::body::Body::from("Not Found"))
                 .unwrap(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn frontend_csp_matches_remote_image_delivery_mode() {
+        for (proxy_enabled, expected_image_sources) in [
+            (false, "img-src 'self' data: blob: http: https:"),
+            (true, "img-src 'self' data: blob:"),
+        ] {
+            let app =
+                Router::new()
+                    .route("/", get(health))
+                    .layer(SetResponseHeaderLayer::overriding(
+                        header::CONTENT_SECURITY_POLICY,
+                        content_security_policy_header(proxy_enabled),
+                    ));
+            let response = app
+                .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let csp = response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .and_then(|value| value.to_str().ok())
+                .expect("frontend response should include a CSP header");
+
+            assert!(csp.contains(expected_image_sources));
+            assert!(csp.contains("style-src 'self' 'unsafe-inline'"));
+            assert!(csp.contains("script-src 'self'"));
+            assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+            assert!(csp.contains("connect-src 'self'"));
+            assert_eq!(csp, content_security_policy(proxy_enabled));
+            if proxy_enabled {
+                assert!(!csp.contains("http:"));
+                assert!(!csp.contains("https:"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn service_worker_is_served_without_immutable_browser_caching() {
+        let response = serve_frontend(axum::http::Uri::from_static("/sw.js"))
+            .await
+            .into_response();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache")
+        );
+        assert_eq!(frontend_cache_control("index.html"), "no-cache");
+        assert_eq!(
+            frontend_cache_control("assets/app-hash.js"),
+            "public, max-age=31536000, immutable"
+        );
     }
 }

@@ -98,14 +98,18 @@ impl<T: fmt::Display> fmt::Debug for Pii<'_, T> {
 mod tests {
     use super::*;
 
+    static PII_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn remove_mode_redacts() {
+        let _guard = PII_TEST_LOCK.lock().unwrap();
         PII_MODE.store(MODE_REMOVE, Ordering::Relaxed);
         assert_eq!(Pii(&"user@example.com").to_string(), "[REDACTED]");
     }
 
     #[test]
     fn hash_mode_is_stable() {
+        let _guard = PII_TEST_LOCK.lock().unwrap();
         PII_MODE.store(MODE_HASH, Ordering::Relaxed);
         let a = Pii(&"user@example.com").to_string();
         let b = Pii(&"user@example.com").to_string();
@@ -115,6 +119,7 @@ mod tests {
 
     #[test]
     fn plaintext_mode_returns_raw() {
+        let _guard = PII_TEST_LOCK.lock().unwrap();
         PII_MODE.store(MODE_PLAINTEXT, Ordering::Relaxed);
         assert_eq!(Pii(&"user@example.com").to_string(), "user@example.com");
         PII_MODE.store(MODE_REMOVE, Ordering::Relaxed);

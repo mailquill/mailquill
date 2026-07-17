@@ -18,6 +18,27 @@ export interface Account {
   caldav_accept_invalid_tls?: boolean
   pgp_key_id?: string | null
   sign_by_default: boolean
+  contacts: ContactCapability | null
+}
+
+export type ContactCapabilityState =
+  | 'disabled'
+  | 'pending'
+  | 'syncing'
+  | 'idle'
+  | 'consent_required'
+  | 'reauth_required'
+  | 'error'
+  | 'unavailable'
+
+export interface ContactCapability {
+  source_id: string
+  provider: 'cardav' | 'graph' | 'google'
+  state: ContactCapabilityState
+  reason: string | null
+  enabled: boolean
+  last_synced_at: string | null
+  cache_retained: boolean
 }
 
 export interface AccountAlias {
@@ -158,10 +179,34 @@ export interface Contact {
   photo_blob_key: string | null
   raw_vcard: string | null
   synced_at: string | null
+  book_id: string | null
+  remote_version: string | null
+  photo_reference: string | null
+  photo_version: string | null
+  photo_content_type: string | null
+  source_email_account_id: string | null
+  source_state: ContactCapabilityState
+  source_enabled: boolean
+  source_writable: boolean
+  groups: ContactGroup[]
+}
+
+export interface ContactGroup {
+  id: string
+  name: string
+  remote_id: string | null
+}
+
+export interface ContactPage {
+  items: Contact[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface NewContact {
   account_id: string
+  book_id?: string | null
   display_name?: string | null
   given_name?: string | null
   family_name?: string | null
@@ -176,10 +221,12 @@ export interface NewContact {
 export interface LabeledValue {
   label: string | null
   value: string
+  primary?: boolean
 }
 
 export interface PostalAddress {
   label: string | null
+  primary?: boolean
   street: string | null
   locality: string | null
   region: string | null
@@ -197,6 +244,30 @@ export interface ContactAccount {
   last_synced_at: string | null
   sync_status: string
   sync_error: string | null
+  email_account_id: string | null
+  management_mode: 'mailbox' | 'independent'
+  capability_state: ContactCapabilityState
+  capability_reason: string | null
+  enabled: boolean
+  cache_retained: boolean
+}
+
+export interface ContactBook {
+  id: string
+  account_id: string
+  remote_id: string
+  display_name: string
+  parent_remote_id: string | null
+  is_default: boolean
+  is_writable: boolean
+}
+
+export interface DiscoveredContactBook {
+  remote_id: string
+  display_name: string
+  parent_remote_id: string | null
+  is_default: boolean
+  is_writable: boolean
 }
 
 export interface Calendar {

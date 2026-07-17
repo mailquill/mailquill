@@ -31,6 +31,7 @@ import {
   type Security,
 } from '@/shared/lib/serverDiscovery'
 import { FieldLabel, Swatches, ServerGroup, SrvField, type AccountFormState } from './AccountFields'
+import type { Account } from '@/shared/types'
 
 interface AddAccountFormProps {
   onCancel: () => void
@@ -75,6 +76,8 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
   const [result, setResult] = useState<DiscoverResult | null>(null)
   const [providerPreset, setProviderPreset] = useState<ProviderPresetId>('auto')
   const [oauthOk, setOauthOk] = useState(false)
+  const [contactsEnabled, setContactsEnabled] = useState(true)
+  const [created, setCreated] = useState<Account | null>(null)
   const detectSeq = useRef(0)
 
   const set = <K extends keyof AccountFormState>(k: K, v: AccountFormState[K]) =>
@@ -163,8 +166,9 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
         // when it talks to the same host the certificate came from.
         imap_tls_cert: trustCert?.der_base64,
         smtp_tls_cert: trustCert && smtpHost === trustCert.host ? trustCert.der_base64 : undefined,
+        contacts_enabled: contactsEnabled,
       },
-      { onSuccess: onCreated },
+      { onSuccess: setCreated },
     )
   }
 
@@ -178,6 +182,34 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
     ['starttls', t('settings.secStarttls')],
     ['none', t('settings.secNone')],
   ]
+
+  if (created) {
+    const contactState = created.contacts?.state ?? 'unavailable'
+    const needsAttention = ['consent_required', 'reauth_required', 'error', 'unavailable'].includes(contactState)
+    return (
+      <div className="mb-4 rounded-[10px] border border-[#16a34a]/30 bg-card p-5" role="status" aria-live="polite">
+        <div className="flex items-start gap-3">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#16a34a] text-white">
+            <Check className="size-5" />
+          </span>
+          <div>
+            <h3 className="text-[16px] font-bold">{t('contacts.setupMailReady')}</h3>
+            <p className="mt-1 text-[13px] text-muted-foreground">
+              {needsAttention ? t('contacts.setupNeedsAttention') : contactsEnabled ? t('contacts.setupSyncStarting') : t('contacts.setupSkipped')}
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <Button variant="ghost" onClick={onCreated}>{t('contacts.setUpLater')}</Button>
+          {needsAttention && <Button variant="outline" onClick={onCreated}>{t('contacts.fixContacts')}</Button>}
+          {contactsEnabled && !needsAttention && (
+            <Button onClick={() => window.location.assign('/mail/contacts')}>{t('contacts.viewContacts')}</Button>
+          )}
+          {!contactsEnabled && <Button onClick={onCreated}>{t('action.done')}</Button>}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="mb-4 rounded-[10px] border border-[#3b82f6] bg-card p-5 shadow-[0_0_0_3px_rgba(59,130,246,0.1)]">
@@ -254,16 +286,30 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
                 </Select>
               </div>
               {oauthProvider && (
-                <div className="flex items-center gap-3 rounded-[9px] border border-[#bfdbfe] bg-[var(--mq-row-open)] px-3.5 py-3">
-                  <ShieldAlert className="size-[18px] shrink-0 text-[#2563eb]" />
-                  <span className="flex-1 text-[12.5px] leading-snug text-secondary-foreground">{t('wiz.oauthNeeded')}</span>
-                  <button
-                    type="button"
-                    onClick={() => startOAuthRedirect(oauthProvider)}
-                    className="h-8 shrink-0 rounded-[7px] bg-[#2563eb] px-3.5 text-[12.5px] font-bold text-white hover:bg-[#1d4ed8]"
-                  >
-                    {t('settings.oauthSignIn', { provider: result?.provider })}
-                  </button>
+                <div className="space-y-3 rounded-[9px] border border-[#bfdbfe] bg-[var(--mq-row-open)] px-3.5 py-3">
+                  <label className="flex cursor-pointer items-start gap-3">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-4 accent-[#2563eb]"
+                      checked={contactsEnabled}
+                      onChange={(event) => setContactsEnabled(event.currentTarget.checked)}
+                    />
+                    <span>
+                      <span className="block text-[13px] font-bold">{t('contacts.syncContacts')}</span>
+                      <span className="block text-[12px] leading-snug text-muted-foreground">{t('contacts.permissionExplanation')}</span>
+                    </span>
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <ShieldAlert className="size-[18px] shrink-0 text-[#2563eb]" />
+                    <span className="flex-1 text-[12.5px] leading-snug text-secondary-foreground">{t('wiz.oauthNeeded')}</span>
+                    <button
+                      type="button"
+                      onClick={() => startOAuthRedirect(oauthProvider, undefined, contactsEnabled ? 'contacts' : undefined)}
+                      className="h-8 shrink-0 rounded-[7px] bg-[#2563eb] px-3.5 text-[12.5px] font-bold text-white hover:bg-[#1d4ed8]"
+                    >
+                      {t('settings.oauthSignIn', { provider: result?.provider })}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -348,6 +394,23 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
           <div className="mb-[18px] mt-0.5 text-[13px] text-muted-foreground">{t('wiz.sub3')}</div>
 
           <div className="flex flex-col gap-5">
+            <div className="rounded-[10px] border border-border bg-secondary/40 p-4">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4 accent-[#2563eb]"
+                  checked={contactsEnabled}
+                  onChange={(event) => setContactsEnabled(event.currentTarget.checked)}
+                />
+                <span className="flex-1">
+                  <span className="block text-[13.5px] font-bold">{t('contacts.syncContacts')}</span>
+                  <span className="mt-0.5 block text-[12px] text-muted-foreground">
+                    {data.carddavUrl ? t('contacts.carddavAvailable') : t('contacts.carddavWillDiscover')}
+                  </span>
+                </span>
+              </label>
+              {!contactsEnabled && <p className="mt-2 text-[12px] text-muted-foreground">{t('contacts.continueWithout')}</p>}
+            </div>
             <ServerGroup title={t('settings.imap')} icon={Inbox}>
               <div className="flex gap-3">
                 <SrvField label={t('settings.host')} w="flex-[2.2]">
@@ -380,11 +443,16 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
               </div>
             </ServerGroup>
 
-            <ServerGroup title={t('settings.carddav')} icon={Users}>
-              <SrvField label={t('settings.url')}>
-                <Input className="font-mono" value={data.carddavUrl} onChange={(e) => set('carddavUrl', e.currentTarget.value)} />
-              </SrvField>
-            </ServerGroup>
+            <details className="rounded-[9px] border border-border p-3">
+              <summary className="cursor-pointer text-[12.5px] font-semibold">{t('contacts.advancedCarddav')}</summary>
+              <div className="mt-3">
+                <ServerGroup title={t('settings.carddav')} icon={Users}>
+                  <SrvField label={t('settings.url')}>
+                    <Input className="font-mono" value={data.carddavUrl} onChange={(e) => set('carddavUrl', e.currentTarget.value)} />
+                  </SrvField>
+                </ServerGroup>
+              </div>
+            </details>
             <ServerGroup title={t('settings.caldav')} icon={Calendar}>
               <SrvField label={t('settings.url')}>
                 <Input className="font-mono" value={data.caldavUrl} onChange={(e) => set('caldavUrl', e.currentTarget.value)} />

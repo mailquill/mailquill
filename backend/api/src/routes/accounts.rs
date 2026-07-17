@@ -37,6 +37,8 @@ pub struct AddAccountRequest {
     provider_kind: Option<String>,
     pgp_key_id: Option<String>,
     sign_by_default: Option<bool>,
+    /// Contact synchronization is optional and never blocks mailbox creation.
+    contacts_enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -60,6 +62,18 @@ pub struct UpdateAccountRequest {
     caldav_accept_invalid_tls: Option<bool>,
     pgp_key_id: Option<String>,
     sign_by_default: Option<bool>,
+    contacts_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContactCapabilitySummary {
+    source_id: String,
+    provider: String,
+    state: String,
+    reason: Option<String>,
+    enabled: bool,
+    last_synced_at: Option<String>,
+    cache_retained: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -83,6 +97,8 @@ pub struct AccountResponse {
     caldav_accept_invalid_tls: bool,
     pgp_key_id: Option<String>,
     sign_by_default: bool,
+    #[sqlx(skip)]
+    contacts: Option<ContactCapabilitySummary>,
 }
 
 #[derive(Deserialize)]
@@ -234,6 +250,15 @@ pub async fn add_account(
     .fetch_one(&user_db)
     .await?;
 
+    reconcile_and_start_contacts(
+        &state,
+        &user.0,
+        &user_db,
+        &account_id,
+        Some(req.contacts_enabled.unwrap_or(true)),
+    )
+    .await;
+
     // Kick off initial sync
     state
         .sync_manager
@@ -249,12 +274,15 @@ pub async fn list_accounts(
     Extension(user): Extension<UserId>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
-    let rows: Vec<AccountResponse> = sqlx::query_as(
+    let mut rows: Vec<AccountResponse> = sqlx::query_as(
         "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts ORDER BY created_at",
     )
     .fetch_all(&user_db)
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?;
+    for row in &mut rows {
+        row.contacts = contact_capability(&user_db, &row.id).await?;
+    }
 
     Ok(Json(rows))
 }
@@ -430,6 +458,9 @@ pub async fn update_account(
         .start_account(account_id.clone(), user.0.clone(), Arc::new(state.clone()))
         .await;
 
+    reconcile_and_start_contacts(&state, &user.0, &user_db, &account_id, req.contacts_enabled)
+        .await;
+
     let row = get_account_row(&user_db, &account_id).await?;
     Ok(Json(row))
 }
@@ -451,6 +482,14 @@ pub async fn delete_account(
 
     // Cancel sync task before deleting DB rows
     state.sync_manager.stop_account(&account_id).await;
+    let managed_source: Option<String> =
+        sqlx::query_scalar("SELECT id FROM contact_accounts WHERE email_account_id = ?")
+            .bind(&account_id)
+            .fetch_optional(&user_db)
+            .await?;
+    if let Some(source_id) = managed_source {
+        state.contact_sync_manager.stop_account(&source_id).await;
+    }
 
     // Cascade delete handled by FK ON DELETE CASCADE
     sqlx::query("DELETE FROM email_accounts WHERE id = ?")
@@ -694,12 +733,78 @@ async fn get_account_row(
     db: &sqlx::SqlitePool,
     account_id: &str,
 ) -> Result<AccountResponse, AppError> {
-    let row: Option<AccountResponse> =
+    let mut row: AccountResponse =
         sqlx::query_as(
             "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts WHERE id = ?",
         )
         .bind(account_id)
         .fetch_optional(db)
-        .await?;
-    row.ok_or(AppError::NotFound)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    row.contacts = contact_capability(db, account_id).await?;
+    Ok(row)
+}
+
+async fn contact_capability(
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+) -> Result<Option<ContactCapabilitySummary>, AppError> {
+    let row: Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        bool,
+        Option<String>,
+        bool,
+    )> = sqlx::query_as(
+        "SELECT id, type, capability_state, capability_reason, enabled,
+                    last_synced_at, cache_retained
+             FROM contact_accounts WHERE email_account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(
+        |(source_id, provider, state, reason, enabled, last_synced_at, cache_retained)| {
+            ContactCapabilitySummary {
+                source_id,
+                provider,
+                state,
+                reason,
+                enabled,
+                last_synced_at,
+                cache_retained,
+            }
+        },
+    ))
+}
+
+async fn reconcile_and_start_contacts(
+    state: &AppState,
+    user_id: &str,
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+    enabled: Option<bool>,
+) {
+    match crate::contact_reconcile::reconcile_mailbox_contact_source(
+        db,
+        &state.credential_key,
+        account_id,
+        enabled,
+    )
+    .await
+    {
+        Ok(capability) if capability.enabled && capability.state == "pending" => {
+            crate::routes::contacts::spawn_contact_sync_task(
+                state.clone(),
+                user_id.to_owned(),
+                capability.source_id,
+                true,
+            )
+            .await;
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(account_id, %error, "contact source reconciliation failed"),
+    }
 }

@@ -68,9 +68,10 @@ Do not put client secrets in frontend code, committed config, or screenshots.
 
 1. Open Google Cloud Console and select or create a project:
    <https://console.cloud.google.com/>
-2. Enable the Gmail API and Google Calendar API for that project:
+2. Enable the Gmail API, Google Calendar API, and People API for that project:
    <https://console.cloud.google.com/apis/library/gmail.googleapis.com>
    <https://console.cloud.google.com/apis/library/calendar-json.googleapis.com>
+   <https://console.cloud.google.com/apis/library/people.googleapis.com>
 
    The OAuth client and the Gmail API must be in the same Google Cloud project.
    Mailquill syncs Gmail mailboxes through `gmail.googleapis.com`; OAuth consent
@@ -90,6 +91,7 @@ Do not put client secrets in frontend code, committed config, or screenshots.
    https://mail.google.com/
    https://www.googleapis.com/auth/calendar.events
    https://www.googleapis.com/auth/calendar.calendarlist.readonly
+   https://www.googleapis.com/auth/contacts
    ```
 
    Mailquill currently requests this restricted Gmail scope because it needs
@@ -99,7 +101,9 @@ Do not put client secrets in frontend code, committed config, or screenshots.
 
    The Calendar scopes let Mailquill list the calendars connected to the Google
    account and read, create, update, and delete their events. Existing Gmail
-   accounts must reconnect once to grant these additional scopes.
+   accounts must reconnect once to grant newly added scopes. The contacts scope
+   grants two-way synchronization of the user's own Google contacts; Mailquill
+   does not request Workspace directory access.
 
 5. Create an OAuth client:
    <https://console.cloud.google.com/auth/clients>
@@ -152,6 +156,7 @@ Do not put client secrets in frontend code, committed config, or screenshots.
    ```text
    Mail.ReadWrite
    Mail.Send
+   Contacts.ReadWrite
    User.Read
    offline_access
    email
@@ -161,6 +166,8 @@ Do not put client secrets in frontend code, committed config, or screenshots.
    continue syncing after the short-lived access token expires. `User.Read`
    lets Mailquill read the signed-in user's mailbox address during the OAuth
    callback so the account is created with the real email address.
+   `Contacts.ReadWrite` is delegated access to the signed-in user's contacts;
+   it does not grant organization-directory synchronization.
 
 7. If your tenant policy requires it, grant admin consent for the application.
 8. Copy the application client ID and client secret into:

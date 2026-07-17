@@ -8,7 +8,17 @@ use axum::{
 use base64::Engine;
 use bytes::Bytes;
 use chrono::Utc;
-use contact_sync::{ContactSyncStatus, LabeledValue, ParsedContact, PostalAddress};
+use contact_sync::{
+    adapters::{
+        CardDavAdapter, ContactProviderAdapter, GooglePeopleAdapter, MicrosoftGraphAdapter,
+    },
+    orchestration::{
+        create_remote_first, delete_remote_first, sync_source_once, update_remote_first,
+        RetryPolicy,
+    },
+    ContactSyncStatus, LabeledValue, ParsedContact, PostalAddress, ProviderError,
+    ProviderErrorCategory,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -27,6 +37,23 @@ pub struct ContactAccount {
     last_synced_at: Option<String>,
     sync_status: String,
     sync_error: Option<String>,
+    email_account_id: Option<String>,
+    management_mode: String,
+    capability_state: String,
+    capability_reason: Option<String>,
+    enabled: bool,
+    cache_retained: bool,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ContactBookResponse {
+    id: String,
+    account_id: String,
+    remote_id: String,
+    display_name: String,
+    parent_remote_id: Option<String>,
+    is_default: bool,
+    is_writable: bool,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +76,21 @@ pub struct SyncStatus {
     error: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct DisableContactsRequest {
+    #[serde(default = "default_true")]
+    keep_downloaded_contacts: bool,
+}
+
+#[derive(Default, Deserialize)]
+pub struct DiscoverContactsRequest {
+    selected_book_remote_ids: Option<Vec<String>>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Serialize)]
 pub struct Contact {
     id: String,
@@ -66,6 +108,31 @@ pub struct Contact {
     photo_blob_key: Option<String>,
     raw_vcard: Option<String>,
     synced_at: Option<String>,
+    book_id: Option<String>,
+    remote_version: Option<String>,
+    photo_reference: Option<String>,
+    photo_version: Option<String>,
+    photo_content_type: Option<String>,
+    source_email_account_id: Option<String>,
+    source_state: String,
+    source_enabled: bool,
+    source_writable: bool,
+    groups: Vec<ContactGroup>,
+}
+
+#[derive(Serialize)]
+pub struct ContactGroup {
+    id: String,
+    name: String,
+    remote_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ContactPage {
+    items: Vec<Contact>,
+    total: i64,
+    limit: i64,
+    offset: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -85,17 +152,27 @@ struct ContactRow {
     photo_blob_key: Option<String>,
     raw_vcard: Option<String>,
     synced_at: Option<String>,
+    book_id: Option<String>,
+    remote_version: Option<String>,
+    photo_reference: Option<String>,
+    photo_version: Option<String>,
+    photo_content_type: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct ContactQuery {
     q: Option<String>,
     account_id: Option<String>,
+    mailbox_id: Option<String>,
+    book_id: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 #[derive(Deserialize)]
 pub struct NewContact {
     account_id: String,
+    book_id: Option<String>,
     display_name: Option<String>,
     given_name: Option<String>,
     family_name: Option<String>,
@@ -120,7 +197,8 @@ pub struct UpdateContact {
     notes: Option<String>,
 }
 
-const SELECT_CONTACT: &str = "id, account_id, uid, display_name, given_name, family_name, org, title, emails, phones, addresses, notes, photo_blob_key, raw_vcard, synced_at";
+const SELECT_CONTACT: &str = "id, account_id, uid, display_name, given_name, family_name, org, title, emails, phones, addresses, notes, photo_blob_key, raw_vcard, synced_at, book_id, remote_version, photo_reference, photo_version, photo_content_type";
+const SELECT_CONTACT_QUALIFIED: &str = "c.id, c.account_id, c.uid, c.display_name, c.given_name, c.family_name, c.org, c.title, c.emails, c.phones, c.addresses, c.notes, c.photo_blob_key, c.raw_vcard, c.synced_at, c.book_id, c.remote_version, c.photo_reference, c.photo_version, c.photo_content_type";
 const CONTACT_SYNC_INTERVAL_SECS: u64 = 300;
 
 pub async fn create_account(
@@ -129,6 +207,11 @@ pub async fn create_account(
     Json(req): Json<NewContactAccount>,
 ) -> Result<impl IntoResponse, AppError> {
     validate_account(&req)?;
+    if req.account_type != "cardav" {
+        return Err(AppError::Unprocessable(
+            "Google and Microsoft contacts are enabled from their mailbox settings".into(),
+        ));
+    }
     let user_db = state.user_db_pool.get(&user.0).await?;
     let auth_scheme = req.auth_scheme.clone().unwrap_or_else(|| {
         if req.access_token.is_some() {
@@ -166,7 +249,7 @@ pub async fn create_account(
             .bind(&id)
             .execute(&user_db)
             .await;
-        return Err(AppError::Unprocessable(err));
+        return Err(AppError::Unprocessable(err.to_string()));
     }
 
     spawn_contact_sync_task(state.clone(), user.0.clone(), id.clone(), false).await;
@@ -180,7 +263,8 @@ pub async fn list_accounts(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let accounts: Vec<ContactAccount> = sqlx::query_as(
-        "SELECT id, display_name, type AS account_type, base_url, auth_scheme, sync_token, last_synced_at, sync_status, sync_error \
+        "SELECT id, display_name, type AS account_type, base_url, auth_scheme, sync_token, last_synced_at, sync_status, sync_error, \
+                email_account_id, management_mode, capability_state, capability_reason, enabled, cache_retained \
          FROM contact_accounts ORDER BY display_name COLLATE NOCASE ASC",
     )
     .fetch_all(&user_db)
@@ -194,6 +278,20 @@ pub async fn delete_account(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
+    let management_mode: Option<String> =
+        sqlx::query_scalar("SELECT management_mode FROM contact_accounts WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&user_db)
+            .await?;
+    match management_mode.as_deref() {
+        None => return Err(AppError::NotFound),
+        Some("mailbox") => {
+            return Err(AppError::Conflict(
+                "mailbox-managed contact sources must be disabled from mailbox settings".into(),
+            ))
+        }
+        Some(_) => {}
+    }
     state.contact_sync_manager.stop_account(&id).await;
     let rows = sqlx::query("DELETE FROM contact_accounts WHERE id = ?")
         .bind(&id)
@@ -213,7 +311,7 @@ pub async fn account_sync_status(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT sync_status, last_synced_at, sync_error FROM contact_accounts WHERE id = ?",
+        "SELECT capability_state, last_synced_at, capability_reason FROM contact_accounts WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&user_db)
@@ -226,6 +324,24 @@ pub async fn account_sync_status(
         last_synced_at,
         error,
     }))
+}
+
+pub async fn list_contact_books(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    require_account(&user_db, &id).await?;
+    let books: Vec<ContactBookResponse> = sqlx::query_as(
+        "SELECT id, account_id, remote_id, display_name, parent_remote_id, is_default, is_writable
+         FROM contact_books WHERE account_id = ?
+         ORDER BY is_default DESC, display_name COLLATE NOCASE",
+    )
+    .bind(&id)
+    .fetch_all(&user_db)
+    .await?;
+    Ok(Json(books))
 }
 
 pub async fn trigger_sync(
@@ -249,63 +365,134 @@ pub async fn trigger_sync(
     }))
 }
 
+pub async fn enable_mailbox_contacts(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(account_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let capability = crate::contact_reconcile::reconcile_mailbox_contact_source(
+        &user_db,
+        &state.credential_key,
+        &account_id,
+        Some(true),
+    )
+    .await
+    .map_err(AppError::Unprocessable)?;
+    if capability.state == "pending" {
+        spawn_contact_sync_task(state.clone(), user.0, capability.source_id.clone(), true).await;
+    }
+    Ok(Json(fetch_account(&user_db, &capability.source_id).await?))
+}
+
+pub async fn disable_mailbox_contacts(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(account_id): Path<String>,
+    Json(request): Json<DisableContactsRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let source_id: String = sqlx::query_scalar(
+        "SELECT id FROM contact_accounts WHERE email_account_id = ? AND management_mode = 'mailbox'",
+    )
+    .bind(&account_id)
+    .fetch_optional(&user_db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    state.contact_sync_manager.stop_account(&source_id).await;
+    let mut tx = user_db.begin().await?;
+    sqlx::query(
+        "UPDATE contact_accounts
+         SET enabled = 0, capability_state = 'disabled', capability_reason = ?,
+             cache_retained = ?, sync_status = 'idle', sync_error = NULL
+         WHERE id = ?",
+    )
+    .bind(if request.keep_downloaded_contacts {
+        "cache_retained"
+    } else {
+        "cache_removed"
+    })
+    .bind(request.keep_downloaded_contacts)
+    .bind(&source_id)
+    .execute(&mut *tx)
+    .await?;
+    if !request.keep_downloaded_contacts {
+        sqlx::query("DELETE FROM contacts WHERE account_id = ?")
+            .bind(&source_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM contact_groups WHERE account_id = ?")
+            .bind(&source_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM contact_books WHERE account_id = ?")
+            .bind(&source_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(Json(fetch_account(&user_db, &source_id).await?))
+}
+
+pub async fn discover_mailbox_contacts(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(account_id): Path<String>,
+    Json(request): Json<DiscoverContactsRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let source_id: String =
+        sqlx::query_scalar("SELECT id FROM contact_accounts WHERE email_account_id = ?")
+            .bind(&account_id)
+            .fetch_optional(&user_db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    let adapter = contact_adapter(&user_db, &state, &source_id)
+        .await
+        .map_err(provider_discovery_app_error)?;
+    let books = adapter
+        .books()
+        .await
+        .map_err(provider_discovery_app_error)?;
+    if let Some(selected) = request.selected_book_remote_ids {
+        if selected.is_empty()
+            || selected
+                .iter()
+                .any(|id| !books.iter().any(|book| &book.remote_id == id))
+        {
+            return Err(AppError::Unprocessable(
+                "select at least one discovered address book".into(),
+            ));
+        }
+        let metadata: String =
+            sqlx::query_scalar("SELECT provider_metadata FROM contact_accounts WHERE id = ?")
+                .bind(&source_id)
+                .fetch_one(&user_db)
+                .await?;
+        let mut metadata =
+            serde_json::from_str::<Value>(&metadata).unwrap_or_else(|_| serde_json::json!({}));
+        metadata["selected_book_remote_ids"] = serde_json::json!(selected);
+        sqlx::query(
+            "UPDATE contact_accounts SET provider_metadata = ?, updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(metadata.to_string())
+        .bind(&source_id)
+        .execute(&user_db)
+        .await?;
+    }
+    Ok(Json(serde_json::json!({
+        "source_id": source_id,
+        "books": books,
+    })))
+}
+
 pub async fn list_contacts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
     Query(query): Query<ContactQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
-    let rows: Vec<ContactRow> = match (query.q.as_deref(), query.account_id.as_deref()) {
-        (Some(q), Some(account_id)) if !q.trim().is_empty() => {
-            let like = format!("%{}%", q.trim());
-            sqlx::query_as(&format!(
-                "SELECT {SELECT_CONTACT} FROM contacts \
-                 WHERE account_id = ? AND (display_name LIKE ? OR given_name LIKE ? OR family_name LIKE ? OR emails LIKE ?) \
-                 ORDER BY display_name COLLATE NOCASE ASC"
-            ))
-            .bind(account_id)
-            .bind(&like)
-            .bind(&like)
-            .bind(&like)
-            .bind(&like)
-            .fetch_all(&user_db)
-            .await?
-        }
-        (Some(q), None) if !q.trim().is_empty() => {
-            let like = format!("%{}%", q.trim());
-            sqlx::query_as(&format!(
-                "SELECT {SELECT_CONTACT} FROM contacts \
-                 WHERE display_name LIKE ? OR given_name LIKE ? OR family_name LIKE ? OR emails LIKE ? \
-                 ORDER BY display_name COLLATE NOCASE ASC"
-            ))
-            .bind(&like)
-            .bind(&like)
-            .bind(&like)
-            .bind(&like)
-            .fetch_all(&user_db)
-            .await?
-        }
-        (_, Some(account_id)) => {
-            sqlx::query_as(&format!(
-                "SELECT {SELECT_CONTACT} FROM contacts WHERE account_id = ? ORDER BY display_name COLLATE NOCASE ASC"
-            ))
-            .bind(account_id)
-            .fetch_all(&user_db)
-            .await?
-        }
-        _ => {
-            sqlx::query_as(&format!(
-                "SELECT {SELECT_CONTACT} FROM contacts ORDER BY display_name COLLATE NOCASE ASC"
-            ))
-            .fetch_all(&user_db)
-            .await?
-        }
-    };
-    Ok(Json(
-        rows.into_iter()
-            .map(row_to_contact)
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+    Ok(Json(contact_page(&user_db, &query, false).await?))
 }
 
 pub async fn search_contacts(
@@ -313,36 +500,19 @@ pub async fn search_contacts(
     Extension(user): Extension<UserId>,
     Query(query): Query<ContactQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let term = query.q.unwrap_or_default();
+    let term = query.q.clone().unwrap_or_default();
     let trimmed = term.trim();
     if trimmed.is_empty() {
         return Ok(Json(Vec::<Contact>::new()));
     }
     let user_db = state.user_db_pool.get(&user.0).await?;
-    let like = format!("%{trimmed}%");
-    let rows: Vec<ContactRow> = sqlx::query_as(&format!(
-        "SELECT {SELECT_CONTACT} FROM contacts \
-         WHERE display_name LIKE ? OR given_name LIKE ? OR family_name LIKE ? OR emails LIKE ? \
-         ORDER BY CASE \
-           WHEN display_name LIKE ? THEN 0 \
-           WHEN given_name LIKE ? THEN 1 \
-           WHEN family_name LIKE ? THEN 2 \
-           ELSE 3 END, display_name COLLATE NOCASE ASC \
-         LIMIT 10"
-    ))
-    .bind(&like)
-    .bind(&like)
-    .bind(&like)
-    .bind(&like)
-    .bind(format!("{trimmed}%"))
-    .bind(format!("{trimmed}%"))
-    .bind(format!("{trimmed}%"))
-    .fetch_all(&user_db)
-    .await?;
+    let mut autocomplete_query = query;
+    autocomplete_query.limit = Some(10);
+    autocomplete_query.offset = Some(0);
     Ok(Json(
-        rows.into_iter()
-            .map(row_to_contact)
-            .collect::<Result<Vec<_>, _>>()?,
+        contact_page(&user_db, &autocomplete_query, true)
+            .await?
+            .items,
     ))
 }
 
@@ -361,7 +531,7 @@ pub async fn create_contact(
             "display_name or name parts are required".into(),
         ));
     }
-    let mut contact = ParsedContact {
+    let contact = ParsedContact {
         uid: Uuid::new_v4().to_string(),
         display_name: req.display_name,
         given_name: req.given_name,
@@ -375,9 +545,17 @@ pub async fn create_contact(
         photo_reference: None,
         raw_vcard: None,
     };
-    write_remote(&user_db, &state, &req.account_id, None, &mut contact).await?;
-    let id = upsert_contact(&user_db, &req.account_id, contact).await?;
-    Ok(Json(fetch_contact(&user_db, &id).await?))
+    let book = writable_book(&user_db, &req.account_id, req.book_id.as_deref()).await?;
+    let adapter = contact_adapter(&user_db, &state, &req.account_id)
+        .await
+        .map_err(provider_app_error)?;
+    let mutation =
+        create_remote_first(&user_db, &req.account_id, adapter, &book.identity, &contact)
+            .await
+            .map_err(provider_app_error)?;
+    Ok(Json(
+        fetch_contact_by_remote_id(&user_db, &req.account_id, &mutation.remote_id).await?,
+    ))
 }
 
 pub async fn update_contact(
@@ -388,7 +566,7 @@ pub async fn update_contact(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let existing = fetch_contact(&user_db, &id).await?;
-    let mut contact = ParsedContact {
+    let contact = ParsedContact {
         uid: existing.uid.clone(),
         display_name: req.display_name.or(existing.display_name),
         given_name: req.given_name.or(existing.given_name),
@@ -402,15 +580,21 @@ pub async fn update_contact(
         photo_reference: None,
         raw_vcard: existing.raw_vcard,
     };
-    write_remote(
+    let book = writable_book(&user_db, &existing.account_id, existing.book_id.as_deref()).await?;
+    let adapter = contact_adapter(&user_db, &state, &existing.account_id)
+        .await
+        .map_err(provider_app_error)?;
+    update_remote_first(
         &user_db,
-        &state,
         &existing.account_id,
-        Some(&existing.uid),
-        &mut contact,
+        adapter,
+        &book.identity,
+        &existing.uid,
+        existing.remote_version.as_deref(),
+        &contact,
     )
-    .await?;
-    upsert_contact(&user_db, &existing.account_id, contact).await?;
+    .await
+    .map_err(provider_app_error)?;
     Ok(Json(fetch_contact(&user_db, &id).await?))
 }
 
@@ -421,15 +605,20 @@ pub async fn delete_contact(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let contact = fetch_contact(&user_db, &id).await?;
-    delete_remote(&user_db, &state, &contact.account_id, &contact.uid).await?;
-    let rows = sqlx::query("DELETE FROM contacts WHERE id = ?")
-        .bind(&id)
-        .execute(&user_db)
-        .await?
-        .rows_affected();
-    if rows == 0 {
-        return Err(AppError::NotFound);
-    }
+    let book = writable_book(&user_db, &contact.account_id, contact.book_id.as_deref()).await?;
+    let adapter = contact_adapter(&user_db, &state, &contact.account_id)
+        .await
+        .map_err(provider_app_error)?;
+    delete_remote_first(
+        &user_db,
+        &contact.account_id,
+        adapter,
+        &book.identity,
+        &contact.uid,
+        contact.remote_version.as_deref(),
+    )
+    .await
+    .map_err(provider_app_error)?;
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
@@ -446,7 +635,49 @@ pub async fn get_photo(
             .get(key)
             .await
             .map_err(|_| AppError::NotFound)?;
-        return Ok(binary_response(bytes, "application/octet-stream"));
+        return Ok(binary_response(
+            bytes,
+            contact
+                .photo_content_type
+                .as_deref()
+                .unwrap_or("application/octet-stream"),
+        ));
+    }
+    if let Some(book_id) = contact.book_id.as_deref() {
+        let book = contact_book(&user_db, &contact.account_id, book_id).await?;
+        let adapter = contact_adapter(&user_db, &state, &contact.account_id)
+            .await
+            .map_err(provider_app_error)?;
+        if let Some(photo) = adapter
+            .photo(
+                &book.identity,
+                &contact.uid,
+                contact.photo_reference.as_deref(),
+            )
+            .await
+            .map_err(provider_app_error)?
+        {
+            let key = format!("contact/{}/{}/photo", contact.account_id, contact.uid);
+            let bytes = Bytes::from(photo.bytes);
+            state
+                .blob_store
+                .put(&key, bytes.clone())
+                .await
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+            sqlx::query(
+                "UPDATE contacts
+                 SET photo_blob_key = ?, photo_content_type = ?, photo_version = COALESCE(?, photo_version),
+                     updated_at = datetime('now')
+                 WHERE id = ?",
+            )
+            .bind(&key)
+            .bind(&photo.content_type)
+            .bind(&photo.version)
+            .bind(&id)
+            .execute(&user_db)
+            .await?;
+            return Ok(binary_response(bytes, &photo.content_type));
+        }
     }
     let Some(raw_vcard) = &contact.raw_vcard else {
         return Err(AppError::NotFound);
@@ -474,36 +705,8 @@ async fn sync_contact_account(
     db: &sqlx::SqlitePool,
     state: &AppState,
     account_id: &str,
-) -> Result<(), String> {
-    sqlx::query(
-        "UPDATE contact_accounts SET sync_status = 'syncing', sync_error = NULL WHERE id = ?",
-    )
-    .bind(account_id)
-    .execute(db)
-    .await
-    .map_err(|e| e.to_string())?;
-    let result = sync_contact_account_inner(db, state, account_id).await;
-    match &result {
-        Ok(()) => {
-            let _ = sqlx::query(
-                "UPDATE contact_accounts SET sync_status='idle', last_synced_at=?, sync_error=NULL WHERE id=?",
-            )
-            .bind(Utc::now().to_rfc3339())
-            .bind(account_id)
-            .execute(db)
-            .await;
-        }
-        Err(err) => {
-            let _ = sqlx::query(
-                "UPDATE contact_accounts SET sync_status='error', sync_error=? WHERE id=?",
-            )
-            .bind(err)
-            .bind(account_id)
-            .execute(db)
-            .await;
-        }
-    }
-    result
+) -> Result<(), ProviderError> {
+    sync_contact_account_inner(db, state, account_id).await
 }
 
 pub async fn spawn_contact_sync_task(
@@ -518,272 +721,276 @@ pub async fn spawn_contact_sync_task(
     manager
         .start_account(account_id, async move {
             let mut should_run = run_immediately;
+            let mut consecutive_failures = 0u32;
+            let retry_policy = RetryPolicy::default();
             loop {
                 if !should_run {
                     tokio::time::sleep(std::time::Duration::from_secs(CONTACT_SYNC_INTERVAL_SECS))
                         .await;
                 }
                 should_run = false;
-                let status = match state.user_db_pool.get(&user_id).await {
-                    Ok(db) => match sync_contact_account(&db, &state, &account_for_task).await {
-                        Ok(()) => ContactSyncStatus {
-                            state: "idle".to_owned(),
-                            last_synced_at: Some(Utc::now().to_rfc3339()),
-                            error: None,
-                        },
-                        Err(err) => ContactSyncStatus {
-                            state: "error".to_owned(),
-                            last_synced_at: None,
-                            error: Some(err),
-                        },
-                    },
-                    Err(err) => ContactSyncStatus {
-                        state: "error".to_owned(),
-                        last_synced_at: None,
-                        error: Some(err.to_string()),
-                    },
+                let result = match state.user_db_pool.get(&user_id).await {
+                    Ok(db) => sync_contact_account(&db, &state, &account_for_task).await,
+                    Err(_) => Err(ProviderError {
+                        category: ProviderErrorCategory::Unavailable,
+                        message: "contact cache unavailable".to_owned(),
+                        retry_after_seconds: None,
+                    }),
+                };
+                let (status, retry_after, pause) = match result {
+                    Ok(()) => {
+                        consecutive_failures = 0;
+                        (
+                            ContactSyncStatus {
+                                state: "idle".to_owned(),
+                                last_synced_at: Some(Utc::now().to_rfc3339()),
+                                error: None,
+                            },
+                            None,
+                            false,
+                        )
+                    }
+                    Err(error) => {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        let pause = pauses_contact_sync(error.category);
+                        let state_name = match error.category {
+                            ProviderErrorCategory::ConsentRequired => "consent_required",
+                            ProviderErrorCategory::ReauthenticationRequired
+                            | ProviderErrorCategory::Authentication => "reauth_required",
+                            ProviderErrorCategory::Unavailable => "unavailable",
+                            _ => "error",
+                        };
+                        (
+                            ContactSyncStatus {
+                                state: state_name.to_owned(),
+                                last_synced_at: None,
+                                error: Some(format!("{:?}", error.category).to_ascii_lowercase()),
+                            },
+                            error.retry_after_seconds,
+                            pause,
+                        )
+                    }
                 };
                 manager_for_task
-                    .update_status(&account_for_task, status)
+                    .update_status(&account_for_task, status.clone())
                     .await;
+                publish_contact_status(&state, &user_id, &account_for_task, &status);
+                if pause {
+                    break;
+                }
+                if consecutive_failures > 0 {
+                    tokio::time::sleep(retry_policy.delay(consecutive_failures, retry_after)).await;
+                    should_run = true;
+                }
             }
         })
         .await;
+}
+
+fn pauses_contact_sync(category: ProviderErrorCategory) -> bool {
+    matches!(
+        category,
+        ProviderErrorCategory::ConsentRequired
+            | ProviderErrorCategory::ReauthenticationRequired
+            | ProviderErrorCategory::Authentication
+            | ProviderErrorCategory::Unavailable
+            | ProviderErrorCategory::InvalidResponse
+    )
+}
+
+fn publish_contact_status(
+    state: &AppState,
+    user_id: &str,
+    source_id: &str,
+    status: &ContactSyncStatus,
+) {
+    let _ = state.events.send(crate::state::UserEvent {
+        user_id: user_id.to_owned(),
+        event_type: "contact_sync".to_owned(),
+        payload: serde_json::json!({
+            "source_id": source_id,
+            "state": status.state,
+            "last_synced_at": status.last_synced_at,
+            "error_category": status.error,
+        })
+        .to_string(),
+    });
 }
 
 async fn sync_contact_account_inner(
     db: &sqlx::SqlitePool,
     state: &AppState,
     account_id: &str,
-) -> Result<(), String> {
-    let (provider, base_url, auth_scheme, encrypted, sync_token): (
+) -> Result<(), ProviderError> {
+    let (enabled, capability_state): (bool, String) =
+        sqlx::query_as("SELECT enabled, capability_state FROM contact_accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_one(db)
+            .await
+            .map_err(cache_error)?;
+    if !enabled
+        || matches!(
+            capability_state.as_str(),
+            "disabled" | "consent_required" | "reauth_required" | "unavailable"
+        )
+    {
+        return Err(ProviderError {
+            category: match capability_state.as_str() {
+                "consent_required" => ProviderErrorCategory::ConsentRequired,
+                "reauth_required" => ProviderErrorCategory::ReauthenticationRequired,
+                _ => ProviderErrorCategory::Unavailable,
+            },
+            message: "contact source is not eligible for synchronization".to_owned(),
+            retry_after_seconds: None,
+        });
+    }
+
+    let adapter = contact_adapter(db, state, account_id).await?;
+    sync_source_once(db, account_id, adapter).await?;
+    Ok(())
+}
+
+async fn contact_adapter(
+    db: &sqlx::SqlitePool,
+    state: &AppState,
+    account_id: &str,
+) -> Result<std::sync::Arc<dyn ContactProviderAdapter>, ProviderError> {
+    let (provider, base_url, auth_scheme, encrypted, email_account_id): (
         String,
         Option<String>,
         String,
         Vec<u8>,
         Option<String>,
     ) = sqlx::query_as(
-        "SELECT type, base_url, auth_scheme, credentials_encrypted, sync_token FROM contact_accounts WHERE id = ?",
+        "SELECT type, base_url, auth_scheme, credentials_encrypted, email_account_id
+         FROM contact_accounts WHERE id = ?",
     )
     .bind(account_id)
     .fetch_one(db)
     .await
-    .map_err(|e| e.to_string())?;
-    let creds = decrypt_credentials(state, &encrypted)?;
-    let mut next_token = sync_token;
-    let contacts = match provider.as_str() {
-        "cardav" => {
-            let base = base_url.ok_or_else(|| "base_url is required".to_string())?;
-            let auth = dav_auth(&auth_scheme, &creds)?;
-            let discovered = contact_sync::discover_carddav_addressbook(&base, &auth).await?;
-            sqlx::query("UPDATE contact_accounts SET base_url = ? WHERE id = ?")
-                .bind(&discovered)
-                .bind(account_id)
-                .execute(db)
-                .await
-                .map_err(|e| e.to_string())?;
-            next_token = contact_sync::carddav_sync_token(&discovered, &auth).await?;
-            contact_sync::sync_carddav(&discovered, &auth).await?
-        }
-        "graph" => {
-            let token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| "access_token is required".to_string())?;
-            let page = contact_sync::graph_contacts(token, next_token.as_deref()).await?;
-            next_token = page.delta_link.or(page.next_link);
-            page.contacts
-        }
-        "google" => {
-            let token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| "access_token is required".to_string())?;
-            let page = contact_sync::google_connections(token, next_token.as_deref()).await?;
-            next_token = page.sync_token.or(page.next_page_token);
-            page.contacts
-        }
-        _ => return Err("unsupported contact provider".to_string()),
-    };
-
-    sqlx::query("DELETE FROM contacts WHERE account_id = ?")
-        .bind(account_id)
-        .execute(db)
-        .await
-        .map_err(|e| e.to_string())?;
-    for contact in contacts {
-        upsert_contact(db, account_id, contact)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    sqlx::query("UPDATE contact_accounts SET sync_token = ? WHERE id = ?")
-        .bind(next_token)
-        .bind(account_id)
-        .execute(db)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-async fn upsert_contact(
-    db: &sqlx::SqlitePool,
-    account_id: &str,
-    mut contact: ParsedContact,
-) -> Result<String, AppError> {
-    if contact.uid.trim().is_empty() {
-        contact.uid = Uuid::new_v4().to_string();
-    }
-    if contact.raw_vcard.is_none() {
-        contact.raw_vcard = Some(contact_sync::contact_to_vcard(&contact));
-    }
-    let emails =
-        serde_json::to_string(&contact.emails).map_err(|e| AppError::Internal(e.to_string()))?;
-    let phones =
-        serde_json::to_string(&contact.phones).map_err(|e| AppError::Internal(e.to_string()))?;
-    let addresses =
-        serde_json::to_string(&contact.addresses).map_err(|e| AppError::Internal(e.to_string()))?;
-    let id: String = sqlx::query_scalar(
-        "INSERT INTO contacts \
-         (account_id, uid, display_name, given_name, family_name, org, title, emails, phones, addresses, notes, raw_vcard, synced_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(account_id, uid) DO UPDATE SET \
-           display_name=excluded.display_name, given_name=excluded.given_name, family_name=excluded.family_name, \
-           org=excluded.org, title=excluded.title, emails=excluded.emails, phones=excluded.phones, \
-           addresses=excluded.addresses, notes=excluded.notes, raw_vcard=excluded.raw_vcard, synced_at=excluded.synced_at, \
-           updated_at=datetime('now') \
-         RETURNING id",
-    )
-    .bind(account_id)
-    .bind(&contact.uid)
-    .bind(&contact.display_name)
-    .bind(&contact.given_name)
-    .bind(&contact.family_name)
-    .bind(&contact.org)
-    .bind(&contact.title)
-    .bind(&emails)
-    .bind(&phones)
-    .bind(&addresses)
-    .bind(&contact.notes)
-    .bind(&contact.raw_vcard)
-    .bind(Utc::now().to_rfc3339())
-    .fetch_one(db)
-    .await?;
-    Ok(id)
-}
-
-async fn write_remote(
-    db: &sqlx::SqlitePool,
-    state: &AppState,
-    account_id: &str,
-    existing_uid: Option<&str>,
-    contact: &mut ParsedContact,
-) -> Result<(), AppError> {
-    let (provider, base_url, auth_scheme, encrypted): (String, Option<String>, String, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT type, base_url, auth_scheme, credentials_encrypted FROM contact_accounts WHERE id = ?",
-        )
-        .bind(account_id)
-        .fetch_one(db)
-        .await?;
-    let creds = decrypt_credentials(state, &encrypted).map_err(AppError::BadGateway)?;
-    match provider.as_str() {
-        "cardav" => {
-            let base =
-                base_url.ok_or_else(|| AppError::Unprocessable("base_url is required".into()))?;
-            let auth = dav_auth(&auth_scheme, &creds).map_err(AppError::BadGateway)?;
-            let raw = contact_sync::contact_to_vcard(contact);
-            let href = carddav_href(&base, existing_uid.unwrap_or(&contact.uid));
-            contact_sync::put_carddav_contact(&href, &auth, &raw)
-                .await
-                .map_err(AppError::BadGateway)?;
-            contact.raw_vcard = Some(raw);
-        }
-        "graph" => {
-            let token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| AppError::BadGateway("access_token is required".into()))?;
-            if let Some(uid) = existing_uid {
-                contact_sync::graph_update_contact(token, uid, contact)
+    .map_err(cache_error)?;
+    let adapter: std::sync::Arc<dyn ContactProviderAdapter> =
+        if let Some(mailbox_id) = email_account_id.as_deref() {
+            match provider.as_str() {
+                "cardav" => {
+                    let context = crate::contact_reconcile::managed_carddav_context(
+                        db,
+                        &state.credential_key,
+                        account_id,
+                    )
                     .await
-                    .map_err(AppError::BadGateway)?;
-            } else {
-                contact.uid = contact_sync::graph_create_contact(token, contact)
-                    .await
-                    .map_err(AppError::BadGateway)?;
+                    .map_err(|_| provider_setup_error("managed CardDAV setup is incomplete"))?;
+                    std::sync::Arc::new(CardDavAdapter::with_tls_options(
+                        context.base_url,
+                        context.auth,
+                        context.trusted_cert_der.as_deref(),
+                        context.accept_invalid_tls,
+                    )?)
+                }
+                "google" => std::sync::Arc::new(GooglePeopleAdapter::new(
+                    managed_oauth_token(state, db, mailbox_id).await?,
+                )),
+                "graph" => std::sync::Arc::new(MicrosoftGraphAdapter::new(
+                    managed_oauth_token(state, db, mailbox_id).await?,
+                )),
+                _ => return Err(provider_setup_error("unsupported contact provider")),
             }
-        }
-        "google" => {
-            let token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| AppError::BadGateway("access_token is required".into()))?;
-            if let Some(uid) = existing_uid {
-                contact_sync::google_update_contact(token, uid, contact)
-                    .await
-                    .map_err(AppError::BadGateway)?;
-            } else {
-                contact.uid = contact_sync::google_create_contact(token, contact)
-                    .await
-                    .map_err(AppError::BadGateway)?;
+        } else {
+            let creds = decrypt_credentials(state, &encrypted).map_err(|_| {
+                provider_setup_error("independent contact credentials could not be decrypted")
+            })?;
+            match provider.as_str() {
+                "cardav" => {
+                    let base = base_url
+                        .ok_or_else(|| provider_setup_error("CardDAV base URL is required"))?;
+                    let auth = dav_auth(&auth_scheme, &creds)
+                        .map_err(|_| provider_setup_error("CardDAV credentials are incomplete"))?;
+                    std::sync::Arc::new(CardDavAdapter::new(reqwest::Client::new(), base, auth))
+                }
+                "google" => std::sync::Arc::new(GooglePeopleAdapter::new(
+                    creds["access_token"]
+                        .as_str()
+                        .ok_or_else(|| provider_setup_error("OAuth token is missing"))?,
+                )),
+                "graph" => std::sync::Arc::new(MicrosoftGraphAdapter::new(
+                    creds["access_token"]
+                        .as_str()
+                        .ok_or_else(|| provider_setup_error("OAuth token is missing"))?,
+                )),
+                _ => return Err(provider_setup_error("unsupported contact provider")),
             }
-        }
-        _ => {
-            return Err(AppError::Unprocessable(
-                "unsupported contact provider".into(),
-            ))
-        }
-    }
-    Ok(())
+        };
+    Ok(adapter)
 }
 
-async fn delete_remote(
-    db: &sqlx::SqlitePool,
+async fn managed_oauth_token(
     state: &AppState,
-    account_id: &str,
-    uid: &str,
-) -> Result<(), AppError> {
-    let (provider, base_url, auth_scheme, encrypted): (String, Option<String>, String, Vec<u8>) =
-        sqlx::query_as(
-            "SELECT type, base_url, auth_scheme, credentials_encrypted FROM contact_accounts WHERE id = ?",
-        )
-        .bind(account_id)
-        .fetch_one(db)
-        .await?;
-    let creds = decrypt_credentials(state, &encrypted).map_err(AppError::BadGateway)?;
-    match provider.as_str() {
-        "cardav" => {
-            let base =
-                base_url.ok_or_else(|| AppError::Unprocessable("base_url is required".into()))?;
-            let auth = dav_auth(&auth_scheme, &creds).map_err(AppError::BadGateway)?;
-            contact_sync::delete_carddav_contact(&carddav_href(&base, uid), &auth)
-                .await
-                .map_err(AppError::BadGateway)?;
-        }
-        "graph" => {
-            let token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| AppError::BadGateway("access_token is required".into()))?;
-            contact_sync::graph_delete_contact(token, uid)
-                .await
-                .map_err(AppError::BadGateway)?;
-        }
-        "google" => {
-            let token = creds["access_token"]
-                .as_str()
-                .ok_or_else(|| AppError::BadGateway("access_token is required".into()))?;
-            contact_sync::google_delete_contact(token, uid)
-                .await
-                .map_err(AppError::BadGateway)?;
-        }
-        _ => {
-            return Err(AppError::Unprocessable(
-                "unsupported contact provider".into(),
-            ))
-        }
+    db: &sqlx::SqlitePool,
+    mailbox_id: &str,
+) -> Result<String, ProviderError> {
+    crate::oauth_tokens::fresh_contact_access_token(&state.credential_key, db, mailbox_id)
+        .await
+        .map_err(|error| ProviderError {
+            category: match error {
+                crate::oauth_tokens::ContactTokenError::ConsentRequired => {
+                    ProviderErrorCategory::ConsentRequired
+                }
+                crate::oauth_tokens::ContactTokenError::ReauthenticationRequired => {
+                    ProviderErrorCategory::ReauthenticationRequired
+                }
+                crate::oauth_tokens::ContactTokenError::NotOAuth => {
+                    ProviderErrorCategory::Authentication
+                }
+                crate::oauth_tokens::ContactTokenError::Temporary => {
+                    ProviderErrorCategory::Transport
+                }
+            },
+            message: "contact authorization is not currently available".to_owned(),
+            retry_after_seconds: None,
+        })
+}
+
+fn provider_setup_error(message: impl Into<String>) -> ProviderError {
+    ProviderError {
+        category: ProviderErrorCategory::InvalidResponse,
+        message: message.into(),
+        retry_after_seconds: None,
     }
-    Ok(())
+}
+
+fn provider_app_error(error: ProviderError) -> AppError {
+    match error.category {
+        ProviderErrorCategory::Conflict => AppError::Conflict(error.message),
+        ProviderErrorCategory::ConsentRequired
+        | ProviderErrorCategory::ReauthenticationRequired
+        | ProviderErrorCategory::Authentication => AppError::Unprocessable(error.message),
+        _ => AppError::BadGateway(error.message),
+    }
+}
+
+fn provider_discovery_app_error(error: ProviderError) -> AppError {
+    match error.category {
+        ProviderErrorCategory::ConsentRequired
+        | ProviderErrorCategory::ReauthenticationRequired
+        | ProviderErrorCategory::Authentication
+        | ProviderErrorCategory::Unavailable
+        | ProviderErrorCategory::InvalidResponse => AppError::Unprocessable(error.message),
+        _ => provider_app_error(error),
+    }
+}
+
+fn cache_error(_error: sqlx::Error) -> ProviderError {
+    ProviderError {
+        category: ProviderErrorCategory::Unavailable,
+        message: "contact cache operation failed".to_owned(),
+        retry_after_seconds: None,
+    }
 }
 
 async fn fetch_account(db: &sqlx::SqlitePool, id: &str) -> Result<ContactAccount, AppError> {
     sqlx::query_as(
-        "SELECT id, display_name, type AS account_type, base_url, auth_scheme, sync_token, last_synced_at, sync_status, sync_error \
+        "SELECT id, display_name, type AS account_type, base_url, auth_scheme, sync_token, last_synced_at, sync_status, sync_error, \
+                email_account_id, management_mode, capability_state, capability_reason, enabled, cache_retained \
          FROM contact_accounts WHERE id = ?",
     )
     .bind(id)
@@ -808,7 +1015,239 @@ async fn fetch_contact(db: &sqlx::SqlitePool, id: &str) -> Result<Contact, AppEr
     .fetch_optional(db)
     .await?
     .ok_or(AppError::NotFound)?;
-    row_to_contact(row)
+    enrich_contact(db, row_to_contact(row)?).await
+}
+
+async fn fetch_contact_by_remote_id(
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+    remote_id: &str,
+) -> Result<Contact, AppError> {
+    let row: ContactRow = sqlx::query_as(&format!(
+        "SELECT {SELECT_CONTACT} FROM contacts WHERE account_id = ? AND uid = ?"
+    ))
+    .bind(account_id)
+    .bind(remote_id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    enrich_contact(db, row_to_contact(row)?).await
+}
+
+async fn contact_page(
+    db: &sqlx::SqlitePool,
+    query: &ContactQuery,
+    autocomplete: bool,
+) -> Result<ContactPage, AppError> {
+    let term = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|term| !term.is_empty());
+    let like = term.map(|term| format!("%{term}%"));
+    let prefix = term.map(|term| format!("{term}%"));
+    let limit = query
+        .limit
+        .unwrap_or(if autocomplete { 10 } else { 50 })
+        .clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let where_clause = "(? IS NULL OR c.account_id = ?)
+        AND (? IS NULL OR ca.email_account_id = ?)
+        AND (? IS NULL OR c.book_id = ?)
+        AND (? IS NULL OR c.display_name LIKE ? OR c.given_name LIKE ?
+             OR c.family_name LIKE ? OR c.emails LIKE ? OR c.org LIKE ?)";
+    let sql = format!(
+        "SELECT {SELECT_CONTACT_QUALIFIED}
+         FROM contacts AS c
+         JOIN contact_accounts AS ca ON ca.id = c.account_id
+         WHERE {where_clause}
+         ORDER BY
+           CASE WHEN ? IS NOT NULL AND ca.email_account_id = ? THEN 0 ELSE 1 END,
+           CASE WHEN ? IS NOT NULL AND c.display_name LIKE ? THEN 0
+                WHEN ? IS NOT NULL AND c.given_name LIKE ? THEN 1
+                WHEN ? IS NOT NULL AND c.family_name LIKE ? THEN 2
+                WHEN ? IS NOT NULL AND c.emails LIKE ? THEN 3 ELSE 4 END,
+           c.display_name COLLATE NOCASE ASC, c.id ASC
+         LIMIT ? OFFSET ?"
+    );
+    let rows: Vec<ContactRow> = sqlx::query_as(&sql)
+        .bind(query.account_id.as_deref())
+        .bind(query.account_id.as_deref())
+        .bind(query.mailbox_id.as_deref())
+        .bind(query.mailbox_id.as_deref())
+        .bind(query.book_id.as_deref())
+        .bind(query.book_id.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(query.mailbox_id.as_deref())
+        .bind(query.mailbox_id.as_deref())
+        .bind(prefix.as_deref())
+        .bind(prefix.as_deref())
+        .bind(prefix.as_deref())
+        .bind(prefix.as_deref())
+        .bind(prefix.as_deref())
+        .bind(prefix.as_deref())
+        .bind(prefix.as_deref())
+        .bind(prefix.as_deref())
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(db)
+        .await?;
+    let count_sql = format!(
+        "SELECT count(*) FROM contacts AS c
+         JOIN contact_accounts AS ca ON ca.id = c.account_id
+         WHERE {where_clause}"
+    );
+    let total: i64 = sqlx::query_scalar(&count_sql)
+        .bind(query.account_id.as_deref())
+        .bind(query.account_id.as_deref())
+        .bind(query.mailbox_id.as_deref())
+        .bind(query.mailbox_id.as_deref())
+        .bind(query.book_id.as_deref())
+        .bind(query.book_id.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .bind(like.as_deref())
+        .fetch_one(db)
+        .await?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(enrich_contact(db, row_to_contact(row)?).await?);
+    }
+    Ok(ContactPage {
+        items,
+        total,
+        limit,
+        offset,
+    })
+}
+
+async fn enrich_contact(db: &sqlx::SqlitePool, mut contact: Contact) -> Result<Contact, AppError> {
+    let source: (Option<String>, String, bool, bool) = sqlx::query_as(
+        "SELECT email_account_id, capability_state, enabled,
+                CASE WHEN enabled = 1 AND capability_state IN ('idle', 'pending') THEN 1 ELSE 0 END
+         FROM contact_accounts WHERE id = ?",
+    )
+    .bind(&contact.account_id)
+    .fetch_one(db)
+    .await?;
+    let book_writable: bool = if let Some(book_id) = contact.book_id.as_deref() {
+        sqlx::query_scalar("SELECT is_writable FROM contact_books WHERE id = ?")
+            .bind(book_id)
+            .fetch_optional(db)
+            .await?
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let groups: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT g.id, g.name, g.remote_id
+         FROM contact_groups AS g
+         JOIN contact_group_members AS membership ON membership.group_id = g.id
+         WHERE membership.contact_id = ? ORDER BY g.name COLLATE NOCASE",
+    )
+    .bind(&contact.id)
+    .fetch_all(db)
+    .await?;
+    contact.source_email_account_id = source.0;
+    contact.source_state = source.1;
+    contact.source_enabled = source.2;
+    contact.source_writable = source.3 && book_writable;
+    contact.groups = groups
+        .into_iter()
+        .map(|(id, name, remote_id)| ContactGroup {
+            id,
+            name,
+            remote_id,
+        })
+        .collect();
+    Ok(contact)
+}
+
+struct WritableBook {
+    identity: contact_sync::ContactBookIdentity,
+}
+
+async fn writable_book(
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+    requested_book_id: Option<&str>,
+) -> Result<WritableBook, AppError> {
+    let row: Option<(String, String, String, Option<String>, bool, bool, String)> =
+        if let Some(id) = requested_book_id {
+            sqlx::query_as(
+                "SELECT id, remote_id, display_name, parent_remote_id, is_default, is_writable,
+                    provider_metadata
+             FROM contact_books WHERE id = ? AND account_id = ?",
+            )
+            .bind(id)
+            .bind(account_id)
+            .fetch_optional(db)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, remote_id, display_name, parent_remote_id, is_default, is_writable,
+                    provider_metadata
+             FROM contact_books
+             WHERE account_id = ? AND is_writable = 1
+             ORDER BY is_default DESC, display_name COLLATE NOCASE ASC LIMIT 1",
+            )
+            .bind(account_id)
+            .fetch_optional(db)
+            .await?
+        };
+    let (_id, remote_id, display_name, parent_remote_id, is_default, is_writable, metadata) =
+        row.ok_or_else(|| AppError::Unprocessable("no writable contact book is available".into()))?;
+    if !is_writable {
+        return Err(AppError::Conflict(
+            "the selected contact book is read-only".into(),
+        ));
+    }
+    Ok(WritableBook {
+        identity: contact_sync::ContactBookIdentity {
+            remote_id,
+            display_name,
+            parent_remote_id,
+            is_default,
+            is_writable,
+            provider_metadata: serde_json::from_str(&metadata).unwrap_or(Value::Null),
+        },
+    })
+}
+
+async fn contact_book(
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+    book_id: &str,
+) -> Result<WritableBook, AppError> {
+    let row: Option<(String, String, String, Option<String>, bool, bool, String)> = sqlx::query_as(
+        "SELECT id, remote_id, display_name, parent_remote_id, is_default, is_writable,
+                provider_metadata
+         FROM contact_books WHERE id = ? AND account_id = ?",
+    )
+    .bind(book_id)
+    .bind(account_id)
+    .fetch_optional(db)
+    .await?;
+    let (_id, remote_id, display_name, parent_remote_id, is_default, is_writable, metadata) =
+        row.ok_or(AppError::NotFound)?;
+    Ok(WritableBook {
+        identity: contact_sync::ContactBookIdentity {
+            remote_id,
+            display_name,
+            parent_remote_id,
+            is_default,
+            is_writable,
+            provider_metadata: serde_json::from_str(&metadata).unwrap_or(Value::Null),
+        },
+    })
 }
 
 fn row_to_contact(row: ContactRow) -> Result<Contact, AppError> {
@@ -829,6 +1268,16 @@ fn row_to_contact(row: ContactRow) -> Result<Contact, AppError> {
         photo_blob_key: row.photo_blob_key,
         raw_vcard: row.raw_vcard,
         synced_at: row.synced_at,
+        book_id: row.book_id,
+        remote_version: row.remote_version,
+        photo_reference: row.photo_reference,
+        photo_version: row.photo_version,
+        photo_content_type: row.photo_content_type,
+        source_email_account_id: None,
+        source_state: "idle".to_owned(),
+        source_enabled: true,
+        source_writable: false,
+        groups: Vec::new(),
     })
 }
 
@@ -871,11 +1320,6 @@ fn dav_auth(auth_scheme: &str, creds: &Value) -> Result<contact_sync::DavAuth, S
         username: creds["username"].as_str().unwrap_or_default().to_owned(),
         password: creds["password"].as_str().unwrap_or_default().to_owned(),
     })
-}
-
-fn carddav_href(base: &str, uid: &str) -> String {
-    let safe_uid = uid.replace(['/', '\\', '?', '#'], "-");
-    format!("{}/{}.vcf", base.trim_end_matches('/'), safe_uid)
 }
 
 async fn photo_from_vcard(raw_vcard: &str) -> Result<Option<(Bytes, String)>, AppError> {
@@ -928,4 +1372,175 @@ fn binary_response(bytes: Bytes, content_type: &str) -> Response {
         Body::from(bytes),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn database() -> sqlx::SqlitePool {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::migrations::run_mail_migrations(&db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO email_accounts
+             (id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme,
+              smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted)
+             VALUES ('mail-a', 'A', 'a@example.com', 'imap', 993, 'plain', 'smtp', 465, 'plain', X'00'),
+                    ('mail-b', 'B', 'b@example.com', 'imap', 993, 'plain', 'smtp', 465, 'plain', X'00');
+             INSERT INTO contact_accounts
+             (id, display_name, type, credentials_encrypted, email_account_id, management_mode,
+              capability_state, enabled)
+             VALUES ('source-a', 'A contacts', 'cardav', X'', 'mail-a', 'mailbox', 'idle', 1),
+                    ('source-b', 'B contacts', 'cardav', X'', 'mail-b', 'mailbox', 'disabled', 0);
+             INSERT INTO contact_books
+             (id, account_id, remote_id, display_name, is_default, is_writable)
+             VALUES ('book-a', 'source-a', 'remote-a', 'Personal', 1, 1),
+                    ('book-b', 'source-b', 'remote-b', 'Work', 1, 1);
+             INSERT INTO contacts
+             (id, account_id, book_id, uid, display_name, emails)
+             VALUES ('contact-a', 'source-a', 'book-a', 'a', 'Alice', '[{\"value\":\"alice@example.com\"}]'),
+                    ('contact-b', 'source-b', 'book-b', 'b', 'Bob', '[{\"value\":\"bob@example.com\"}]');
+             INSERT INTO contact_groups (id, account_id, book_id, name, remote_id)
+             VALUES ('friends', 'source-a', 'book-a', 'Friends', 'group/friends');
+             INSERT INTO contact_group_members (contact_id, group_id)
+             VALUES ('contact-a', 'friends')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn deterministic_contact_sync_failures_pause_automatic_retries() {
+        for category in [
+            ProviderErrorCategory::ConsentRequired,
+            ProviderErrorCategory::ReauthenticationRequired,
+            ProviderErrorCategory::Authentication,
+            ProviderErrorCategory::Unavailable,
+            ProviderErrorCategory::InvalidResponse,
+        ] {
+            assert!(pauses_contact_sync(category));
+        }
+
+        for category in [
+            ProviderErrorCategory::Transport,
+            ProviderErrorCategory::RateLimited,
+            ProviderErrorCategory::Conflict,
+            ProviderErrorCategory::CursorExpired,
+        ] {
+            assert!(!pauses_contact_sync(category));
+        }
+    }
+
+    #[test]
+    fn discovery_reports_correctable_provider_failures_as_unprocessable() {
+        let correctable = provider_discovery_app_error(ProviderError {
+            category: ProviderErrorCategory::Unavailable,
+            message: "CardDAV TLS verification failed".to_owned(),
+            retry_after_seconds: None,
+        })
+        .into_response();
+        assert_eq!(correctable.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let transient = provider_discovery_app_error(ProviderError {
+            category: ProviderErrorCategory::Transport,
+            message: "CardDAV server could not be reached".to_owned(),
+            retry_after_seconds: None,
+        })
+        .into_response();
+        assert_eq!(transient.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn contact_page_filters_by_mailbox_and_returns_stable_counts_and_groups() {
+        let db = database().await;
+        let page = contact_page(
+            &db,
+            &ContactQuery {
+                q: Some("ali".into()),
+                account_id: None,
+                mailbox_id: Some("mail-a".into()),
+                book_id: Some("book-a".into()),
+                limit: Some(20),
+                offset: Some(0),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].display_name.as_deref(), Some("Alice"));
+        assert_eq!(page.items[0].groups[0].name, "Friends");
+        assert!(page.items[0].source_writable);
+    }
+
+    #[tokio::test]
+    async fn retained_disabled_cache_is_visible_but_read_only() {
+        let db = database().await;
+        let page = contact_page(
+            &db,
+            &ContactQuery {
+                q: None,
+                account_id: Some("source-b".into()),
+                mailbox_id: None,
+                book_id: None,
+                limit: Some(20),
+                offset: Some(0),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].source_state, "disabled");
+        assert!(!page.items[0].source_writable);
+    }
+
+    #[tokio::test]
+    async fn autocomplete_prefers_mailbox_context_and_user_databases_are_isolated() {
+        let first_user = database().await;
+        let second_user = database().await;
+        sqlx::query(
+            "UPDATE contacts SET display_name = 'Alex B' WHERE id = 'contact-b';
+             UPDATE contacts SET display_name = 'Alex A' WHERE id = 'contact-a'",
+        )
+        .execute(&first_user)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM contacts WHERE id = 'contact-a'")
+            .execute(&second_user)
+            .await
+            .unwrap();
+        let page = contact_page(
+            &first_user,
+            &ContactQuery {
+                q: Some("Alex".into()),
+                account_id: None,
+                mailbox_id: Some("mail-b".into()),
+                book_id: None,
+                limit: Some(10),
+                offset: Some(0),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.items[0].source_email_account_id.as_deref(),
+            Some("mail-b")
+        );
+
+        let isolated_count: i64 = sqlx::query_scalar("SELECT count(*) FROM contacts")
+            .fetch_one(&second_user)
+            .await
+            .unwrap();
+        assert_eq!(isolated_count, 1);
+    }
 }

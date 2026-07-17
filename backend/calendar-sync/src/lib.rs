@@ -1410,10 +1410,8 @@ fn calendars_with_resourcetype(xml: &str, rtype: &[u8]) -> Vec<DiscoveredCalenda
                     buf.clear();
                 }
             }
-            Ok(Event::Empty(e)) => {
-                if in_rtype > 0 && local_name(e.name().as_ref()) == rtype {
-                    matched = true;
-                }
+            Ok(Event::Empty(e)) if in_rtype > 0 && local_name(e.name().as_ref()) == rtype => {
+                matched = true;
             }
             Ok(Event::Text(e)) if in_href || text_prop.is_some() => {
                 if let Ok(t) = e.unescape() {

@@ -762,14 +762,19 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 name = "contact-sync"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "db",
  "mailquill-core",
  "quick-xml",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "vcard4",
 ]
 

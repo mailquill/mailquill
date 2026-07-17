@@ -1,5 +1,3 @@
-import { useRef } from 'react'
-
 interface PaneResizerProps {
   width: number
   min: number
@@ -15,16 +13,12 @@ interface PaneResizerProps {
  * otherwise swallow the move events).
  */
 export function PaneResizer({ width, min, max, onChange, label }: PaneResizerProps) {
-  // Keep the latest width without re-binding listeners mid-drag.
-  const widthRef = useRef(width)
-  widthRef.current = width
-
   function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault()
     const el = e.currentTarget
     el.setPointerCapture(e.pointerId)
     const startX = e.clientX
-    const startWidth = widthRef.current
+    const startWidth = width
 
     const move = (ev: PointerEvent) => {
       onChange(Math.min(max, Math.max(min, startWidth + ev.clientX - startX)))

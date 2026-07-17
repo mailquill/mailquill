@@ -116,6 +116,8 @@ function FolderItem({
       ) : (
         <span className="size-4 shrink-0" />
       )}
+      {/* folderIcon returns one of a fixed set of module-level Lucide components. */}
+      {/* eslint-disable-next-line react-hooks/static-components */}
       <Icon className={cn('size-4 shrink-0', isActive ? 'text-[#f8fafc]' : 'text-[#64748b]')} />
       <span className="flex-1 truncate">{label}</span>
       {folder.unread_count > 0 && (

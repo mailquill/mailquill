@@ -14,6 +14,10 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use url::Url;
 use vcard4::property::Property;
 
+pub mod adapters;
+pub mod orchestration;
+pub mod repository;
+
 #[derive(Clone)]
 pub enum DavAuth {
     Basic { username: String, password: String },
@@ -24,11 +28,15 @@ pub enum DavAuth {
 pub struct LabeledValue {
     pub label: Option<String>,
     pub value: String,
+    #[serde(default)]
+    pub primary: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PostalAddress {
     pub label: Option<String>,
+    #[serde(default)]
+    pub primary: bool,
     pub street: Option<String>,
     pub locality: Option<String>,
     pub region: Option<String>,
@@ -51,6 +59,113 @@ pub struct ParsedContact {
     pub photo_reference: Option<String>,
     pub raw_vcard: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactProvider {
+    CardDav,
+    Google,
+    Graph,
+}
+
+impl ContactProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CardDav => "cardav",
+            Self::Google => "google",
+            Self::Graph => "graph",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactSourceIdentity {
+    pub source_id: String,
+    pub email_account_id: Option<String>,
+    pub provider: ContactProvider,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactBookIdentity {
+    pub remote_id: String,
+    pub display_name: String,
+    pub parent_remote_id: Option<String>,
+    pub is_default: bool,
+    pub is_writable: bool,
+    #[serde(default)]
+    pub provider_metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePhoto {
+    pub reference: String,
+    pub version: Option<String>,
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMembership {
+    pub remote_group_id: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteContact {
+    pub book_remote_id: String,
+    pub remote_id: String,
+    pub remote_version: Option<String>,
+    pub contact: ParsedContact,
+    pub photo: Option<RemotePhoto>,
+    #[serde(default)]
+    pub groups: Vec<GroupMembership>,
+    #[serde(default)]
+    pub provider_metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactTombstone {
+    pub book_remote_id: String,
+    pub remote_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContactChangePage {
+    #[serde(default)]
+    pub upserts: Vec<RemoteContact>,
+    #[serde(default)]
+    pub tombstones: Vec<ContactTombstone>,
+    pub continuation: Option<String>,
+    pub final_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderErrorCategory {
+    ConsentRequired,
+    ReauthenticationRequired,
+    CursorExpired,
+    Conflict,
+    RateLimited,
+    Authentication,
+    Transport,
+    InvalidResponse,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderError {
+    pub category: ProviderErrorCategory,
+    pub message: String,
+    pub retry_after_seconds: Option<u64>,
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProviderError {}
 
 #[derive(Debug, Clone)]
 pub struct CardDavContact {
@@ -606,6 +721,7 @@ pub fn parse_vcard(raw: &str) -> Option<ParsedContact> {
                     .map(|p| LabeledValue {
                         label: label_from_parameters(p.parameters.as_ref()),
                         value: p.value.clone(),
+                        primary: false,
                     })
                     .collect();
             }
@@ -616,6 +732,7 @@ pub fn parse_vcard(raw: &str) -> Option<ParsedContact> {
                     .map(|p| LabeledValue {
                         label: label_from_parameters(p.parameters()),
                         value: p.to_string(),
+                        primary: false,
                     })
                     .collect();
             }
@@ -625,6 +742,7 @@ pub fn parse_vcard(raw: &str) -> Option<ParsedContact> {
                     .iter()
                     .map(|p| PostalAddress {
                         label: label_from_parameters(p.parameters.as_ref()),
+                        primary: false,
                         street: p.value.street_address.clone(),
                         locality: p.value.locality.clone(),
                         region: p.value.region.clone(),
@@ -729,6 +847,7 @@ fn graph_contact(value: &Value) -> ParsedContact {
             Some(LabeledValue {
                 label: email["name"].as_str().map(str::to_owned),
                 value: address.to_owned(),
+                primary: false,
             })
         })
         .collect();
@@ -743,6 +862,7 @@ fn graph_contact(value: &Value) -> ParsedContact {
                     Some(LabeledValue {
                         label: Some(field.trim_end_matches("Phones").to_owned()),
                         value: phone.as_str()?.to_owned(),
+                        primary: false,
                     })
                 })
         })
@@ -773,6 +893,7 @@ fn google_contact(value: &Value) -> ParsedContact {
             Some(LabeledValue {
                 label: email["type"].as_str().map(str::to_owned),
                 value: email["value"].as_str()?.to_owned(),
+                primary: email["metadata"]["primary"].as_bool().unwrap_or(false),
             })
         })
         .collect();
@@ -784,6 +905,7 @@ fn google_contact(value: &Value) -> ParsedContact {
             Some(LabeledValue {
                 label: phone["type"].as_str().map(str::to_owned),
                 value: phone["value"].as_str()?.to_owned(),
+                primary: phone["metadata"]["primary"].as_bool().unwrap_or(false),
             })
         })
         .collect();
@@ -793,6 +915,7 @@ fn google_contact(value: &Value) -> ParsedContact {
         .flatten()
         .map(|address| PostalAddress {
             label: address["type"].as_str().map(str::to_owned),
+            primary: address["metadata"]["primary"].as_bool().unwrap_or(false),
             street: address["streetAddress"].as_str().map(str::to_owned),
             locality: address["city"].as_str().map(str::to_owned),
             region: address["region"].as_str().map(str::to_owned),
@@ -917,12 +1040,21 @@ fn parse_vcard_lines(raw: &str) -> ParsedContact {
                 contact.family_name = optional_string(parts.next().unwrap_or_default());
                 contact.given_name = optional_string(parts.next().unwrap_or_default());
             }
-            "EMAIL" => contact.emails.push(LabeledValue { label, value }),
-            "TEL" => contact.phones.push(LabeledValue { label, value }),
+            "EMAIL" => contact.emails.push(LabeledValue {
+                label,
+                value,
+                primary: false,
+            }),
+            "TEL" => contact.phones.push(LabeledValue {
+                label,
+                value,
+                primary: false,
+            }),
             "ADR" => {
                 let parts: Vec<&str> = value.split(';').collect();
                 contact.addresses.push(PostalAddress {
                     label,
+                    primary: false,
                     street: parts.get(2).and_then(|v| optional_string(v)),
                     locality: parts.get(3).and_then(|v| optional_string(v)),
                     region: parts.get(4).and_then(|v| optional_string(v)),
@@ -1024,12 +1156,10 @@ fn extract_texts(xml: &str, target: &[u8]) -> Vec<String> {
     let mut buf = String::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e)) => {
-                if local_name(e.name().as_ref()) == target {
-                    depth += 1;
-                    if depth == 1 {
-                        buf.clear();
-                    }
+            Ok(Event::Start(e)) if local_name(e.name().as_ref()) == target => {
+                depth += 1;
+                if depth == 1 {
+                    buf.clear();
                 }
             }
             Ok(Event::Text(e)) if depth > 0 => {
@@ -1040,12 +1170,10 @@ fn extract_texts(xml: &str, target: &[u8]) -> Vec<String> {
             Ok(Event::CData(e)) if depth > 0 => {
                 buf.push_str(&String::from_utf8_lossy(&e.into_inner()));
             }
-            Ok(Event::End(e)) => {
-                if local_name(e.name().as_ref()) == target && depth > 0 {
-                    depth -= 1;
-                    if depth == 0 {
-                        out.push(std::mem::take(&mut buf));
-                    }
+            Ok(Event::End(e)) if local_name(e.name().as_ref()) == target && depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(std::mem::take(&mut buf));
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -1118,10 +1246,8 @@ fn first_href_with_resourcetype(xml: &str, rtype: &[u8]) -> Option<String> {
                     matched = true;
                 }
             }
-            Ok(Event::Empty(e)) => {
-                if in_rtype > 0 && local_name(e.name().as_ref()) == rtype {
-                    matched = true;
-                }
+            Ok(Event::Empty(e)) if in_rtype > 0 && local_name(e.name().as_ref()) == rtype => {
+                matched = true;
             }
             Ok(Event::Text(e)) if in_href => {
                 if let Ok(t) = e.unescape() {
@@ -1268,4 +1394,37 @@ fn unfold(raw: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod manager_tests {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    use super::ContactSyncManager;
+
+    #[tokio::test]
+    async fn stopping_an_account_cancels_its_running_task() {
+        let manager = ContactSyncManager::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        manager
+            .start_account("source".into(), async move {
+                struct DropSignal(Arc<AtomicBool>);
+                impl Drop for DropSignal {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _signal = DropSignal(task_dropped);
+                std::future::pending::<()>().await;
+            })
+            .await;
+        tokio::task::yield_now().await;
+        manager.stop_account("source").await;
+        tokio::task::yield_now().await;
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 }

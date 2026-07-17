@@ -31,6 +31,8 @@ pub struct OAuthStartQuery {
     account_id: Option<String>,
     /// Return to the calendar after consent and activate Google Calendar sync.
     calendar: Option<bool>,
+    /// Request and enable the mailbox contact capability, preserving return context.
+    contacts: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -41,8 +43,19 @@ struct OAuthProfile {
 
 /// Temporary PKCE verifier store (in-memory, keyed by CSRF state token).
 /// Production use: persist in Redis or app DB.
-pub type PkceStore =
-    Mutex<HashMap<String, (String, PkceCodeVerifier, String, Option<String>, bool)>>;
+pub type PkceStore = Mutex<
+    HashMap<
+        String,
+        (
+            String,
+            PkceCodeVerifier,
+            String,
+            Option<String>,
+            bool,
+            Option<bool>,
+        ),
+    >,
+>;
 
 pub fn new_pkce_store() -> PkceStore {
     Mutex::new(HashMap::new())
@@ -76,6 +89,7 @@ fn provider_scopes(provider: &str) -> Vec<Scope> {
             Scope::new("https://mail.google.com/".into()),
             Scope::new("https://www.googleapis.com/auth/calendar.events".into()),
             Scope::new("https://www.googleapis.com/auth/calendar.calendarlist.readonly".into()),
+            Scope::new("https://www.googleapis.com/auth/contacts".into()),
             Scope::new("email".into()),
             Scope::new("profile".into()),
         ],
@@ -85,6 +99,7 @@ fn provider_scopes(provider: &str) -> Vec<Scope> {
         PROVIDER_MICROSOFT => vec![
             Scope::new("https://graph.microsoft.com/Mail.ReadWrite".into()),
             Scope::new("https://graph.microsoft.com/Mail.Send".into()),
+            Scope::new("https://graph.microsoft.com/Contacts.ReadWrite".into()),
             Scope::new("https://graph.microsoft.com/User.Read".into()),
             Scope::new("offline_access".into()),
             Scope::new("email".into()),
@@ -179,6 +194,7 @@ pub async fn oauth_start(
             user.0.clone(),
             query.account_id,
             query.calendar.unwrap_or(false),
+            query.contacts,
         ),
     );
 
@@ -191,12 +207,18 @@ pub async fn oauth_callback(
     Query(params): Query<OAuthCallbackQuery>,
     axum::extract::Extension(pkce_store): axum::extract::Extension<std::sync::Arc<PkceStore>>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (stored_provider, pkce_verifier, user_id, reconnect_account_id, calendar_requested) =
-        pkce_store
-            .lock()
-            .await
-            .remove(&params.state)
-            .ok_or(AppError::Unauthorized)?;
+    let (
+        stored_provider,
+        pkce_verifier,
+        user_id,
+        reconnect_account_id,
+        calendar_requested,
+        contacts_requested,
+    ) = pkce_store
+        .lock()
+        .await
+        .remove(&params.state)
+        .ok_or(AppError::Unauthorized)?;
 
     if stored_provider != provider {
         return Err(AppError::Unauthorized);
@@ -220,6 +242,20 @@ pub async fn oauth_callback(
             .expires_in()
             .map(|d| d.as_secs() as i64)
             .unwrap_or(3600);
+    let granted_scopes = token_result
+        .scopes()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .map(|scope| scope.as_str().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            provider_scopes(&provider)
+                .into_iter()
+                .map(|scope| scope.as_str().to_owned())
+                .collect()
+        });
 
     let profile = fetch_oauth_profile(&provider, &access_token).await?;
     crate::validate::email("oauth email", &profile.email)?;
@@ -232,6 +268,8 @@ pub async fn oauth_callback(
         "oauth_access_token": access_token,
         "oauth_refresh_token": refresh_token,
         "oauth_expires_at": expires_at,
+        "oauth_granted_scopes": granted_scopes,
+        "oauth_reauth_required": false,
         "provider": provider,
     });
     let creds_bytes = serde_json::to_vec(&creds).unwrap();
@@ -349,6 +387,25 @@ pub async fn oauth_callback(
         }
     }
 
+    if let Ok(capability) = crate::contact_reconcile::reconcile_mailbox_contact_source(
+        &user_db,
+        &state.credential_key,
+        &account_id,
+        Some(contacts_requested.unwrap_or(true)),
+    )
+    .await
+    {
+        if capability.enabled && capability.state == "pending" {
+            crate::routes::contacts::spawn_contact_sync_task(
+                state.clone(),
+                user_id.clone(),
+                capability.source_id,
+                true,
+            )
+            .await;
+        }
+    }
+
     state
         .sync_manager
         .start_account(
@@ -360,7 +417,9 @@ pub async fn oauth_callback(
 
     let redirect_base =
         std::env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-    let destination = if calendar_requested && provider == PROVIDER_GOOGLE {
+    let destination = if contacts_requested.is_some() {
+        format!("/mail/accounts?connected={account_id}&contacts=complete")
+    } else if calendar_requested && provider == PROVIDER_GOOGLE {
         format!("/mail/calendar?connected={account_id}")
     } else {
         format!("/mail/accounts?connected={account_id}")

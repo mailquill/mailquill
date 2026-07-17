@@ -5,6 +5,7 @@
 //! consumes these modules via the `api::` crate path.
 
 pub mod config;
+pub mod contact_reconcile;
 pub mod error;
 pub mod imap_utf7;
 pub mod middleware;

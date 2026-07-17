@@ -96,6 +96,12 @@ export function useMailNotifications(enabled: boolean) {
         }
       })
 
+      source.addEventListener('contact_sync', () => {
+        queryClient.invalidateQueries({ queryKey: ['accounts'] })
+        queryClient.invalidateQueries({ queryKey: ['contact-accounts'] })
+        queryClient.invalidateQueries({ queryKey: ['contacts'] })
+      })
+
       source.onerror = () => {
         // Token may have expired or the connection dropped; reconnect with a
         // fresh token after a short delay.

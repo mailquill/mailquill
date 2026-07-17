@@ -10,6 +10,96 @@ use tracing::{info, warn};
 
 const EXPIRY_SLACK_SECS: i64 = 300;
 pub const REAUTH_REQUIRED_PREFIX: &str = "oauth_reauthentication_required:";
+pub const GOOGLE_CONTACTS_SCOPE: &str = "https://www.googleapis.com/auth/contacts";
+pub const MICROSOFT_CONTACTS_SCOPE: &str = "https://graph.microsoft.com/Contacts.ReadWrite";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactGrantState {
+    Ready,
+    ConsentRequired,
+    ReauthenticationRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContactTokenError {
+    ConsentRequired,
+    ReauthenticationRequired,
+    NotOAuth,
+    Temporary,
+}
+
+pub fn contact_grant_state(credentials: &serde_json::Value) -> ContactGrantState {
+    if credentials["oauth_reauth_required"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        return ContactGrantState::ReauthenticationRequired;
+    }
+    let provider = credentials["provider"].as_str().unwrap_or_default();
+    let required = match provider {
+        "google" => GOOGLE_CONTACTS_SCOPE,
+        "microsoft" => MICROSOFT_CONTACTS_SCOPE,
+        _ => return ContactGrantState::ConsentRequired,
+    };
+    if granted_scopes(credentials)
+        .iter()
+        .any(|scope| scope.eq_ignore_ascii_case(required))
+    {
+        ContactGrantState::Ready
+    } else {
+        ContactGrantState::ConsentRequired
+    }
+}
+
+pub fn granted_scopes(credentials: &serde_json::Value) -> Vec<String> {
+    if let Some(scopes) = credentials["oauth_granted_scopes"].as_array() {
+        return scopes
+            .iter()
+            .filter_map(|scope| scope.as_str().map(str::to_owned))
+            .collect();
+    }
+    credentials["oauth_scope"]
+        .as_str()
+        .map(|scopes| scopes.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+pub async fn fresh_contact_access_token(
+    credential_key: &CredentialKey,
+    user_db: &SqlitePool,
+    account_id: &str,
+) -> Result<String, ContactTokenError> {
+    let encrypted: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT credentials_encrypted FROM email_accounts WHERE id = ?")
+            .bind(account_id)
+            .fetch_optional(user_db)
+            .await
+            .map_err(|_| ContactTokenError::Temporary)?;
+    let encrypted = encrypted.ok_or(ContactTokenError::NotOAuth)?;
+    let decrypted = credential_key
+        .decrypt(&encrypted)
+        .map_err(|_| ContactTokenError::Temporary)?;
+    let credentials: serde_json::Value =
+        serde_json::from_slice(&decrypted).map_err(|_| ContactTokenError::Temporary)?;
+    match contact_grant_state(&credentials) {
+        ContactGrantState::ConsentRequired => return Err(ContactTokenError::ConsentRequired),
+        ContactGrantState::ReauthenticationRequired => {
+            return Err(ContactTokenError::ReauthenticationRequired)
+        }
+        ContactGrantState::Ready => {}
+    }
+
+    fresh_access_token(credential_key, user_db, account_id)
+        .await
+        .map_err(|error| {
+            if is_reauth_required(&error) {
+                ContactTokenError::ReauthenticationRequired
+            } else {
+                ContactTokenError::Temporary
+            }
+        })?
+        .ok_or(ContactTokenError::NotOAuth)
+}
 
 /// Return a currently valid OAuth access token for the account, refreshing it
 /// first if it is (about to be) expired. `Ok(None)` for accounts without
@@ -66,6 +156,9 @@ pub async fn fresh_access_token(
             creds["oauth_expires_at"] = serde_json::json!(now + refreshed.expires_in);
             if let Some(rotated) = refreshed.refresh_token {
                 creds["oauth_refresh_token"] = serde_json::json!(rotated);
+            }
+            if let Some(scopes) = refreshed.scopes {
+                creds["oauth_granted_scopes"] = serde_json::json!(scopes);
             }
 
             let encrypted = credential_key
@@ -124,6 +217,7 @@ struct Refreshed {
     access_token: String,
     expires_in: i64,
     refresh_token: Option<String>,
+    scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -178,6 +272,12 @@ async fn refresh(provider: &str, refresh_token: &str) -> Result<Refreshed, Refre
             .to_owned(),
         expires_in: body["expires_in"].as_i64().unwrap_or(3600),
         refresh_token: body["refresh_token"].as_str().map(str::to_owned),
+        scopes: body["scope"].as_str().map(|scopes| {
+            scopes
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        }),
     })
 }
 
@@ -221,5 +321,34 @@ mod tests {
         );
 
         assert!(!error.invalid_grant);
+    }
+
+    #[test]
+    fn contact_grants_are_classified_without_exposing_tokens() {
+        let ready = serde_json::json!({
+            "provider": "google",
+            "oauth_granted_scopes": [GOOGLE_CONTACTS_SCOPE],
+            "oauth_access_token": "secret"
+        });
+        assert_eq!(contact_grant_state(&ready), ContactGrantState::Ready);
+
+        let missing = serde_json::json!({
+            "provider": "microsoft",
+            "oauth_granted_scopes": ["https://graph.microsoft.com/Mail.ReadWrite"]
+        });
+        assert_eq!(
+            contact_grant_state(&missing),
+            ContactGrantState::ConsentRequired
+        );
+
+        let revoked = serde_json::json!({
+            "provider": "google",
+            "oauth_granted_scopes": [GOOGLE_CONTACTS_SCOPE],
+            "oauth_reauth_required": true
+        });
+        assert_eq!(
+            contact_grant_state(&revoked),
+            ContactGrantState::ReauthenticationRequired
+        );
     }
 }

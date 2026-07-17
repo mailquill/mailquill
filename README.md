@@ -89,18 +89,20 @@ cargo run -p api
 
 For the full provider setup guide, including redirect URIs, scopes, and
 troubleshooting, see [docs/oauth-gmail-outlook.md](docs/oauth-gmail-outlook.md).
+Contact synchronization rollout, CardDAV/TLS behavior, states, and rollback are
+documented in [docs/contact-sync.md](docs/contact-sync.md).
 
 Google:
 
 1. Create an OAuth client in Google Cloud Console.
-2. Enable Gmail API access for the same project as the OAuth client.
+2. Enable Gmail API and People API access for the same project as the OAuth client.
 3. Add `{APP_BASE_URL}/api/auth/oauth/google/callback` as an authorized redirect URI.
 4. Configure `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`.
 
 Microsoft:
 
 1. Create an app registration in Microsoft Entra.
-2. Add delegated IMAP and SMTP permissions.
+2. Add delegated mail permissions and `Contacts.ReadWrite`.
 3. Add `{APP_BASE_URL}/api/auth/oauth/microsoft/callback` as a web redirect URI.
 4. Configure `MICROSOFT_OAUTH_CLIENT_ID` and `MICROSOFT_OAUTH_CLIENT_SECRET`.
 
@@ -112,6 +114,7 @@ The frontend starts OAuth through `/api/auth/oauth/:provider/start`; the backend
 cargo check
 
 cd frontend
+pnpm test
 pnpm lint
 pnpm build
 ```

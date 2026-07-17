@@ -8,12 +8,13 @@ import { useAuthStore } from '@/app/store'
 export function startOAuthRedirect(
   provider: 'google' | 'microsoft',
   accountId?: string,
-  destination?: 'calendar',
+  destination?: 'calendar' | 'contacts',
 ) {
   const token = useAuthStore.getState().accessToken
   if (!token) return
   const params = new URLSearchParams({ token })
   if (accountId) params.set('account_id', accountId)
   if (destination === 'calendar') params.set('calendar', 'true')
+  if (destination === 'contacts') params.set('contacts', 'true')
   window.location.assign(`/api/auth/oauth/${provider}/start?${params}`)
 }

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { X, AlertCircle } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
@@ -14,15 +14,21 @@ interface RecipientChipsProps {
   onChange: (next: string[]) => void
   accessory?: React.ReactNode
   autoFocus?: boolean
+  mailboxId?: string
 }
 
-export function RecipientChips({ label, value, onChange, accessory, autoFocus }: RecipientChipsProps) {
+export function RecipientChips({ label, value, onChange, accessory, autoFocus, mailboxId }: RecipientChipsProps) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState('')
   const [focused, setFocused] = useState(false)
+  const [activeSuggestion, setActiveSuggestion] = useState(0)
+  const suggestionListId = useId()
   const limit = useUiPrefs((s) => s.maxRecipients)
   const atLimit = value.length >= limit
-  const { data: suggestions = [] } = useContactSearch(focused ? draft : '')
+  const { data: suggestions = [] } = useContactSearch(focused ? draft : '', mailboxId)
+  const suggestionRows = suggestions.flatMap((contact) =>
+    contact.emails.slice(0, 2).map((email) => ({ contact, email })),
+  )
 
   function commit(raw: string) {
     const parts = raw
@@ -40,6 +46,22 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus }:
   }
 
   function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (suggestionRows.length && event.key === 'ArrowDown') {
+      event.preventDefault()
+      setActiveSuggestion((current) => (current + 1) % suggestionRows.length)
+      return
+    }
+    if (suggestionRows.length && event.key === 'ArrowUp') {
+      event.preventDefault()
+      setActiveSuggestion((current) => (current - 1 + suggestionRows.length) % suggestionRows.length)
+      return
+    }
+    if (suggestionRows.length && event.key === 'Enter') {
+      event.preventDefault()
+      const selected = suggestionRows[activeSuggestion] ?? suggestionRows[0]
+      selectSuggestion(selected.contact.display_name ?? '', selected.email.value)
+      return
+    }
     if (['Enter', ',', ';', ' ', 'Tab'].includes(event.key)) {
       if (draft.trim()) {
         event.preventDefault()
@@ -133,17 +155,23 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus }:
               }}
               placeholder={value.length ? '' : t('compose.placeholder')}
               className="w-full bg-transparent py-0.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+              role="combobox"
+              aria-expanded={focused && suggestionRows.length > 0}
+              aria-controls={suggestionListId}
+              aria-activedescendant={suggestionRows.length ? `${suggestionListId}-${activeSuggestion}` : undefined}
             />
-            {focused && draft.trim().length >= 2 && suggestions.length > 0 && (
-              <span className="absolute left-0 top-7 z-50 flex w-[320px] max-w-[80vw] flex-col overflow-hidden rounded-md border border-border bg-popover shadow-lg">
-                {suggestions.flatMap((contact) =>
-                  contact.emails.slice(0, 2).map((email) => (
+            {focused && draft.trim().length >= 2 && suggestionRows.length > 0 && (
+              <span id={suggestionListId} role="listbox" className="absolute left-0 top-7 z-50 flex w-[320px] max-w-[80vw] flex-col overflow-hidden rounded-md border border-border bg-popover shadow-lg">
+                {suggestionRows.map(({ contact, email }, index) => (
                     <button
                       key={`${contact.id}-${email.value}`}
+                      id={`${suggestionListId}-${index}`}
+                      role="option"
+                      aria-selected={index === activeSuggestion}
                       type="button"
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => selectSuggestion(contact.display_name ?? '', email.value)}
-                      className="flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent"
+                      className={cn('flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent', index === activeSuggestion && 'bg-accent')}
                     >
                       <span
                         className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold uppercase text-white"
@@ -158,8 +186,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus }:
                         <span className="block truncate font-mono text-xs text-muted-foreground">{email.value}</span>
                       </span>
                     </button>
-                  )),
-                )}
+                ))}
               </span>
             )}
           </span>

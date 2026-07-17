@@ -1,6 +1,6 @@
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from '@/shared/api'
-import type { Account, AccountAlias, Folder, SyncStatus } from '@/shared/types'
+import type { Account, AccountAlias, DiscoveredContactBook, Folder, SyncStatus } from '@/shared/types'
 
 export function useAccounts() {
   return useQuery({
@@ -85,7 +85,7 @@ export function useDeleteAccount() {
 export function useCreateAccount() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: unknown) => apiPost('/accounts', data),
+    mutationFn: (data: unknown) => apiPost<Account>('/accounts', data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['accounts'] }),
   })
 }
@@ -123,5 +123,40 @@ export function useSetFolderSync(accountId: string) {
 export function useTriggerSync() {
   return useMutation({
     mutationFn: (accountId: string) => apiPost(`/accounts/${accountId}/sync`),
+  })
+}
+
+export function useEnableMailboxContacts() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (accountId: string) => apiPost(`/accounts/${accountId}/contacts/enable`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['accounts'] })
+      qc.invalidateQueries({ queryKey: ['contact-accounts'] })
+    },
+  })
+}
+
+export function useDisableMailboxContacts() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ accountId, keepDownloadedContacts }: { accountId: string; keepDownloadedContacts: boolean }) =>
+      apiPost(`/accounts/${accountId}/contacts/disable`, {
+        keep_downloaded_contacts: keepDownloadedContacts,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['accounts'] })
+      qc.invalidateQueries({ queryKey: ['contact-accounts'] })
+      qc.invalidateQueries({ queryKey: ['contacts'] })
+    },
+  })
+}
+
+export function useDiscoverMailboxContacts() {
+  return useMutation({
+    mutationFn: ({ accountId, selectedBookRemoteIds }: { accountId: string; selectedBookRemoteIds?: string[] }) =>
+      apiPost<{ source_id: string; books: DiscoveredContactBook[] }>(`/accounts/${accountId}/contacts/discover`, {
+        selected_book_remote_ids: selectedBookRemoteIds,
+      }),
   })
 }

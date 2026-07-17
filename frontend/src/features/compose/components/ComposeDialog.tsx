@@ -102,7 +102,10 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
 
   const defaultFrom = identities.length ? defaultFromIdentity(initialState, identities) : ''
   const effectiveFrom = from || defaultFrom
-  const selectedIdentity = identities.find((identity) => identityKey(identity) === effectiveFrom) ?? identities[0]
+  // Accounts load asynchronously. Keep the empty state explicit so opening
+  // compose during bootstrap cannot dereference a non-existent sender.
+  const selectedIdentity: SenderIdentity | undefined =
+    identities.find((identity) => identityKey(identity) === effectiveFrom) ?? identities[0]
   const selectedAccount = selectedIdentity
     ? accounts.find((account) => account.id === selectedIdentity.accountId)
     : undefined
@@ -266,6 +269,7 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
             label={t('compose.to')}
             value={to}
             onChange={setTo}
+            mailboxId={selectedIdentity?.accountId}
             accessory={
               <div className="ml-auto flex gap-2 text-[12px] font-semibold text-[#2563eb]">
                 {!showCc && (
@@ -287,6 +291,7 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
               label={t('compose.cc')}
               value={cc}
               onChange={setCc}
+              mailboxId={selectedIdentity?.accountId}
               autoFocus
               accessory={
                 <button
@@ -307,6 +312,7 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
               label={t('compose.bcc')}
               value={bcc}
               onChange={setBcc}
+              mailboxId={selectedIdentity?.accountId}
               autoFocus
               accessory={
                 <button

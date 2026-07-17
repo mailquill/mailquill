@@ -204,6 +204,18 @@ async fn main() {
         )
         .route("/accounts/{id}/sync-dav", post(routes::dav::sync_dav))
         .route(
+            "/accounts/{id}/contacts/enable",
+            post(routes::contacts::enable_mailbox_contacts),
+        )
+        .route(
+            "/accounts/{id}/contacts/disable",
+            post(routes::contacts::disable_mailbox_contacts),
+        )
+        .route(
+            "/accounts/{id}/contacts/discover",
+            post(routes::contacts::discover_mailbox_contacts),
+        )
+        .route(
             "/accounts/{id}/caldav-discover",
             get(routes::dav::caldav_discover),
         )
@@ -297,6 +309,10 @@ async fn main() {
         .route(
             "/contact-accounts/{id}/sync-status",
             get(routes::contacts::account_sync_status),
+        )
+        .route(
+            "/contact-accounts/{id}/books",
+            get(routes::contacts::list_contact_books),
         )
         .route("/contacts/search", get(routes::contacts::search_contacts))
         .route(
@@ -492,16 +508,24 @@ async fn restart_existing_accounts(state: &AppState, data_dir: &str) {
             .await
             .unwrap_or_default();
         for account_id in account_ids {
+            if let Err(error) = api::contact_reconcile::reconcile_mailbox_contact_source(
+                &db,
+                &state.credential_key,
+                &account_id,
+                None,
+            )
+            .await
+            {
+                tracing::warn!(account_id, %error, "startup contact reconciliation failed");
+            }
             state
                 .sync_manager
                 .start_account(account_id, user_id.clone(), Arc::new(state.clone()))
                 .await;
         }
-        let contact_account_ids: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM contact_accounts")
-                .fetch_all(&db)
-                .await
-                .unwrap_or_default();
+        let contact_account_ids = contact_sync::repository::eligible_source_ids(&db)
+            .await
+            .unwrap_or_default();
         for account_id in contact_account_ids {
             routes::contacts::spawn_contact_sync_task(
                 state.clone(),

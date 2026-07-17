@@ -1,15 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut, apiDelete } from '@/shared/api'
-import type { Contact, ContactAccount, NewContact } from '@/shared/types'
+import type { Contact, ContactAccount, ContactBook, ContactPage, NewContact } from '@/shared/types'
 
-export function useContacts(accountId?: string, q?: string) {
+export function useContacts(accountId?: string, q?: string, mailboxId?: string, bookId?: string) {
   const params = new URLSearchParams()
   if (accountId) params.set('account_id', accountId)
   if (q) params.set('q', q)
+  if (mailboxId) params.set('mailbox_id', mailboxId)
+  if (bookId) params.set('book_id', bookId)
   const qs = params.toString()
   return useQuery({
-    queryKey: ['contacts', accountId ?? '', q ?? ''],
-    queryFn: () => apiGet<Contact[]>(`/contacts${qs ? `?${qs}` : ''}`),
+    queryKey: ['contacts', accountId ?? '', q ?? '', mailboxId ?? '', bookId ?? ''],
+    queryFn: () => apiGet<ContactPage>(`/contacts${qs ? `?${qs}` : ''}`),
+    select: (page) => page.items,
   })
 }
 
@@ -20,10 +23,12 @@ export function useContactAccounts() {
   })
 }
 
-export function useContactSearch(q: string) {
+export function useContactSearch(q: string, mailboxId?: string) {
+  const params = new URLSearchParams({ q })
+  if (mailboxId) params.set('mailbox_id', mailboxId)
   return useQuery({
-    queryKey: ['contacts-search', q],
-    queryFn: () => apiGet<Contact[]>(`/contacts/search?q=${encodeURIComponent(q)}`),
+    queryKey: ['contacts-search', q, mailboxId ?? ''],
+    queryFn: () => apiGet<Contact[]>(`/contacts/search?${params}`),
     enabled: q.trim().length >= 2,
   })
 }
@@ -33,7 +38,7 @@ export function useCreateContactAccount() {
   return useMutation({
     mutationFn: (data: {
       display_name: string
-      type: 'cardav' | 'graph' | 'google'
+      type: 'cardav'
       base_url?: string | null
       auth_scheme?: 'basic' | 'oauth2'
       username?: string | null
@@ -45,6 +50,14 @@ export function useCreateContactAccount() {
       qc.invalidateQueries({ queryKey: ['contact-accounts'] })
       qc.invalidateQueries({ queryKey: ['contacts'] })
     },
+  })
+}
+
+export function useContactBooks(accountId?: string) {
+  return useQuery({
+    queryKey: ['contact-books', accountId ?? ''],
+    queryFn: () => apiGet<ContactBook[]>(`/contact-accounts/${accountId}/books`),
+    enabled: Boolean(accountId),
   })
 }
 

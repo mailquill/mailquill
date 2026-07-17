@@ -477,6 +477,8 @@ function EventDialog({
     if (event) {
       const s = new Date(event.starts_at)
       const e = new Date(event.ends_at)
+      // Resetting a dialog draft is intentional when the selected remote event changes.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setForm({
         title: event.title,
         calendar_id: event.calendar_id,
@@ -614,6 +616,7 @@ function EventDialog({
                   label={t('calendar.attendees')}
                   value={splitAttendees(form.attendees)}
                   onChange={(next) => set('attendees', next.join(', '))}
+                  mailboxId={calendars.find((calendar) => calendar.id === form.calendar_id)?.account_id ?? undefined}
                 />
               </div>
               <Button variant="outline" onClick={() => discoverAttendees(form.attendees)} title={t('calendar.discoverKeys')}>

@@ -21,6 +21,8 @@ import {
   Monitor,
   Sun,
   Moon,
+  RefreshCw,
+  Wrench,
 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
@@ -28,11 +30,23 @@ import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
 import { Select } from '@/shared/components/ui/select'
 import { Button } from '@/shared/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/components/ui/dialog'
 import { AddAccountForm } from '@/features/accounts'
 import { RulesSection } from '@/widgets/RulesSection'
 import { PgpKeyManagement } from '@/widgets/PgpKeyManagement'
 import { davDefaults } from '@/shared/lib/dav'
-import { useAccounts, useDeleteAccount, useUpdateAccount, useFolders, useSetFolderSync } from '@/shared/hooks/useAccounts'
+import {
+  useAccounts,
+  useDeleteAccount,
+  useUpdateAccount,
+  useFolders,
+  useSetFolderSync,
+  useEnableMailboxContacts,
+  useDisableMailboxContacts,
+  useDiscoverMailboxContacts,
+} from '@/shared/hooks/useAccounts'
+import { useSyncContactAccount } from '@/shared/hooks/useContacts'
+import { startOAuthRedirect } from '@/shared/lib/oauth'
 import { useThemeStore, type ThemePref } from '@/shared/hooks/useTheme'
 import { useUiPrefs, type Density, type CalendarGrouping } from '@/shared/hooks/useUiPrefs'
 import { getLangPref, setLangPref, type LangPref } from '@/shared/i18n'
@@ -182,6 +196,12 @@ function AccountsSection() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [adding, setAdding] = useState(() => searchParams.get('add') === '1')
   const connected = searchParams.get('connected')
+  const contactsReturn = searchParams.get('contacts')
+
+  useEffect(() => {
+    if (!connected || !contactsReturn) return
+    window.requestAnimationFrame(() => document.getElementById(`contact-capability-${connected}`)?.focus())
+  }, [connected, contactsReturn])
 
   function closeAdd() {
     setAdding(false)
@@ -199,7 +219,7 @@ function AccountsSection() {
       {connected && (
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-[#16a34a]/30 bg-[#16a34a]/10 px-4 py-3 text-[13px] font-medium text-[#15803d]">
           <Check className="size-4" />
-          {t('settings.connected')}
+          {contactsReturn ? t('contacts.oauthReturnComplete') : t('settings.connected')}
           <button
             onClick={() => setSearchParams({}, { replace: true })}
             className="ml-auto text-[12px] font-semibold underline"
@@ -300,6 +320,8 @@ function AccountCard({ account }: { account: Account }) {
         <ChevronDown className={cn('size-4 shrink-0 text-muted-foreground transition-transform', expanded && 'rotate-180')} />
       </button>
 
+      <ContactCapabilityRow account={account} />
+
       {expanded && (
         <form className="border-t border-border p-4" onSubmit={handleSubmit((d) => updateAccount.mutate({ id: account.id, data: d }))}>
           <div className="grid gap-3 md:grid-cols-2">
@@ -341,7 +363,8 @@ function AccountCard({ account }: { account: Account }) {
             </Field>
           </div>
 
-          {/* CardDAV / CalDAV */}
+          {/* CalDAV stays part of the normal mailbox settings. Contact server
+              overrides are intentionally kept in advanced setup. */}
           <div className="mt-4 border-t border-border pt-4">
             <div className="mb-3 flex items-center justify-between">
               <span className="text-[12px] font-bold uppercase tracking-wide text-muted-foreground">
@@ -352,13 +375,18 @@ function AccountCard({ account }: { account: Account }) {
               </Button>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
-              <Field id={`${account.id}-carddav`} label={t('settings.carddavUrl')}>
-                <Input id={`${account.id}-carddav`} placeholder="https://…/.well-known/carddav" {...register('carddav_url')} />
-              </Field>
               <Field id={`${account.id}-caldav`} label={t('settings.caldavUrl')}>
                 <Input id={`${account.id}-caldav`} placeholder="https://…/.well-known/caldav" {...register('caldav_url')} />
               </Field>
             </div>
+            <details className="mt-3 rounded-md border border-border p-3">
+              <summary className="cursor-pointer text-[12.5px] font-semibold">{t('contacts.advancedCarddav')}</summary>
+              <div className="mt-3 max-w-xl">
+                <Field id={`${account.id}-carddav`} label={t('settings.carddavUrl')}>
+                  <Input id={`${account.id}-carddav`} placeholder="https://…/.well-known/carddav" {...register('carddav_url')} />
+                </Field>
+              </div>
+            </details>
           </div>
 
           {/* Folder selection — pick which mailboxes get synced */}
@@ -381,6 +409,170 @@ function AccountCard({ account }: { account: Account }) {
           </div>
         </form>
       )}
+    </div>
+  )
+}
+
+export function ContactCapabilityRow({ account }: { account: Account }) {
+  const { t } = useTranslation()
+  const enable = useEnableMailboxContacts()
+  const disable = useDisableMailboxContacts()
+  const discover = useDiscoverMailboxContacts()
+  const updateAccount = useUpdateAccount()
+  const sync = useSyncContactAccount()
+  const [disableOpen, setDisableOpen] = useState(false)
+  const [setupOpen, setSetupOpen] = useState(false)
+  const [keepCache, setKeepCache] = useState(true)
+  const [cardDavUrl, setCardDavUrl] = useState(account.carddav_url ?? '')
+  const [selectedBooks, setSelectedBooks] = useState<string[]>([])
+  const capability = account.contacts
+  const state = capability?.state ?? 'disabled'
+  const provider = capability?.provider === 'google' ? 'Google' : capability?.provider === 'graph' ? 'Microsoft' : 'CardDAV'
+  const busy = enable.isPending || disable.isPending || discover.isPending || sync.isPending
+
+  function primaryAction() {
+    if (!capability || state === 'disabled') {
+      if (capability?.provider === 'cardav') {
+        setSetupOpen(true)
+        discover.mutate(
+          { accountId: account.id },
+          { onSuccess: ({ books }) => setSelectedBooks(books.filter((book) => book.is_default || books.length === 1).map((book) => book.remote_id)) },
+        )
+      } else {
+        enable.mutate(account.id)
+      }
+    } else if (state === 'consent_required' || state === 'reauth_required') {
+      startOAuthRedirect(capability.provider === 'google' ? 'google' : 'microsoft', account.id, 'contacts')
+    } else if (state === 'error' || state === 'unavailable') {
+      if (capability.provider === 'cardav') {
+        setSetupOpen(true)
+        discover.mutate(
+          { accountId: account.id },
+          { onSuccess: ({ books }) => setSelectedBooks(books.filter((book) => book.is_default || books.length === 1).map((book) => book.remote_id)) },
+        )
+      }
+      else startOAuthRedirect(capability.provider === 'google' ? 'google' : 'microsoft', account.id, 'contacts')
+    } else if (state !== 'syncing' && state !== 'pending') {
+      sync.mutate(capability.source_id)
+    }
+  }
+
+  const actionLabel = !capability || state === 'disabled'
+    ? t('contacts.enable')
+    : state === 'consent_required'
+      ? t('contacts.grantAccess')
+      : state === 'reauth_required'
+        ? t('contacts.reconnect')
+        : state === 'error' || state === 'unavailable'
+          ? t('contacts.fixContacts')
+          : state === 'syncing' || state === 'pending'
+            ? t('contacts.syncing')
+            : t('contacts.syncNow')
+
+  return (
+    <div id={`contact-capability-${account.id}`} tabIndex={-1} className="border-t border-border bg-secondary/25 px-4 py-3 outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-live="polite">
+      <div className="flex flex-wrap items-center gap-3">
+        <Users className="size-4 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 text-[13px] font-bold">
+            {t('contacts.contactsCapability')}
+            <span className="rounded-full bg-secondary px-2 py-0.5 text-[10.5px] text-secondary-foreground">{provider}</span>
+          </div>
+          <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+            {t(`contacts.state.${state}`)}
+            {capability?.last_synced_at ? ` · ${t('contacts.lastSync', { value: new Date(capability.last_synced_at).toLocaleString() })}` : ''}
+            {state === 'disabled' && capability?.cache_retained ? ` · ${t('contacts.cacheReadOnly')}` : ''}
+          </p>
+        </div>
+        <Button size="sm" variant={state === 'idle' ? 'outline' : 'default'} onClick={primaryAction} disabled={busy || state === 'syncing' || state === 'pending'}>
+          {(busy || state === 'syncing' || state === 'pending') && <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" />}
+          {(state === 'error' || state === 'unavailable') && !busy && <Wrench className="size-3.5" />}
+          {actionLabel}
+        </Button>
+        {capability?.enabled && (
+          <Button size="sm" variant="ghost" onClick={() => setDisableOpen(true)}>{t('contacts.disable')}</Button>
+        )}
+      </div>
+      {discover.data ? <p className="mt-2 text-[11.5px] text-muted-foreground">{t('contacts.discoverySucceeded')}</p> : null}
+      {discover.error ? <p role="alert" className="mt-2 text-[11.5px] text-destructive">{String(discover.error)}</p> : null}
+
+      <Dialog open={setupOpen} onClose={() => setSetupOpen(false)}>
+        <DialogContent className="w-[min(560px,calc(100vw-2rem))] max-w-none">
+          <DialogHeader><DialogTitle>{t('contacts.carddavSetupTitle')}</DialogTitle></DialogHeader>
+          <p className="text-[13px] text-muted-foreground">{t('contacts.carddavSetupHelp')}</p>
+          {discover.isPending ? (
+            <p role="status" className="mt-4 flex items-center gap-2 text-[13px]"><RefreshCw className="size-4 animate-spin motion-reduce:animate-none" />{t('contacts.discovering')}</p>
+          ) : discover.data ? (
+            <fieldset className="mt-4 space-y-2">
+              <legend className="text-[12px] font-bold uppercase tracking-wide text-muted-foreground">{t('contacts.selectBooks')}</legend>
+              {discover.data.books.map((book) => (
+                <label key={book.remote_id} className="flex items-center gap-3 rounded-md border border-border p-3 text-[13px]">
+                  <input
+                    type="checkbox"
+                    checked={selectedBooks.includes(book.remote_id)}
+                    onChange={(event) => setSelectedBooks((current) => event.currentTarget.checked ? [...current, book.remote_id] : current.filter((id) => id !== book.remote_id))}
+                  />
+                  <span className="font-semibold">{book.display_name}</span>
+                  {book.is_default ? <span className="ml-auto text-[11px] text-muted-foreground">{t('contacts.defaultBook')}</span> : null}
+                </label>
+              ))}
+            </fieldset>
+          ) : null}
+          {discover.error ? <p role="alert" className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-[12px] text-destructive">{String(discover.error)}</p> : null}
+          <details className="mt-4 rounded-md border border-border p-3">
+            <summary className="cursor-pointer text-[12.5px] font-semibold">{t('contacts.advancedCarddav')}</summary>
+            <Field id={`${account.id}-setup-carddav`} label={t('settings.carddavUrl')}>
+              <Input id={`${account.id}-setup-carddav`} className="mt-3" value={cardDavUrl} onChange={(event) => setCardDavUrl(event.currentTarget.value)} placeholder="https://…/.well-known/carddav" />
+            </Field>
+            <Button
+              className="mt-3"
+              type="button"
+              variant="outline"
+              disabled={!cardDavUrl.trim() || updateAccount.isPending || discover.isPending}
+              onClick={() => updateAccount.mutate(
+                { id: account.id, data: { carddav_url: cardDavUrl.trim() } },
+                { onSuccess: () => discover.mutate({ accountId: account.id }) },
+              )}
+            >{t('contacts.tryDiscovery')}</Button>
+          </details>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setSetupOpen(false)}>{t('action.cancel')}</Button>
+            <Button
+              disabled={!discover.data || selectedBooks.length === 0 || discover.isPending || enable.isPending}
+              onClick={() => discover.mutate(
+                { accountId: account.id, selectedBookRemoteIds: selectedBooks },
+                { onSuccess: () => enable.mutate(account.id, { onSuccess: () => setSetupOpen(false) }) },
+              )}
+            >{t('contacts.enableSelectedBooks')}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={disableOpen} onClose={() => setDisableOpen(false)}>
+        <DialogContent className="w-[min(520px,calc(100vw-2rem))] max-w-none">
+          <DialogHeader><DialogTitle>{t('contacts.disableTitle')}</DialogTitle></DialogHeader>
+          <p className="text-[13px] text-muted-foreground">{t('contacts.disableExplanation')}</p>
+          <label className="mt-3 flex items-start gap-3 rounded-md border border-border p-3">
+            <input type="radio" checked={keepCache} onChange={() => setKeepCache(true)} className="mt-0.5" />
+            <span><strong className="block text-[13px]">{t('contacts.keepCache')}</strong><span className="text-[12px] text-muted-foreground">{t('contacts.keepCacheHelp')}</span></span>
+          </label>
+          <label className="mt-2 flex items-start gap-3 rounded-md border border-border p-3">
+            <input type="radio" checked={!keepCache} onChange={() => setKeepCache(false)} className="mt-0.5" />
+            <span><strong className="block text-[13px]">{t('contacts.removeCache')}</strong><span className="text-[12px] text-muted-foreground">{t('contacts.removeCacheHelp')}</span></span>
+          </label>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setDisableOpen(false)}>{t('action.cancel')}</Button>
+            <Button
+              variant={keepCache ? 'default' : 'destructive'}
+              onClick={() => {
+                if (!keepCache && !window.confirm(t('contacts.removeCacheConfirm'))) return
+                disable.mutate({ accountId: account.id, keepDownloadedContacts: keepCache }, { onSuccess: () => setDisableOpen(false) })
+              }}
+              disabled={disable.isPending}
+            >{t('contacts.disable')}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

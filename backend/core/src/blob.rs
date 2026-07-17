@@ -274,7 +274,7 @@ pub fn create_blob_store() -> Arc<dyn BlobStore> {
 
     let base_store: Arc<dyn BlobStore> = match backend.as_str() {
         "s3" => Arc::new(S3BlobStore::from_env().unwrap_or_else(|e| panic!("{e}"))),
-        "local" | _ => {
+        _ => {
             let path = std::env::var("BLOB_LOCAL_PATH").unwrap_or_else(|_| "./data/blobs".into());
             Arc::new(LocalBlobStore::new(path))
         }

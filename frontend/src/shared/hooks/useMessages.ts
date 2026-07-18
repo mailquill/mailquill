@@ -371,14 +371,11 @@ export function useSearchMessages(query: string, filters?: Record<string, string
 }
 
 export function useSendMessage() {
-  const qc = useQueryClient()
-
   return useMutation({
-    mutationFn: (message: SendMessageInput) => apiPost<{ message_id: string }>('/send', message),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['unified'] })
-      qc.invalidateQueries({ queryKey: ['folder-messages'] })
-    },
+    mutationFn: (message: SendMessageInput) =>
+      apiPost<{ send_id: string; status: 'queued' }>('/send', message),
+    // The SSE "send" event refreshes mail lists once provider delivery has
+    // actually finished. The mutation only acknowledges queue acceptance.
   })
 }
 

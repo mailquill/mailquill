@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ensureFreshAccessToken } from '@/shared/api'
 import { getStoredPushSubscriptionId } from '@/shared/hooks/usePushNotifications'
 import type { SyncStatus } from '@/shared/types'
+import { z } from 'zod'
 
 interface PushPayload {
   title?: string
@@ -12,14 +13,42 @@ interface PushPayload {
   message_url?: string
 }
 
+const sendStatusSchema = z.object({
+  send_id: z.string().min(1),
+  status: z.enum(['sent', 'failed']),
+  message_id: z.string().nullish(),
+  subject: z.string().nullish(),
+  error: z.string().nullish(),
+})
+
+/** Status emitted after an accepted message finishes background delivery. */
+export type SendStatus = z.infer<typeof sendStatusSchema>
+
+/**
+ * Parse an untrusted SSE send-status payload.
+ * @param data - Raw EventSource message data.
+ * @returns A validated send status, or null for malformed input.
+ */
+export function parseSendStatus(data: string): SendStatus | null {
+  try {
+    const result = sendStatusSchema.safeParse(JSON.parse(data) as unknown)
+    return result.success ? result.data : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Foreground desktop notifications via SSE. Complements the service-worker
  * background push: when web push is unavailable (e.g. Brave blocks the push
  * service) but the app is open, new-message events still surface a native
  * notification. Shown only while the tab is hidden and only when there's no
  * active web-push subscription (otherwise the SW already handles it).
+ * @param enabled - Whether foreground desktop mail notifications are enabled.
+ * @param onSendStatus - Callback for the terminal result of an accepted send.
+ * @returns Nothing; the hook owns and cleans up its EventSource connection.
  */
-export function useMailNotifications(enabled: boolean) {
+export function useMailNotifications(enabled: boolean, onSendStatus?: (status: SendStatus) => void) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
@@ -103,6 +132,13 @@ export function useMailNotifications(enabled: boolean) {
         queryClient.invalidateQueries({ queryKey: ['contacts'] })
       })
 
+      source.addEventListener('send', (event) => {
+        const status = parseSendStatus((event as MessageEvent).data)
+        if (!status) return
+        onSendStatus?.(status)
+        if (status.status === 'sent') scheduleMailRefresh()
+      })
+
       source.onerror = () => {
         // Token may have expired or the connection dropped; reconnect with a
         // fresh token after a short delay.
@@ -120,5 +156,5 @@ export function useMailNotifications(enabled: boolean) {
       if (refresh) clearTimeout(refresh)
       source?.close()
     }
-  }, [enabled, navigate, queryClient])
+  }, [enabled, navigate, onSendStatus, queryClient])
 }

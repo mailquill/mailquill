@@ -6,6 +6,8 @@ import { useOnlineStatus } from '@/shared/hooks/useOnlineStatus'
 import { useSyncActivity } from '@/shared/hooks/useAccounts'
 import { SIDEBAR_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
 import { useMailNotifications } from '@/shared/hooks/useMailNotifications'
+import { useSendProgressToasts } from '@/shared/hooks/useSendProgressToasts'
+import { ToastRegion } from '@/shared/components'
 import { PaneResizer } from '@/shared/components/PaneResizer'
 import { TopBar } from '@/widgets/TopBar'
 import { Sidebar } from '@/widgets/Sidebar'
@@ -21,8 +23,9 @@ export function MailLayout() {
   useSyncActivity()
   const sidebarWidth = useUiPrefs((s) => s.sidebarWidth)
   const setSidebarWidth = useUiPrefs((s) => s.setSidebarWidth)
-  // Foreground desktop notifications (SSE), alongside service-worker push.
-  useMailNotifications(useUiPrefs((s) => s.notificationsEnabled))
+  const { showSendQueued, showSendStatus } = useSendProgressToasts()
+  // Foreground desktop notifications and asynchronous send results share SSE.
+  useMailNotifications(useUiPrefs((s) => s.notificationsEnabled), showSendStatus)
   const [isComposeOpen, setIsComposeOpen] = useState(false)
   const [composeState, setComposeState] = useState<ComposeInitialState>({ mode: 'new' })
   const [composeKey, setComposeKey] = useState(0)
@@ -59,7 +62,9 @@ export function MailLayout() {
         open={isComposeOpen}
         initialState={composeState}
         onClose={() => setIsComposeOpen(false)}
+        onSendQueued={showSendQueued}
       />
+      <ToastRegion />
     </div>
   )
 }

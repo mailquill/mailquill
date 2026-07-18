@@ -34,6 +34,7 @@ interface ComposeDialogProps {
   open: boolean
   initialState: ComposeInitialState
   onClose: () => void
+  onSendQueued?: (send: { sendId: string; subject: string }) => void
 }
 
 interface AttachmentDraft extends AttachmentInput {
@@ -63,7 +64,7 @@ const TOOLBAR: { command: RichCommand; tkey: string; icon: typeof Bold }[] = [
   { command: 'insertOrderedList', tkey: 'compose.numberedList', icon: ListOrdered },
 ]
 
-export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProps) {
+export function ComposeDialog({ open, initialState, onClose, onSendQueued }: ComposeDialogProps) {
   const { t } = useTranslation()
   const editorRef = useRef<HTMLDivElement | null>(null)
   const isOnline = useOnlineStatus()
@@ -221,7 +222,12 @@ export function ComposeDialog({ open, initialState, onClose }: ComposeDialogProp
           references: initialState.mode === 'reply' || initialState.mode === 'forward' ? sourceMessage?.references : null,
           attachments: attachments.map(toAttachmentInput),
         },
-        { onSuccess: () => onClose() },
+        {
+          onSuccess: ({ send_id: sendId }) => {
+            onSendQueued?.({ sendId, subject })
+            onClose()
+          },
+        },
       )
     } catch (err) {
       setCryptoError(t(err instanceof Error && err.message.startsWith('compose.') ? err.message : 'compose.cryptoFailed'))

@@ -108,7 +108,12 @@ function FolderItem({
             e.stopPropagation()
             onToggle?.()
           }}
-          aria-label={expanded ? 'Collapse' : 'Expand'}
+          aria-expanded={expanded}
+          aria-label={
+            expanded
+              ? t('sidebar.collapseFolder', { name: label })
+              : t('sidebar.expandFolder', { name: label })
+          }
           className="flex size-4 shrink-0 items-center justify-center text-[#475569] hover:text-[#cbd5e1]"
         >
           {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
@@ -129,9 +134,12 @@ function FolderItem({
   )
 }
 
-// One tree node + its (collapsible) descendants. Default expanded.
+// One tree node + its collapsible descendants. Expansion is persisted by path.
 function FolderTreeNode({ node, accountId }: { node: FolderNode; accountId: string }) {
-  const [expanded, setExpanded] = useState(false)
+  const expanded = useUiPrefs(
+    (state) => state.expandedFoldersByMailbox[accountId]?.includes(node.folder.full_path) ?? false,
+  )
+  const toggleFolderExpanded = useUiPrefs((state) => state.toggleFolderExpanded)
   const hasChildren = node.children.length > 0
   return (
     <>
@@ -141,7 +149,7 @@ function FolderTreeNode({ node, accountId }: { node: FolderNode; accountId: stri
         depth={node.depth}
         hasChildren={hasChildren}
         expanded={expanded}
-        onToggle={() => setExpanded((e) => !e)}
+        onToggle={() => toggleFolderExpanded(accountId, node.folder.full_path)}
       />
       {hasChildren &&
         expanded &&
@@ -180,7 +188,9 @@ function AccountStarredItem({ account }: { account: Account }) {
 }
 
 function AccountSection({ account }: { account: Account }) {
-  const [expanded, setExpanded] = useState(true)
+  const { t } = useTranslation()
+  const expanded = useUiPrefs((state) => !state.collapsedMailboxIds.includes(account.id))
+  const toggleMailboxCollapsed = useUiPrefs((state) => state.toggleMailboxCollapsed)
   const { data: folders } = useFolders(account.id)
   const { data: syncStatus } = useSyncStatus(account.id)
   const color = accountColor(account.id)
@@ -188,13 +198,21 @@ function AccountSection({ account }: { account: Account }) {
     folders?.find((f) => f.folder_type === 'INBOX')?.unread_count ??
     folders?.reduce((s, f) => s + f.unread_count, 0) ??
     0
-  const lastSynced = syncStatus?.last_synced_at ? formatDate(syncStatus.last_synced_at) : 'Never'
+  const lastSynced = syncStatus?.last_synced_at
+    ? formatDate(syncStatus.last_synced_at)
+    : t('syncMenu.never')
 
   return (
     <div>
       <button
-        onClick={() => setExpanded((e) => !e)}
-        title={`Last sync ${lastSynced}`}
+        onClick={() => toggleMailboxCollapsed(account.id)}
+        title={t('sidebar.lastSync', { time: lastSynced })}
+        aria-expanded={expanded}
+        aria-label={
+          expanded
+            ? t('sidebar.collapseMailbox', { name: account.display_name })
+            : t('sidebar.expandMailbox', { name: account.display_name })
+        }
         className="flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors hover:bg-white/5"
       >
         {expanded ? (

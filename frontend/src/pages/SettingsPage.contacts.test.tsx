@@ -87,4 +87,21 @@ describe('mailbox Contacts capability controls', () => {
     )
     expect(enableMutate).toHaveBeenCalledWith('mailbox-1', expect.objectContaining({ onSuccess: expect.any(Function) }))
   })
+
+  it('shows disabled provider API guidance and retries without another consent redirect', async () => {
+    const user = userEvent.setup()
+    render(<ContactCapabilityRow account={{
+      ...account,
+      contacts: {
+        ...account.contacts!,
+        provider: 'google',
+        state: 'unavailable',
+        reason: 'provider_configuration_required',
+      },
+    }} />)
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/Google contacts API is not enabled/i)
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(enableMutate).toHaveBeenCalledWith('mailbox-1')
+  })
 })

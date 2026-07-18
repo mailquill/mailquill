@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use sqlx::SqlitePool;
 
 use crate::{
-    adapters::{ContactProviderAdapter, MutationResult},
+    adapters::{ContactProviderAdapter, MutationResult, PROVIDER_API_DISABLED_MESSAGE},
     repository::{
         apply_change_page, book_cursor, finish_book_discovery, finish_full_sync, set_source_state,
         source_generation,
@@ -345,6 +345,9 @@ fn error_state(error: &ProviderError) -> (&'static str, &'static str) {
         ProviderErrorCategory::ReauthenticationRequired | ProviderErrorCategory::Authentication => {
             ("reauth_required", "oauth_reauthentication_required")
         }
+        ProviderErrorCategory::Unavailable if error.message == PROVIDER_API_DISABLED_MESSAGE => {
+            ("unavailable", "provider_configuration_required")
+        }
         ProviderErrorCategory::Unavailable => ("unavailable", "provider_unavailable"),
         _ => ("error", provider_reason(error.category)),
     }
@@ -384,10 +387,24 @@ mod tests {
 
     use super::*;
     use crate::{
-        adapters::{MutationResult, PhotoPayload},
+        adapters::{MutationResult, PhotoPayload, PROVIDER_API_DISABLED_MESSAGE},
         repository::{reconcile_mailbox_source, MailboxSource},
         ContactChangePage, ContactProvider, ContactTombstone, ParsedContact, RemoteContact,
     };
+
+    #[test]
+    fn disabled_provider_api_requires_configuration_instead_of_new_consent() {
+        let error = ProviderError {
+            category: ProviderErrorCategory::Unavailable,
+            message: PROVIDER_API_DISABLED_MESSAGE.to_owned(),
+            retry_after_seconds: None,
+        };
+
+        assert_eq!(
+            error_state(&error),
+            ("unavailable", "provider_configuration_required")
+        );
+    }
 
     type ChangeCall = (String, Option<String>, Option<String>);
 

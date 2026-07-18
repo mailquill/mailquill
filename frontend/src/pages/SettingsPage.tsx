@@ -428,6 +428,7 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
   const capability = account.contacts
   const state = capability?.state ?? 'disabled'
   const provider = capability?.provider === 'google' ? 'Google' : capability?.provider === 'graph' ? 'Microsoft' : 'CardDAV'
+  const providerConfigurationRequired = capability?.reason === 'provider_configuration_required'
   const busy = enable.isPending || disable.isPending || discover.isPending || sync.isPending
 
   function primaryAction() {
@@ -443,6 +444,8 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
       }
     } else if (state === 'consent_required' || state === 'reauth_required') {
       startOAuthRedirect(capability.provider === 'google' ? 'google' : 'microsoft', account.id, 'contacts')
+    } else if (providerConfigurationRequired) {
+      enable.mutate(account.id)
     } else if (state === 'error' || state === 'unavailable') {
       if (capability.provider === 'cardav') {
         setSetupOpen(true)
@@ -457,7 +460,9 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
     }
   }
 
-  const actionLabel = !capability || state === 'disabled'
+  const actionLabel = providerConfigurationRequired
+    ? t('contacts.tryAgain')
+    : !capability || state === 'disabled'
     ? t('contacts.enable')
     : state === 'consent_required'
       ? t('contacts.grantAccess')
@@ -483,6 +488,11 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
             {capability?.last_synced_at ? ` · ${t('contacts.lastSync', { value: new Date(capability.last_synced_at).toLocaleString() })}` : ''}
             {state === 'disabled' && capability?.cache_retained ? ` · ${t('contacts.cacheReadOnly')}` : ''}
           </p>
+          {providerConfigurationRequired ? (
+            <p role="alert" className="mt-1 text-[11.5px] text-destructive">
+              {t('contacts.providerConfigurationRequired', { provider })}
+            </p>
+          ) : null}
         </div>
         <Button size="sm" variant={state === 'idle' ? 'outline' : 'default'} onClick={primaryAction} disabled={busy || state === 'syncing' || state === 'pending'}>
           {(busy || state === 'syncing' || state === 'pending') && <RefreshCw className="size-3.5 animate-spin motion-reduce:animate-none" />}

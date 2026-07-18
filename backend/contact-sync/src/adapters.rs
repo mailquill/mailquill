@@ -14,6 +14,8 @@ use crate::{
     ParsedContact, ProviderError, ProviderErrorCategory, RemoteContact, RemotePhoto,
 };
 
+pub(crate) const PROVIDER_API_DISABLED_MESSAGE: &str = "contact provider API is not enabled";
+
 const GOOGLE_PERSON_FIELDS: &str = "names,emailAddresses,phoneNumbers,addresses,organizations,biographies,photos,memberships,metadata";
 const GOOGLE_UPDATE_FIELDS: &str =
     "names,emailAddresses,phoneNumbers,addresses,organizations,biographies,memberships";
@@ -810,6 +812,20 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         .get(header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse().ok());
+    let forbidden_body = if status == StatusCode::FORBIDDEN {
+        response.json::<Value>().await.ok()
+    } else {
+        None
+    };
+    if let Some(body) = forbidden_body.as_ref() {
+        if provider_api_is_disabled(body) {
+            return Err(provider_error(
+                ProviderErrorCategory::Unavailable,
+                PROVIDER_API_DISABLED_MESSAGE,
+                retry_after_seconds,
+            ));
+        }
+    }
     let category = match status {
         StatusCode::UNAUTHORIZED => ProviderErrorCategory::ReauthenticationRequired,
         StatusCode::FORBIDDEN => ProviderErrorCategory::ConsentRequired,
@@ -824,6 +840,23 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         format!("contact provider request failed with HTTP {status}"),
         retry_after_seconds,
     ))
+}
+
+fn provider_api_is_disabled(value: &Value) -> bool {
+    json_contains(value, "SERVICE_DISABLED")
+        || json_contains(value, "has not been used in project")
+        || json_contains(value, "api is disabled")
+}
+
+fn json_contains(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(value) => value
+            .to_ascii_lowercase()
+            .contains(&needle.to_ascii_lowercase()),
+        Value::Array(values) => values.iter().any(|value| json_contains(value, needle)),
+        Value::Object(values) => values.values().any(|value| json_contains(value, needle)),
+        _ => false,
+    }
 }
 
 async fn response_photo(response: reqwest::Response) -> Result<PhotoPayload, ProviderError> {
@@ -1274,7 +1307,10 @@ mod tests {
         }
     }
 
-    async fn one_shot_server(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    async fn one_shot_server(
+        response: impl Into<String>,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let response = response.into();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -1423,6 +1459,58 @@ mod tests {
         assert!(request.contains("pageSize=1000"));
         assert!(request.contains("requestSyncToken=true"));
         assert!(request.contains("syncToken=cursor"));
+    }
+
+    #[tokio::test]
+    async fn google_distinguishes_disabled_api_from_missing_consent() {
+        let disabled_body = json!({
+            "error": {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "SERVICE_DISABLED",
+                    "domain": "googleapis.com",
+                    "metadata": { "service": "people.googleapis.com" }
+                }]
+            }
+        })
+        .to_string();
+        let disabled_response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            disabled_body.len(),
+            disabled_body
+        );
+        let (base, server) = one_shot_server(disabled_response).await;
+        let error = GooglePeopleAdapter::with_base_url(&base, "token")
+            .books()
+            .await
+            .unwrap_err();
+        assert_eq!(error.category, ProviderErrorCategory::Unavailable);
+        assert_eq!(error.message, PROVIDER_API_DISABLED_MESSAGE);
+        server.await.unwrap();
+
+        let scope_body = json!({
+            "error": {
+                "code": 403,
+                "message": "Request had insufficient authentication scopes.",
+                "status": "PERMISSION_DENIED",
+                "details": [{ "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT" }]
+            }
+        })
+        .to_string();
+        let scope_response = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            scope_body.len(),
+            scope_body
+        );
+        let (base, server) = one_shot_server(scope_response).await;
+        let error = GooglePeopleAdapter::with_base_url(&base, "token")
+            .books()
+            .await
+            .unwrap_err();
+        assert_eq!(error.category, ProviderErrorCategory::ConsentRequired);
+        server.await.unwrap();
     }
 
     #[tokio::test]

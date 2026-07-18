@@ -225,8 +225,15 @@ function EligibleMailboxCards({ mailboxes }: { mailboxes: import('@/shared/types
           <div key={mailbox.id} className="rounded-lg border border-border p-3">
             <div className="text-[13px] font-bold">{mailbox.display_name}</div>
             <div className="mt-0.5 text-[11.5px] text-muted-foreground">{capability ? t(`contacts.state.${capability.state}`) : t('contacts.state.disabled')}</div>
+            {capability?.reason === 'provider_configuration_required' ? (
+              <p role="alert" className="mt-1 text-[11.5px] text-destructive">
+                {t('contacts.providerConfigurationRequired', {
+                  provider: capability.provider === 'google' ? 'Google' : capability.provider === 'graph' ? 'Microsoft' : 'CardDAV',
+                })}
+              </p>
+            ) : null}
             <Button className="mt-2" size="sm" onClick={action} disabled={enable.isPending || discover.isPending}>
-              {capability?.state === 'consent_required' ? t('contacts.grantAccess') : capability?.state === 'reauth_required' ? t('contacts.reconnect') : capability?.state === 'error' ? t('contacts.fixContacts') : t('contacts.enable')}
+              {capability?.reason === 'provider_configuration_required' ? t('contacts.tryAgain') : capability?.state === 'consent_required' ? t('contacts.grantAccess') : capability?.state === 'reauth_required' ? t('contacts.reconnect') : capability?.state === 'error' ? t('contacts.fixContacts') : t('contacts.enable')}
             </Button>
           </div>
         )

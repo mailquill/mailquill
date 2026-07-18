@@ -41,11 +41,10 @@ pub async fn run_sync_task(
     let mut ticker = time::interval(time::Duration::from_secs(interval_secs as u64));
     ticker.reset();
 
-    // Sync strategy (sync_mode): in 'idle' mode a dedicated IMAP IDLE connection
-    // triggers a ForcePoll the moment the server reports new mail (near-instant),
-    // and the periodic ticker is disabled. In 'interval' mode there is no IDLE
-    // and the ticker polls every sync_interval_secs. IDLE is IMAP-only — Gmail/
-    // Outlook API accounts always use the interval path regardless of sync_mode.
+    // In idle mode a dedicated IMAP connection triggers an immediate poll for
+    // INBOX activity. Keep the periodic ticker as a safety net for changes in
+    // other folders/labels, because one IMAP IDLE connection watches only one
+    // selected mailbox. API-only providers use the same periodic path.
     let (provider_kind, sync_mode): (String, String) =
         sqlx::query_as("SELECT provider_kind, sync_mode FROM email_accounts WHERE id = ?")
             .bind(&account_id)
@@ -71,8 +70,7 @@ pub async fn run_sync_task(
 
     loop {
         tokio::select! {
-            // Disabled in idle mode — IDLE drives polling there.
-            _ = ticker.tick(), if !idle_mode => {
+            _ = ticker.tick() => {
                 do_sync(&account_id, &user_id, &app_state).await;
             }
             cmd = rx.recv() => {

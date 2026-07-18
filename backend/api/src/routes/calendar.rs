@@ -918,7 +918,7 @@ async fn google_access_token(
     calendar_credentials: &Value,
 ) -> Result<String, String> {
     let linked_email_account: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM email_accounts WHERE id = ? AND provider_kind = 'gmail_api')",
+        "SELECT EXISTS(SELECT 1 FROM email_accounts WHERE id = ? AND provider_kind IN ('gmail_api', 'gmail_imap'))",
     )
     .bind(account_id)
     .fetch_one(db)

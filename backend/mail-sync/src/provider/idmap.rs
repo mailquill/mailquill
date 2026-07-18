@@ -4,12 +4,20 @@
 //! the pipeline's `last_uid` incremental-sync logic keeps working.
 
 use super::ProviderError;
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use std::collections::HashSet;
+
+const ASSIGN_BATCH_SIZE: usize = 500;
 
 pub struct IdMap {
     db: SqlitePool,
     account_id: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BackfillState {
+    pub page_token: Option<String>,
+    pub complete: bool,
 }
 
 impl IdMap {
@@ -29,6 +37,43 @@ impl IdMap {
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
+    pub async fn backfill_state(&self, folder: &str) -> Result<BackfillState, ProviderError> {
+        let state: Option<(Option<String>, bool)> = sqlx::query_as(
+            "SELECT remote_backfill_page_token, remote_backfill_complete FROM folders WHERE account_id = ? AND full_path = ?",
+        )
+        .bind(&self.account_id)
+        .bind(folder)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(wrap)?;
+        let (page_token, complete) = state.ok_or_else(|| {
+            ProviderError::Other(format!("folder not found for backfill state: {folder}"))
+        })?;
+        Ok(BackfillState {
+            page_token,
+            complete,
+        })
+    }
+
+    pub async fn set_backfill_state(
+        &self,
+        folder: &str,
+        page_token: Option<&str>,
+        complete: bool,
+    ) -> Result<(), ProviderError> {
+        sqlx::query(
+            "UPDATE folders SET remote_backfill_page_token = ?, remote_backfill_complete = ? WHERE account_id = ? AND full_path = ?",
+        )
+        .bind(page_token)
+        .bind(complete)
+        .bind(&self.account_id)
+        .bind(folder)
+        .execute(&self.db)
+        .await
+        .map_err(wrap)?;
+        Ok(())
+    }
+
     pub async fn max_uid(&self, folder: &str) -> Result<u32, ProviderError> {
         let max: Option<i64> = sqlx::query_scalar(
             "SELECT MAX(uid) FROM remote_message_ids WHERE account_id = ? AND folder_path = ?",
@@ -45,20 +90,35 @@ impl IdMap {
     /// Returns the new max uid.
     pub async fn assign(&self, folder: &str, remote_ids: &[String]) -> Result<u32, ProviderError> {
         let mut uid = self.max_uid(folder).await?;
-        for remote_id in remote_ids {
-            uid += 1;
-            sqlx::query(
-                "INSERT OR IGNORE INTO remote_message_ids (account_id, folder_path, uid, remote_id) VALUES (?, ?, ?, ?)",
-            )
-            .bind(&self.account_id)
-            .bind(folder)
-            .bind(uid as i64)
-            .bind(remote_id)
-            .execute(&self.db)
-            .await
-            .map_err(wrap)?;
+        let mut seen = HashSet::new();
+        let unique_ids: Vec<&String> = remote_ids
+            .iter()
+            .filter(|remote_id| seen.insert(remote_id.as_str()))
+            .collect();
+
+        for chunk in unique_ids.chunks(ASSIGN_BATCH_SIZE) {
+            let first_uid = uid
+                .checked_add(1)
+                .ok_or_else(|| ProviderError::Other("remote id uid space exhausted".into()))?;
+            let last_uid = uid
+                .checked_add(chunk.len() as u32)
+                .ok_or_else(|| ProviderError::Other("remote id uid space exhausted".into()))?;
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "INSERT OR IGNORE INTO remote_message_ids (account_id, folder_path, uid, remote_id) ",
+            );
+            query.push_values(chunk.iter().enumerate(), |mut row, (offset, remote_id)| {
+                row.push_bind(&self.account_id)
+                    .push_bind(folder)
+                    .push_bind(i64::from(first_uid) + offset as i64)
+                    .push_bind(*remote_id);
+            });
+            query.build().execute(&self.db).await.map_err(wrap)?;
+            uid = last_uid;
         }
-        Ok(uid)
+
+        // `INSERT OR IGNORE` may skip an id that another sync already mapped;
+        // report the durable maximum rather than the attempted sequence end.
+        self.max_uid(folder).await
     }
 
     /// Store a specific (folder, uid) → remote_id mapping. Unlike [`assign`],
@@ -147,4 +207,108 @@ fn wrap(e: sqlx::Error) -> ProviderError {
 
 fn bad_set(set: &str) -> ProviderError {
     ProviderError::Other(format!("invalid uid set: {set}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackfillState, IdMap};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn backfill_cursor_round_trips_between_sync_runs() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE folders (
+                account_id TEXT NOT NULL,
+                full_path TEXT NOT NULL,
+                remote_backfill_page_token TEXT,
+                remote_backfill_complete INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO folders (account_id, full_path) VALUES ('account', 'INBOX')")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let ids = IdMap::new(db, "account".to_owned());
+        assert_eq!(
+            ids.backfill_state("INBOX").await.unwrap(),
+            BackfillState::default()
+        );
+
+        ids.set_backfill_state("INBOX", Some("next/page+token"), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            ids.backfill_state("INBOX").await.unwrap(),
+            BackfillState {
+                page_token: Some("next/page+token".to_owned()),
+                complete: false,
+            }
+        );
+
+        ids.set_backfill_state("INBOX", None, true).await.unwrap();
+        assert_eq!(
+            ids.backfill_state("INBOX").await.unwrap(),
+            BackfillState {
+                page_token: None,
+                complete: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn assigns_large_remote_id_sets_in_order_without_duplicates() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE remote_message_ids (
+                account_id TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                uid INTEGER NOT NULL,
+                remote_id TEXT NOT NULL,
+                PRIMARY KEY (account_id, folder_path, uid),
+                UNIQUE (account_id, folder_path, remote_id)
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let ids = IdMap::new(db.clone(), "account".to_owned());
+        let mut remote_ids: Vec<String> =
+            (0..1_200).map(|index| format!("id-{index:04}")).collect();
+        remote_ids.push("id-0000".to_owned());
+
+        assert_eq!(ids.assign("INBOX", &remote_ids).await.unwrap(), 1_200);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_message_ids")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let first: String =
+            sqlx::query_scalar("SELECT remote_id FROM remote_message_ids WHERE uid = 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let last: String =
+            sqlx::query_scalar("SELECT remote_id FROM remote_message_ids WHERE uid = 1200")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+
+        assert_eq!(count, 1_200);
+        assert_eq!(first, "id-0000");
+        assert_eq!(last, "id-1199");
+    }
 }

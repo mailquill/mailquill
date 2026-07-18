@@ -108,6 +108,14 @@ fn provider_scopes(provider: &str) -> Vec<Scope> {
     }
 }
 
+fn mail_provider_kind(provider: &str) -> Result<&'static str, AppError> {
+    match provider {
+        PROVIDER_GOOGLE => Ok("gmail_imap"),
+        PROVIDER_MICROSOFT => Ok("imap"),
+        _ => Err(AppError::NotFound),
+    }
+}
+
 fn build_client(provider: &str, state: &AppState) -> Result<oauth2::basic::BasicClient, AppError> {
     let (auth_url, token_url) = provider_config(provider)?;
     let env_prefix = match provider {
@@ -291,14 +299,10 @@ pub async fn oauth_callback(
         _ => return Err(AppError::NotFound),
     };
 
-    // OAuth accounts prefer provider APIs where the implementation is complete.
-    // Gmail syncs and sends through the Gmail API. Outlook keeps the existing
-    // IMAP/SMTP path until the Graph provider is enabled end-to-end.
-    let provider_kind = match provider.as_str() {
-        PROVIDER_GOOGLE => "gmail_api",
-        PROVIDER_MICROSOFT => "imap",
-        _ => return Err(AppError::NotFound),
-    };
+    // Gmail mail transport stays on IMAP/XOAUTH2 so the account can use IMAP
+    // IDLE for immediate delivery. The hybrid provider uses the Gmail API only
+    // for label semantics, correlated through X-GM-MSGID.
+    let provider_kind = mail_provider_kind(&provider)?;
 
     let display_name = oauth_display_name(&provider, &profile, &display_email);
     let pending_id: Option<String> = sqlx::query_scalar(
@@ -321,7 +325,7 @@ pub async fn oauth_callback(
             ));
         }
         sqlx::query(
-            "UPDATE email_accounts SET imap_host = ?, imap_port = ?, imap_auth_scheme = ?, smtp_host = ?, smtp_port = ?, smtp_auth_scheme = ?, credentials_encrypted = ?, provider_kind = ? WHERE id = ?",
+            "UPDATE email_accounts SET imap_host = ?, imap_port = ?, imap_auth_scheme = ?, smtp_host = ?, smtp_port = ?, smtp_auth_scheme = ?, credentials_encrypted = ?, provider_kind = ?, sync_mode = 'idle' WHERE id = ?",
         )
         .bind(imap_host)
         .bind(993i64)
@@ -337,7 +341,7 @@ pub async fn oauth_callback(
         reconnect_id
     } else if let Some(pending_id) = pending_id {
         sqlx::query(
-            "UPDATE email_accounts SET display_name = ?, primary_email = ?, imap_host = ?, imap_port = ?, imap_auth_scheme = ?, smtp_host = ?, smtp_port = ?, smtp_auth_scheme = ?, credentials_encrypted = ?, body_sync_mode = ?, provider_kind = ? WHERE id = ?",
+            "UPDATE email_accounts SET display_name = ?, primary_email = ?, imap_host = ?, imap_port = ?, imap_auth_scheme = ?, smtp_host = ?, smtp_port = ?, smtp_auth_scheme = ?, credentials_encrypted = ?, body_sync_mode = ?, provider_kind = ?, sync_mode = 'idle' WHERE id = ?",
         )
         .bind(&display_name)
         .bind(&display_email)
@@ -356,7 +360,7 @@ pub async fn oauth_callback(
         pending_id
     } else {
         sqlx::query_scalar(
-            "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, provider_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, provider_kind, sync_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle') RETURNING id",
         )
         .bind(&display_name)
         .bind(&display_email)
@@ -481,5 +485,16 @@ fn oauth_display_name(provider: &str, profile: &OAuthProfile, email: &str) -> St
     match profile.name.as_deref() {
         Some(name) => format!("{name} ({email})"),
         None => format!("{provider_name} ({email})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mail_provider_kind, PROVIDER_GOOGLE, PROVIDER_MICROSOFT};
+
+    #[test]
+    fn google_oauth_uses_gmail_imap_hybrid() {
+        assert_eq!(mail_provider_kind(PROVIDER_GOOGLE).unwrap(), "gmail_imap");
+        assert_eq!(mail_provider_kind(PROVIDER_MICROSOFT).unwrap(), "imap");
     }
 }

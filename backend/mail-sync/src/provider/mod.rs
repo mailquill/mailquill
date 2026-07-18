@@ -38,6 +38,8 @@ pub enum ProviderError {
     NotImplemented(&'static str),
     #[error("http {status}: {body}")]
     Http { status: u16, body: String },
+    #[error("transport error: {0}")]
+    Transport(String),
     #[error("{0}")]
     Other(String),
 }

@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 fn provider_kind_roundtrip() {
     for kind in [
         ProviderKind::Imap,
+        ProviderKind::GmailImap,
         ProviderKind::GmailApi,
         ProviderKind::OutlookApi,
     ] {
@@ -13,6 +14,13 @@ fn provider_kind_roundtrip() {
     }
     // Unknown values fall back to IMAP (existing accounts have no kind column).
     assert_eq!(ProviderKind::parse("anything"), ProviderKind::Imap);
+}
+
+#[test]
+fn gmail_hybrid_uses_imap_transport() {
+    assert!(ProviderKind::GmailImap.syncs_over_imap());
+    assert!(ProviderKind::GmailImap.sends_over_smtp());
+    assert!(!ProviderKind::GmailApi.syncs_over_imap());
 }
 
 #[tokio::test]

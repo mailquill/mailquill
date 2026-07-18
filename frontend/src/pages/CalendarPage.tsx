@@ -149,7 +149,9 @@ function CalendarAccountsStrip() {
     email_account_id: '',
     accept_invalid_tls: false,
   })
-  const gmailAccounts = emailAccounts.filter((account) => account.provider_kind === 'gmail_api')
+  const gmailAccounts = emailAccounts.filter((account) =>
+    ['gmail_api', 'gmail_imap'].includes(account.provider_kind),
+  )
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     createAccount.reset()

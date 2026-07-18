@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use serde_json::json;
 use sqlx::SqlitePool;
 
@@ -59,18 +60,28 @@ impl GmailImapProvider {
     /// Bind each fetched IMAP uid to its Gmail message id (hex X-GM-MSGID) so a
     /// later label op can address it via the API. Best-effort: a failure here
     /// must not break the fetch itself.
-    async fn record_gmail_ids(&mut self, folder: &str, uid_set: &str) {
-        match session::fetch_gmail_msgids(self.imap.session_mut(), uid_set).await {
-            Ok(pairs) => {
-                for (uid, remote) in pairs {
-                    let _ = self.ids.set(folder, uid, &remote).await;
-                }
-            }
-            Err(e) => tracing::warn!(
-                "gmail X-GM-MSGID fetch failed: account={} folder={folder} uid_set={uid_set} err={e}",
-                self.account_id
-            ),
+    async fn record_gmail_ids(&mut self, folder: &str, uid_set: &str) -> Result<(), ProviderError> {
+        self.imap.ensure_selected(folder).await?;
+        let pairs = session::fetch_gmail_msgids(self.imap.session_mut(), uid_set).await?;
+        for (uid, remote) in pairs {
+            self.ids.set(folder, uid, &remote).await?;
         }
+        Ok(())
+    }
+
+    /// Resolve the Gmail API id lazily if the best-effort correlation during
+    /// import was interrupted. This keeps label actions repairable without
+    /// downloading the message again.
+    async fn gmail_message_id(&mut self, folder: &str, uid: u32) -> Result<String, ProviderError> {
+        if let Ok(remote_id) = self.ids.remote_id(folder, uid).await {
+            return Ok(remote_id);
+        }
+        self.record_gmail_ids(folder, &uid.to_string()).await?;
+        self.ids.remote_id(folder, uid).await.map_err(|_| {
+            ProviderError::Other(format!(
+                "Gmail did not return X-GM-MSGID for folder {folder} uid {uid}"
+            ))
+        })
     }
 
     /// `folder_type` of a stored folder (INBOX/ARCHIVE/TRASH/…), used to decide
@@ -90,32 +101,51 @@ impl GmailImapProvider {
 
     /// Gmail label id for a folder. System types map to fixed ids; custom labels
     /// resolve by name through the Labels API.
-    async fn label_id(&mut self, full_path: &str, folder_type: &str) -> Option<String> {
+    async fn label_id(
+        &mut self,
+        full_path: &str,
+        folder_type: &str,
+    ) -> Result<Option<String>, ProviderError> {
         match folder_type {
-            "INBOX" => Some("INBOX".into()),
-            "SENT" => Some("SENT".into()),
-            "DRAFTS" => Some("DRAFT".into()),
-            "SPAM" => Some("SPAM".into()),
-            "TRASH" => Some("TRASH".into()),
+            "INBOX" => Ok(Some("INBOX".into())),
+            "SENT" => Ok(Some("SENT".into())),
+            "DRAFTS" => Ok(Some("DRAFT".into())),
+            "SPAM" => Ok(Some("SPAM".into())),
+            "TRASH" => Ok(Some("TRASH".into())),
             // \All Mail: no addable label (archive = absence of INBOX).
-            "ARCHIVE" => None,
-            _ => self.user_label_id(full_path).await,
+            "ARCHIVE" => Ok(None),
+            _ => self.user_label_id(full_path).await.map(Some),
         }
     }
 
-    async fn user_label_id(&mut self, name: &str) -> Option<String> {
+    async fn user_label_id(&mut self, imap_path: &str) -> Result<String, ProviderError> {
         if self.label_ids.is_none() {
             let mut map = HashMap::new();
-            if let Ok(res) = self.rest.get_json(&format!("{BASE}/labels")).await {
-                for label in res["labels"].as_array().unwrap_or(&Vec::new()) {
-                    if let (Some(id), Some(n)) = (label["id"].as_str(), label["name"].as_str()) {
-                        map.insert(n.to_owned(), id.to_owned());
-                    }
+            let res = self
+                .rest
+                .get_json(&format!("{BASE}/labels?fields=labels(id,name,type)"))
+                .await?;
+            for label in res["labels"].as_array().unwrap_or(&Vec::new()) {
+                if let (Some(id), Some(name)) = (label["id"].as_str(), label["name"].as_str()) {
+                    map.insert(name.to_owned(), id.to_owned());
                 }
             }
             self.label_ids = Some(map);
         }
-        self.label_ids.as_ref().and_then(|m| m.get(name).cloned())
+        let decoded_path = decode_modified_utf7(imap_path);
+        self.label_ids
+            .as_ref()
+            .and_then(|labels| {
+                labels
+                    .get(imap_path)
+                    .or_else(|| labels.get(&decoded_path))
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                ProviderError::Other(format!(
+                    "Gmail label API did not return a label matching IMAP folder {imap_path}"
+                ))
+            })
     }
 
     async fn modify_labels(
@@ -162,7 +192,12 @@ impl MailProvider for GmailImapProvider {
         uid_set: &str,
     ) -> Result<Vec<FetchedMessage>, ProviderError> {
         let msgs = self.imap.fetch_headers(folder, uid_set).await?;
-        self.record_gmail_ids(folder, uid_set).await;
+        if let Err(error) = self.record_gmail_ids(folder, uid_set).await {
+            tracing::warn!(
+                "gmail X-GM-MSGID correlation failed: account={} folder={folder} uid_set={uid_set} error={error}",
+                self.account_id
+            );
+        }
         Ok(msgs)
     }
 
@@ -172,7 +207,12 @@ impl MailProvider for GmailImapProvider {
         uid_set: &str,
     ) -> Result<Vec<FetchedMessage>, ProviderError> {
         let msgs = self.imap.fetch_full(folder, uid_set).await?;
-        self.record_gmail_ids(folder, uid_set).await;
+        if let Err(error) = self.record_gmail_ids(folder, uid_set).await {
+            tracing::warn!(
+                "gmail X-GM-MSGID correlation failed: account={} folder={folder} uid_set={uid_set} error={error}",
+                self.account_id
+            );
+        }
         Ok(msgs)
     }
 
@@ -199,7 +239,7 @@ impl MailProvider for GmailImapProvider {
         uid: u32,
         dest_folder: &str,
     ) -> Result<(), ProviderError> {
-        let remote = self.ids.remote_id(src_folder, uid).await?;
+        let remote = self.gmail_message_id(src_folder, uid).await?;
         let dest_type = self.folder_type(dest_folder).await;
 
         match dest_type.as_str() {
@@ -213,8 +253,8 @@ impl MailProvider for GmailImapProvider {
             }
             _ => {
                 let src_type = self.folder_type(src_folder).await;
-                let add = self.label_id(dest_folder, &dest_type).await;
-                let remove = self.label_id(src_folder, &src_type).await;
+                let add = self.label_id(dest_folder, &dest_type).await?;
+                let remove = self.label_id(src_folder, &src_type).await?;
                 let add_ids: Vec<&str> = add.as_deref().into_iter().collect();
                 let remove_ids: Vec<&str> = remove.as_deref().into_iter().collect();
                 self.modify_labels(&remote, &add_ids, &remove_ids).await?;
@@ -225,7 +265,7 @@ impl MailProvider for GmailImapProvider {
     }
 
     async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError> {
-        let remote = self.ids.remote_id(folder, uid).await?;
+        let remote = self.gmail_message_id(folder, uid).await?;
         self.rest
             .delete(&format!("{BASE}/messages/{remote}"))
             .await?;
@@ -238,5 +278,59 @@ impl MailProvider for GmailImapProvider {
 
     async fn close(&mut self) -> Result<(), ProviderError> {
         self.imap.close().await
+    }
+}
+
+fn decode_modified_utf7(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'&' {
+            let character = input[index..].chars().next().expect("valid UTF-8");
+            output.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+
+        let Some(relative_end) = bytes[index + 1..].iter().position(|byte| *byte == b'-') else {
+            output.push_str(&input[index..]);
+            break;
+        };
+        let end = index + 1 + relative_end;
+        let encoded = &input[index + 1..end];
+        if encoded.is_empty() {
+            output.push('&');
+        } else if let Some(decoded) = decode_modified_utf7_run(encoded) {
+            output.push_str(&decoded);
+        } else {
+            output.push_str(&input[index..=end]);
+        }
+        index = end + 1;
+    }
+    output
+}
+
+fn decode_modified_utf7_run(encoded: &str) -> Option<String> {
+    let standard = encoded.replace(',', "/");
+    let bytes = STANDARD_NO_PAD.decode(standard).ok()?;
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_modified_utf7;
+
+    #[test]
+    fn decodes_custom_label_names_for_api_correlation() {
+        assert_eq!(decode_modified_utf7("J&APw-licher"), "Jülicher");
+        assert_eq!(decode_modified_utf7("R&D-&-"), "R&D-&");
     }
 }

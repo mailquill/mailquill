@@ -5,6 +5,9 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::time;
 
+const GET_JSON_ATTEMPTS: usize = 3;
+const GET_JSON_TIMEOUT: Duration = Duration::from_secs(20);
+
 #[derive(Clone)]
 pub struct Rest {
     client: reqwest::Client,
@@ -38,18 +41,31 @@ impl Rest {
     }
 
     pub async fn get_json(&self, url: &str) -> Result<Value, ProviderError> {
-        match self.get_json_once(url).await {
-            Ok(value) => Ok(value),
-            Err(e) if is_decode_error(&e) => {
-                time::sleep(Duration::from_millis(500)).await;
-                self.get_json_once(url).await
+        for attempt in 1..=GET_JSON_ATTEMPTS {
+            match self.get_json_once(url).await {
+                Ok(value) => return Ok(value),
+                Err(error) if attempt < GET_JSON_ATTEMPTS && is_retryable_get(&error) => {
+                    tracing::debug!(
+                        attempt,
+                        max_attempts = GET_JSON_ATTEMPTS,
+                        error = %error,
+                        "provider GET failed transiently; retrying"
+                    );
+                    time::sleep(retry_delay(attempt)).await;
+                }
+                Err(error) => return Err(error),
             }
-            Err(e) => Err(e),
         }
+        unreachable!("GET retry loop always returns")
     }
 
     async fn get_json_once(&self, url: &str) -> Result<Value, ProviderError> {
-        let res = self.auth(self.client.get(url)).send().await.map_err(wrap)?;
+        let res = self
+            .auth(self.client.get(url))
+            .timeout(GET_JSON_TIMEOUT)
+            .send()
+            .await
+            .map_err(wrap)?;
         let bytes = Self::check(res).await?.bytes().await.map_err(wrap)?;
         serde_json::from_slice(&bytes).map_err(|e| {
             let excerpt = String::from_utf8_lossy(&bytes)
@@ -131,12 +147,103 @@ impl Rest {
 }
 
 fn wrap(e: reqwest::Error) -> ProviderError {
-    ProviderError::Other(e.to_string())
+    let category = if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else if e.is_request() {
+        "request"
+    } else if e.is_body() {
+        "body"
+    } else if e.is_decode() {
+        "decode"
+    } else {
+        "unknown"
+    };
+    ProviderError::Transport(format!("category={category} detail={e}"))
 }
 
-fn is_decode_error(error: &ProviderError) -> bool {
+fn is_retryable_get(error: &ProviderError) -> bool {
     match error {
-        ProviderError::Other(message) => message.contains("error decoding response body"),
+        ProviderError::Transport(_) => true,
+        ProviderError::Http { status, .. } => {
+            matches!(status, 408 | 425 | 429) || (500..=599).contains(status)
+        }
+        ProviderError::Other(message) => message.starts_with("json decode failed"),
         _ => false,
+    }
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        1 => Duration::from_millis(250),
+        _ => Duration::from_secs(1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_retryable_get, Rest};
+    use crate::provider::ProviderError;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn retries_only_safe_transient_get_failures() {
+        assert!(is_retryable_get(&ProviderError::Transport(
+            "category=timeout".into()
+        )));
+        assert!(is_retryable_get(&ProviderError::Http {
+            status: 429,
+            body: String::new(),
+        }));
+        assert!(is_retryable_get(&ProviderError::Http {
+            status: 503,
+            body: String::new(),
+        }));
+        assert!(is_retryable_get(&ProviderError::Other(
+            "json decode failed for endpoint".into()
+        )));
+
+        assert!(!is_retryable_get(&ProviderError::Http {
+            status: 401,
+            body: String::new(),
+        }));
+        assert!(!is_retryable_get(&ProviderError::Http {
+            status: 404,
+            body: String::new(),
+        }));
+        assert!(!is_retryable_get(&ProviderError::Other(
+            "invalid response".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn get_json_retries_a_transient_server_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (status, body) in [
+                ("503 Service Unavailable", "{}"),
+                ("200 OK", r#"{"ok":true}"#),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 2_048];
+                let _ = socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let value = Rest::new("test-token".to_owned())
+            .get_json(&format!("http://{address}/metadata"))
+            .await
+            .unwrap();
+
+        assert_eq!(value["ok"], true);
+        server.await.unwrap();
     }
 }

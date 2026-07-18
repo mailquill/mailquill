@@ -51,6 +51,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gmail_backfill_migration_repairs_orphans_and_stale_mappings() {
+        let pool = memory_database().await;
+        sqlx::raw_sql(
+            "CREATE TABLE email_accounts (id TEXT PRIMARY KEY, provider_kind TEXT NOT NULL);
+             CREATE TABLE folders (
+                 id TEXT PRIMARY KEY,
+                 account_id TEXT NOT NULL,
+                 full_path TEXT NOT NULL,
+                 last_uid INTEGER
+             );
+             CREATE TABLE messages (
+                 id TEXT PRIMARY KEY,
+                 account_id TEXT NOT NULL,
+                 folder_id TEXT NOT NULL,
+                 uid INTEGER NOT NULL,
+                 is_deleted INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE remote_message_ids (
+                 account_id TEXT NOT NULL,
+                 folder_path TEXT NOT NULL,
+                 uid INTEGER NOT NULL,
+                 remote_id TEXT NOT NULL
+             );
+             INSERT INTO email_accounts VALUES ('gmail', 'gmail_api');
+             INSERT INTO folders VALUES ('inbox', 'gmail', 'INBOX', 10);
+             INSERT INTO messages VALUES ('mapped', 'gmail', 'inbox', 1, 0);
+             INSERT INTO messages VALUES ('orphan', 'gmail', 'inbox', 2, 0);
+             INSERT INTO messages VALUES ('deleted', 'gmail', 'inbox', 4, 1);
+             INSERT INTO remote_message_ids VALUES ('gmail', 'INBOX', 1, 'remote-1');
+             INSERT INTO remote_message_ids VALUES ('gmail', 'INBOX', 3, 'remote-3');
+             INSERT INTO remote_message_ids VALUES ('gmail', 'INBOX', 4, 'remote-4');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/mail/0036_gmail_backfill_cursor.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let orphan_deleted: bool =
+            sqlx::query_scalar("SELECT is_deleted FROM messages WHERE id = 'orphan'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let (last_uid, page_token, complete): (i64, Option<String>, bool) = sqlx::query_as(
+            "SELECT last_uid, remote_backfill_page_token, remote_backfill_complete FROM folders WHERE id = 'inbox'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(orphan_deleted);
+        assert_eq!(last_uid, 1);
+        assert_eq!(page_token, None);
+        assert!(!complete);
+        let remaining_mappings: Vec<String> =
+            sqlx::query_scalar("SELECT remote_id FROM remote_message_ids ORDER BY remote_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_mappings, ["remote-1"]);
+    }
+
+    #[tokio::test]
+    async fn gmail_imap_migration_switches_transport_and_clears_api_uid_cache() {
+        let pool = memory_database().await;
+        sqlx::raw_sql(
+            "CREATE TABLE email_accounts (
+                id TEXT PRIMARY KEY,
+                provider_kind TEXT NOT NULL,
+                sync_mode TEXT NOT NULL
+             );
+             CREATE TABLE folders (id TEXT PRIMARY KEY, account_id TEXT NOT NULL);
+             CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                subject TEXT,
+                from_addr TEXT
+             );
+             CREATE TABLE message_bodies (message_id TEXT NOT NULL);
+             CREATE TABLE attachments (message_id TEXT NOT NULL);
+             CREATE TABLE phishing_analysis (message_id TEXT NOT NULL);
+             CREATE TABLE remote_message_ids (account_id TEXT NOT NULL);
+             CREATE VIRTUAL TABLE messages_fts USING fts5(
+                subject, from_addr, body_text, content=''
+             );
+             INSERT INTO email_accounts VALUES ('gmail', 'gmail_api', 'interval');
+             INSERT INTO folders VALUES ('folder', 'gmail');
+             INSERT INTO messages VALUES ('message', 'gmail', 'subject', 'sender@example.test');
+             INSERT INTO message_bodies VALUES ('message');
+             INSERT INTO attachments VALUES ('message');
+             INSERT INTO phishing_analysis VALUES ('message');
+             INSERT INTO remote_message_ids VALUES ('gmail');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/mail/0037_gmail_imap_idle_primary.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let account: (String, String) = sqlx::query_as(
+            "SELECT provider_kind, sync_mode FROM email_accounts WHERE id = 'gmail'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(account, ("gmail_imap".into(), "idle".into()));
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let folders: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM folders")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mappings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_message_ids")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((messages, folders, mappings), (0, 0, 0));
+    }
+
+    #[tokio::test]
     async fn thread_hot_paths_use_covering_indexes_without_temporary_btrees() {
         let pool = memory_database().await;
         run_mail_migrations(&pool).await.unwrap();

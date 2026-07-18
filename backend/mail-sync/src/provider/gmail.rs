@@ -7,14 +7,16 @@
 //!
 //! Gmail message ids are opaque strings; the pipeline addresses messages by
 //! per-folder integer uid. [`IdMap`] (table `remote_message_ids`) bridges the
-//! two: `highest_uid` discovers new message ids (newest-first listing, stopped
-//! at the first already-known id) and assigns ascending uids oldest-first, so
-//! the pipeline's `last_uid` incremental logic works unchanged.
+//! two: `highest_uid` discovers new message ids and assigns ascending uids
+//! oldest-first, so the pipeline's `last_uid` incremental logic works
+//! unchanged. Initial discovery persists Gmail's opaque next-page token so a
+//! bounded pass can resume through labels larger than the page limit.
 
 use async_trait::async_trait;
 use base64::Engine;
 use futures::{stream, StreamExt};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use super::http::Rest;
 use super::idmap::IdMap;
@@ -58,12 +60,22 @@ impl GmailProvider {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_message)
     }
 
-    /// Newest-first message ids in a label until an already-known id (or the
-    /// page cap) is hit; returns them oldest-first for uid assignment.
-    async fn discover_new(&self, label_id: &str) -> Result<Vec<String>, ProviderError> {
+    /// Discover one bounded batch and return its next durable backfill state.
+    async fn discover_new(
+        &self,
+        label_id: &str,
+    ) -> Result<(Vec<String>, Option<String>, bool), ProviderError> {
         let known = self.ids.known_ids(label_id).await?;
+        let backfill = self.ids.backfill_state(label_id).await?;
         let mut new_ids: Vec<String> = Vec::new();
-        let mut page_token: Option<String> = None;
+        let mut page_token = if backfill.complete {
+            None
+        } else {
+            backfill.page_token
+        };
+        let mut can_reset_stale_cursor = !backfill.complete && page_token.is_some();
+        let mut complete = backfill.complete;
+        let mut stopped_at_known = false;
 
         'pages: for _ in 0..MAX_DISCOVERY_PAGES {
             let mut url = format!(
@@ -71,36 +83,89 @@ impl GmailProvider {
                 urlencoding::encode(label_id)
             );
             if let Some(ref t) = page_token {
-                url.push_str(&format!("&pageToken={t}"));
+                url.push_str(&format!("&pageToken={}", urlencoding::encode(t)));
             }
-            let res = self.rest.get_json(&url).await?;
-
-            for m in res["messages"].as_array().unwrap_or(&Vec::new()) {
-                let Some(id) = m["id"].as_str() else { continue };
-                if known.contains(id) {
-                    break 'pages;
+            let res = match self.rest.get_json(&url).await {
+                Ok(response) => {
+                    can_reset_stale_cursor = false;
+                    response
                 }
-                new_ids.push(id.to_owned());
+                // Gmail page tokens are opaque and may expire. Reset a stale
+                // persisted cursor once instead of failing every future sync.
+                Err(ProviderError::Http { status: 400, .. }) if can_reset_stale_cursor => {
+                    self.ids.set_backfill_state(label_id, None, false).await?;
+                    page_token = None;
+                    can_reset_stale_cursor = false;
+                    continue 'pages;
+                }
+                Err(error) => return Err(error),
+            };
+
+            if Self::collect_page_ids(&res["messages"], &known, complete, &mut new_ids) {
+                stopped_at_known = true;
+                page_token = None;
+                break 'pages;
             }
 
             match res["nextPageToken"].as_str() {
                 Some(t) => page_token = Some(t.to_owned()),
-                None => break,
+                None => {
+                    page_token = None;
+                    complete = true;
+                    break;
+                }
             }
         }
 
+        // A completed incremental scan remains complete when it reached the
+        // first known newest message. If it filled the entire page budget
+        // without finding one, continue from the returned token next run.
+        if !stopped_at_known && page_token.is_some() {
+            complete = false;
+        }
+
         new_ids.reverse(); // oldest first
-        Ok(new_ids)
+        Ok((new_ids, page_token, complete))
+    }
+
+    /// Collect unknown ids, optionally stopping at the first known newest id.
+    fn collect_page_ids(
+        messages: &Value,
+        known: &HashSet<String>,
+        stop_at_known: bool,
+        new_ids: &mut Vec<String>,
+    ) -> bool {
+        for message in messages.as_array().unwrap_or(&Vec::new()) {
+            let Some(id) = message["id"].as_str() else {
+                continue;
+            };
+            if known.contains(id) {
+                if stop_at_known {
+                    return true;
+                }
+                continue;
+            }
+            new_ids.push(id.to_owned());
+        }
+        false
+    }
+
+    fn has_label(labels: &Value, label: &str) -> bool {
+        labels
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(label)))
     }
 
     fn flags_from_labels(labels: &Value) -> (bool, bool) {
-        let labels = labels.as_array().map(Vec::as_slice).unwrap_or(&[]);
-        let has = |l: &str| labels.iter().any(|v| v.as_str() == Some(l));
-        (!has("UNREAD"), has("STARRED"))
+        (
+            !Self::has_label(labels, "UNREAD"),
+            Self::has_label(labels, "STARRED"),
+        )
     }
 
     fn is_quota_error(error: &ProviderError) -> bool {
         match error {
+            ProviderError::Http { status: 429, .. } => true,
             ProviderError::Http { status: 403, body } => {
                 body.to_ascii_lowercase().contains("quota exceeded")
             }
@@ -108,16 +173,7 @@ impl GmailProvider {
         }
     }
 
-    async fn fetch_metadata_with_rest(
-        rest: &Rest,
-        uid: u32,
-        remote_id: &str,
-    ) -> Result<FetchedMessage, ProviderError> {
-        let res = rest
-            .get_json(&format!(
-                "{BASE}/messages/{remote_id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=Message-Id&metadataHeaders=In-Reply-To&metadataHeaders=References&metadataHeaders=List-Id&fields=id,labelIds,internalDate,payload/headers"
-            ))
-            .await?;
+    fn fetched_metadata_from_value(uid: u32, res: &Value) -> Result<FetchedMessage, ProviderError> {
         let (is_seen, is_flagged) = Self::flags_from_labels(&res["labelIds"]);
         let internal_date = rfc3339_from_millis(
             res["internalDate"]
@@ -144,6 +200,19 @@ impl GmailProvider {
         ))
     }
 
+    async fn fetch_metadata_with_rest(
+        rest: &Rest,
+        uid: u32,
+        remote_id: &str,
+    ) -> Result<FetchedMessage, ProviderError> {
+        let response = rest
+            .get_json(&format!(
+                "{BASE}/messages/{remote_id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=Message-Id&metadataHeaders=In-Reply-To&metadataHeaders=References&metadataHeaders=List-Id&fields=id,labelIds,internalDate,payload/headers"
+            ))
+            .await?;
+        Self::fetched_metadata_from_value(uid, &response)
+    }
+
     async fn fetch_raw_message(&self, remote_id: &str) -> Result<(Vec<u8>, Value), ProviderError> {
         Self::fetch_raw_message_with_rest(&self.rest, remote_id).await
     }
@@ -157,6 +226,10 @@ impl GmailProvider {
                 "{BASE}/messages/{remote_id}?format=raw&fields=id,raw,labelIds,internalDate"
             ))
             .await?;
+        Self::raw_message_from_value(res)
+    }
+
+    fn raw_message_from_value(res: Value) -> Result<(Vec<u8>, Value), ProviderError> {
         let raw_b64 = res["raw"].as_str().unwrap_or_default();
         let raw = base64::engine::general_purpose::URL_SAFE
             .decode(raw_b64)
@@ -232,12 +305,16 @@ impl MailProvider for GmailProvider {
     }
 
     async fn highest_uid(&mut self, folder: &str) -> Result<Option<u32>, ProviderError> {
-        let new_ids = self.discover_new(folder).await?;
+        let (new_ids, next_page_token, backfill_complete) = self.discover_new(folder).await?;
         let max = if new_ids.is_empty() {
             self.ids.max_uid(folder).await?
         } else {
             self.ids.assign(folder, &new_ids).await?
         };
+        // Advance only after every discovered id has been durably assigned.
+        self.ids
+            .set_backfill_state(folder, next_page_token.as_deref(), backfill_complete)
+            .await?;
         Ok((max > 0).then_some(max))
     }
 
@@ -252,12 +329,12 @@ impl MailProvider for GmailProvider {
             .map(|(uid, remote_id)| {
                 let rest = rest.clone();
                 async move {
-                    let res = rest
+                    let result = rest
                         .get_json(&format!(
                             "{BASE}/messages/{remote_id}?format=minimal&fields=id,labelIds"
                         ))
                         .await;
-                    (uid, remote_id, res)
+                    (uid, remote_id, result)
                 }
             })
             .buffer_unordered(CONCURRENT_FETCHES)
@@ -269,12 +346,20 @@ impl MailProvider for GmailProvider {
             match res {
                 Ok(v) => {
                     let (seen, flagged) = Self::flags_from_labels(&v["labelIds"]);
-                    // API providers move atomically; no IMAP-style \Deleted ghost.
-                    out.push((uid, seen, flagged, false));
+                    let deleted = !Self::has_label(&v["labelIds"], folder);
+                    out.push((uid, seen, flagged, deleted));
+                    if deleted {
+                        self.ids.remove(folder, uid).await?;
+                    }
                 }
                 Err(e) if Self::is_quota_error(&e) => return Err(e),
-                // Message gone (deleted/moved on the server) — drop the mapping.
-                Err(_) => self.ids.remove(folder, uid).await?,
+                Err(ProviderError::Http { status: 404, .. }) => {
+                    out.push((uid, false, false, true));
+                    self.ids.remove(folder, uid).await?;
+                }
+                // Authentication, transport, and provider failures are not
+                // evidence that the message was deleted.
+                Err(error) => return Err(error),
             }
         }
         Ok(out)
@@ -445,6 +530,7 @@ impl MailProvider for GmailProvider {
 mod tests {
     use super::GmailProvider;
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn flags_from_labels_maps_gmail_unread_label_to_seen_state() {
@@ -465,6 +551,38 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_backfill_skips_known_ids_and_keeps_scanning_older_mail() {
+        let known = HashSet::from(["known-newest".to_owned()]);
+        let mut discovered = Vec::new();
+
+        let stopped = GmailProvider::collect_page_ids(
+            &json!([{ "id": "known-newest" }, { "id": "older-undiscovered" }]),
+            &known,
+            false,
+            &mut discovered,
+        );
+
+        assert!(!stopped);
+        assert_eq!(discovered, ["older-undiscovered"]);
+    }
+
+    #[test]
+    fn completed_backfill_stops_at_first_known_newest_id() {
+        let known = HashSet::from(["known".to_owned()]);
+        let mut discovered = Vec::new();
+
+        let stopped = GmailProvider::collect_page_ids(
+            &json!([{ "id": "new" }, { "id": "known" }, { "id": "old" }]),
+            &known,
+            true,
+            &mut discovered,
+        );
+
+        assert!(stopped);
+        assert_eq!(discovered, ["new"]);
+    }
+
+    #[test]
     fn quota_errors_are_detected_from_gmail_http_body() {
         let error = super::ProviderError::Http {
             status: 403,
@@ -477,6 +595,11 @@ mod tests {
             body: "The caller does not have permission".to_owned(),
         };
         assert!(!GmailProvider::is_quota_error(&forbidden));
+
+        assert!(GmailProvider::is_quota_error(&super::ProviderError::Http {
+            status: 429,
+            body: "rate limited".to_owned(),
+        }));
     }
 
     #[test]

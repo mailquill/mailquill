@@ -28,7 +28,9 @@ export function DavSyncButton() {
     let contacts = 0
     let events = 0
     const errors: string[] = []
-    for (const account of accounts.filter((account) => account.provider_kind !== 'gmail_api')) {
+    for (const account of accounts.filter(
+      (account) => !['gmail_api', 'gmail_imap'].includes(account.provider_kind),
+    )) {
       try {
         const r = await sync.mutateAsync(account.id)
         contacts += r.contacts

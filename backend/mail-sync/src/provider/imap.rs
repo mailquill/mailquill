@@ -30,7 +30,7 @@ impl ImapProvider {
         })
     }
 
-    async fn ensure_selected(&mut self, folder: &str) -> Result<(), ProviderError> {
+    pub(crate) async fn ensure_selected(&mut self, folder: &str) -> Result<(), ProviderError> {
         if self.selected.as_deref() != Some(folder) {
             session::select_folder(&mut self.session, folder).await?;
             self.selected = Some(folder.to_owned());

@@ -8,7 +8,8 @@ import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
 import { Select } from '@/shared/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/components/ui/dialog'
-import { apiGet } from '@/shared/api'
+import { ApiError, apiGet } from '@/shared/api'
+import { TlsCertificateDecisionDialog } from '@/shared/components'
 import { startOAuthRedirect } from '@/shared/lib/oauth'
 import { DavSyncButton } from '@/widgets/DavSyncButton'
 import { RecipientChips } from '@/features/compose'
@@ -147,7 +148,6 @@ function CalendarAccountsStrip() {
     password: '',
     access_token: '',
     email_account_id: '',
-    accept_invalid_tls: false,
   })
   const gmailAccounts = emailAccounts.filter((account) =>
     ['gmail_api', 'gmail_imap'].includes(account.provider_kind),
@@ -158,7 +158,7 @@ function CalendarAccountsStrip() {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
-  function submit() {
+  function submit(tlsDecision?: 'accept' | 'accept_always') {
     createAccount.mutate(
       {
         display_name: form.display_name || form.type,
@@ -168,14 +168,29 @@ function CalendarAccountsStrip() {
         username: form.username || null,
         password: form.password || null,
         access_token: form.access_token || null,
-        accept_invalid_tls: form.accept_invalid_tls,
+        tls_decision: tlsDecision,
       },
       { onSuccess: () => setOpen(false) },
     )
   }
 
+  const tlsCertificateError =
+    createAccount.error instanceof ApiError &&
+    createAccount.error.code === 'caldav_tls_certificate_invalid'
+
   return (
     <div className="shrink-0 border-b border-border bg-background px-5 py-2.5">
+      <TlsCertificateDecisionDialog
+        open={tlsCertificateError}
+        pending={createAccount.isPending}
+        onDecision={(decision) => {
+          if (decision === 'deny') {
+            createAccount.reset()
+            return
+          }
+          submit(decision)
+        }}
+      />
       <div className="flex flex-wrap items-center gap-2">
         {accounts.map((account) => (
           <span key={account.id} className="inline-flex h-8 items-center gap-2 rounded-md border border-border bg-card px-2.5 text-[12px] font-semibold">
@@ -244,21 +259,10 @@ function CalendarAccountsStrip() {
               </Select>
               <Input placeholder={form.type === 'caldav' ? t('calendar.usernameEmail') : t('calendar.username')} value={form.username} onChange={(e) => set('username', e.currentTarget.value)} />
               <Input placeholder={form.auth_scheme === 'oauth2' ? t('calendar.accessToken') : t('calendar.password')} type="password" value={form.auth_scheme === 'oauth2' ? form.access_token : form.password} onChange={(e) => form.auth_scheme === 'oauth2' ? set('access_token', e.currentTarget.value) : set('password', e.currentTarget.value)} />
-              <Button onClick={submit} disabled={createAccount.isPending}>{t('action.save')}</Button>
+              <Button onClick={() => submit()} disabled={createAccount.isPending}>{t('action.save')}</Button>
             </>
           )}
-          {form.type === 'caldav' && (
-            <label className="md:col-span-full flex items-start gap-2 text-[12px] text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={form.accept_invalid_tls}
-                onChange={(e) => set('accept_invalid_tls', e.currentTarget.checked)}
-                className="mt-0.5 size-4 accent-primary"
-              />
-              <span>{t('calendar.acceptInvalidTls')}</span>
-            </label>
-          )}
-          {form.type === 'caldav' && createAccount.error && (
+          {form.type === 'caldav' && createAccount.error && !tlsCertificateError && (
             <div className="md:col-span-full">
               <CaldavErrorAlert error={createAccount.error} />
             </div>

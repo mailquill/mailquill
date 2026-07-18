@@ -15,5 +15,6 @@ pub mod secrets;
 pub mod sieve;
 pub mod state;
 pub mod sync_impl;
+pub mod tls;
 pub mod validate;
 pub mod vapid_keys;

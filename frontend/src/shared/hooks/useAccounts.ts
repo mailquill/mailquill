@@ -154,9 +154,11 @@ export function useDisableMailboxContacts() {
 
 export function useDiscoverMailboxContacts() {
   return useMutation({
-    mutationFn: ({ accountId, selectedBookRemoteIds }: { accountId: string; selectedBookRemoteIds?: string[] }) =>
+    mutationFn: ({ accountId, selectedBookRemoteIds, acceptInvalidTls, tlsDecision }: { accountId: string; selectedBookRemoteIds?: string[]; acceptInvalidTls?: boolean; tlsDecision?: 'accept' | 'accept_always' }) =>
       apiPost<{ source_id: string; books: DiscoveredContactBook[] }>(`/accounts/${accountId}/contacts/discover`, {
         selected_book_remote_ids: selectedBookRemoteIds,
+        accept_invalid_tls: acceptInvalidTls ?? false,
+        tls_decision: tlsDecision,
       }),
   })
 }

@@ -51,6 +51,7 @@ export function useCreateCalendarAccount() {
       access_token?: string | null
       refresh_token?: string | null
       accept_invalid_tls?: boolean
+      tls_decision?: 'accept' | 'accept_always'
       sync_interval_secs?: number
     }) => apiPost<CalendarAccount>('/calendar-accounts', data),
     onSuccess: () => {
@@ -91,10 +92,14 @@ export function useSyncCalendarAccount() {
 /** Resolve an account's CalDAV calendar collections (RFC 6764 discovery). */
 export function useCaldavDiscover() {
   return useMutation({
-    mutationFn: (input: string | { accountId: string; acceptInvalidTls?: boolean }) => {
+    mutationFn: (input: string | { accountId: string; acceptInvalidTls?: boolean; tlsDecision?: 'accept' | 'accept_always' }) => {
       const accountId = typeof input === 'string' ? input : input.accountId
       const acceptInvalidTls = typeof input === 'string' ? false : Boolean(input.acceptInvalidTls)
-      const qs = acceptInvalidTls ? '?accept_invalid_tls=true' : ''
+      const tlsDecision = typeof input === 'string' ? undefined : input.tlsDecision
+      const params = new URLSearchParams()
+      if (acceptInvalidTls) params.set('accept_invalid_tls', 'true')
+      if (tlsDecision) params.set('tls_decision', tlsDecision)
+      const qs = params.size ? `?${params}` : ''
       return apiGet<CaldavDiscoverResponse>(`/accounts/${accountId}/caldav-discover${qs}`)
     },
   })

@@ -13,6 +13,12 @@ import {
   Calendar,
 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
+import {
+  TlsCertificateDecisionDialog,
+  tlsCertificateFromError,
+  type TlsCertificateInfo,
+  type TlsDecision,
+} from '@/shared/components'
 import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
 import { Select } from '@/shared/components/ui/select'
@@ -37,24 +43,6 @@ interface AddAccountFormProps {
   onCancel: () => void
   onCreated: () => void
 }
-
-// Certificate details attached to a 422 with code "tls_untrusted": the cert
-// the server presented, offered to the user as a Thunderbird-style trust
-// exception.
-interface TlsCertInfo {
-  host: string
-  port: number
-  fingerprint_sha256: string
-  der_base64: string
-}
-
-function tlsCertFromError(error: unknown): TlsCertInfo | null {
-  if (!(error instanceof ApiError)) return null
-  const body = error.json as { code?: string; cert?: TlsCertInfo } | null
-  return body?.code === 'tls_untrusted' && body.cert?.der_base64 ? body.cert : null
-}
-
-const formatFingerprint = (hex: string) => hex.toUpperCase().match(/.{2}/g)?.join(':') ?? hex
 
 function emptyAccountForm(): AccountFormState {
   return {
@@ -134,7 +122,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
     return option.label
   }
 
-  function finish(trustCert?: TlsCertInfo) {
+  function finish(trustCert?: TlsCertificateInfo, tlsDecision?: TlsDecision) {
     const def = serverDefaults(data.email)
     const authScheme = oauthOk ? 'xoauth2' : 'plain'
     const imapHost = data.imapHost || def.imapHost
@@ -166,6 +154,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
         // when it talks to the same host the certificate came from.
         imap_tls_cert: trustCert?.der_base64,
         smtp_tls_cert: trustCert && smtpHost === trustCert.host ? trustCert.der_base64 : undefined,
+        tls_decision: tlsDecision,
         contacts_enabled: contactsEnabled,
       },
       { onSuccess: setCreated },
@@ -175,7 +164,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
   // Shared credentials need one password; separate mode needs both.
   const credsValid = data.separateCreds ? !!data.imapPass && !!data.smtpPass : !!data.imapPass
   const step3Valid = !!data.imapHost && !!data.smtpHost && credsValid
-  const tlsCert = tlsCertFromError(createAccount.error)
+  const tlsCert = tlsCertificateFromError(createAccount.error)
 
   const secOpts: [Security, string][] = [
     ['ssl', t('settings.secSsl')],
@@ -213,6 +202,20 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
 
   return (
     <div className="mb-4 rounded-[10px] border border-[#3b82f6] bg-card p-5 shadow-[0_0_0_3px_rgba(59,130,246,0.1)]">
+      <TlsCertificateDecisionDialog
+        open={step === 3 && Boolean(tlsCert)}
+        host={tlsCert?.host}
+        port={tlsCert?.port}
+        fingerprint={tlsCert?.fingerprint_sha256}
+        pending={createAccount.isPending}
+        onDecision={(decision) => {
+          if (decision === 'deny') {
+            createAccount.reset()
+            return
+          }
+          if (tlsCert) finish(tlsCert, decision)
+        }}
+      />
       <WizStepper step={step} />
 
       {step === 1 && (
@@ -460,32 +463,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
             </ServerGroup>
           </div>
 
-          {tlsCert ? (
-            <div className="mt-4 flex items-start gap-3 rounded-[10px] border border-[#d97706]/30 bg-[#d97706]/10 px-4 py-3.5">
-              <ShieldAlert className="mt-0.5 size-[18px] shrink-0 text-[#d97706]" />
-              <div className="flex-1">
-                <div className="text-[14px] font-bold text-foreground">{t('settings.tlsUntrusted')}</div>
-                <div className="mt-0.5 text-[12.5px] leading-snug text-secondary-foreground">
-                  {t('settings.tlsUntrustedSub', { host: tlsCert.host, port: tlsCert.port })}
-                </div>
-                <div className="mt-2 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-                  {t('settings.tlsFingerprint')}
-                </div>
-                <div className="break-all font-mono text-[11.5px] text-foreground">
-                  {formatFingerprint(tlsCert.fingerprint_sha256)}
-                </div>
-                <Button
-                  type="button"
-                  className="mt-3"
-                  disabled={createAccount.isPending}
-                  onClick={() => finish(tlsCert)}
-                >
-                  <ShieldAlert className="size-4" />
-                  {t('settings.tlsTrust')}
-                </Button>
-              </div>
-            </div>
-          ) : createAccount.error ? (
+          {createAccount.error && !tlsCert ? (
             <p className="mt-3 text-[12.5px] text-destructive">
               {t('settings.addFailed')}
               {createAccount.error instanceof ApiError && createAccount.error.detail ? (

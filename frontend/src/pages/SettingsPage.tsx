@@ -24,6 +24,7 @@ import {
   RefreshCw,
   Wrench,
 } from 'lucide-react'
+import { ApiError } from '@/shared/api'
 import { cn } from '@/shared/lib/utils'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { Input } from '@/shared/components/ui/input'
@@ -31,6 +32,11 @@ import { Label } from '@/shared/components/ui/label'
 import { Select } from '@/shared/components/ui/select'
 import { Button } from '@/shared/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/components/ui/dialog'
+import {
+  TlsCertificateDecisionDialog,
+  tlsCertificateFromError,
+  type TlsDecision,
+} from '@/shared/components'
 import { AddAccountForm } from '@/features/accounts'
 import { RulesSection } from '@/widgets/RulesSection'
 import { PgpKeyManagement } from '@/widgets/PgpKeyManagement'
@@ -67,7 +73,7 @@ import {
   useEnablePushNotifications,
   useVapidPublicKey,
 } from '@/shared/hooks/usePushNotifications'
-import type { Account } from '@/shared/types'
+import type { Account, DiscoveredContactBook } from '@/shared/types'
 
 type Section = 'accounts' | 'calendar' | 'appearance' | 'composing' | 'notifications' | 'rules' | 'privacy'
 
@@ -274,6 +280,7 @@ type AccountEditData = z.output<typeof accountEditSchema>
 function AccountCard({ account }: { account: Account }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
+  const [tlsRetryData, setTlsRetryData] = useState<AccountEditData | null>(null)
   const updateAccount = useUpdateAccount()
   const deleteAccount = useDeleteAccount()
   const color = accountColor(account.id)
@@ -298,8 +305,39 @@ function AccountCard({ account }: { account: Account }) {
     setValue('caldav_url', caldav_url, { shouldDirty: true })
   }
 
+  function saveAccount(data: AccountEditData, decision?: TlsDecision) {
+    setTlsRetryData(data)
+    const certificate = tlsCertificateFromError(updateAccount.error)
+    updateAccount.mutate({
+      id: account.id,
+      data: {
+        ...data,
+        imap_tls_cert: certificate?.der_base64,
+        smtp_tls_cert:
+          certificate && data.smtp_host === certificate.host ? certificate.der_base64 : undefined,
+        tls_decision: decision,
+      },
+    })
+  }
+
+  const tlsCertificate = tlsCertificateFromError(updateAccount.error)
+
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card">
+      <TlsCertificateDecisionDialog
+        open={Boolean(tlsCertificate)}
+        host={tlsCertificate?.host}
+        port={tlsCertificate?.port}
+        fingerprint={tlsCertificate?.fingerprint_sha256}
+        pending={updateAccount.isPending}
+        onDecision={(decision) => {
+          if (decision === 'deny') {
+            updateAccount.reset()
+            return
+          }
+          if (tlsRetryData) saveAccount(tlsRetryData, decision)
+        }}
+      />
       <button
         onClick={() => setExpanded((v) => !v)}
         className="flex w-full items-center gap-3 px-4 py-3.5 text-left"
@@ -323,7 +361,7 @@ function AccountCard({ account }: { account: Account }) {
       <ContactCapabilityRow account={account} />
 
       {expanded && (
-        <form className="border-t border-border p-4" onSubmit={handleSubmit((d) => updateAccount.mutate({ id: account.id, data: d }))}>
+        <form className="border-t border-border p-4" onSubmit={handleSubmit((data) => saveAccount(data))}>
           <div className="grid gap-3 md:grid-cols-2">
             <Field id={`${account.id}-display`} label={t('settings.displayName')} error={errors.display_name?.message}>
               <Input id={`${account.id}-display`} {...register('display_name')} />
@@ -425,19 +463,29 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
   const [keepCache, setKeepCache] = useState(true)
   const [cardDavUrl, setCardDavUrl] = useState(account.carddav_url ?? '')
   const [selectedBooks, setSelectedBooks] = useState<string[]>([])
+  const [tlsDecision, setTlsDecision] = useState<'accept' | 'accept_always'>()
   const capability = account.contacts
   const state = capability?.state ?? 'disabled'
   const provider = capability?.provider === 'google' ? 'Google' : capability?.provider === 'graph' ? 'Microsoft' : 'CardDAV'
   const providerConfigurationRequired = capability?.reason === 'provider_configuration_required'
   const busy = enable.isPending || disable.isPending || discover.isPending || sync.isPending
+  const cardDavTlsError = discover.error instanceof ApiError && discover.error.code === 'carddav_tls_certificate_invalid'
+  const discoveryErrorMessage = discover.error instanceof ApiError
+    ? discover.error.detail ?? discover.error.message
+    : String(discover.error)
+
+  function rememberDefaultBooks({ books }: { books: DiscoveredContactBook[] }) {
+    setSelectedBooks(books.filter((book) => book.is_default || books.length === 1).map((book) => book.remote_id))
+  }
 
   function primaryAction() {
     if (!capability || state === 'disabled') {
       if (capability?.provider === 'cardav') {
+        setTlsDecision(undefined)
         setSetupOpen(true)
         discover.mutate(
           { accountId: account.id },
-          { onSuccess: ({ books }) => setSelectedBooks(books.filter((book) => book.is_default || books.length === 1).map((book) => book.remote_id)) },
+          { onSuccess: rememberDefaultBooks },
         )
       } else {
         enable.mutate(account.id)
@@ -448,10 +496,11 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
       enable.mutate(account.id)
     } else if (state === 'error' || state === 'unavailable') {
       if (capability.provider === 'cardav') {
+        setTlsDecision(undefined)
         setSetupOpen(true)
         discover.mutate(
           { accountId: account.id },
-          { onSuccess: ({ books }) => setSelectedBooks(books.filter((book) => book.is_default || books.length === 1).map((book) => book.remote_id)) },
+          { onSuccess: rememberDefaultBooks },
         )
       }
       else startOAuthRedirect(capability.provider === 'google' ? 'google' : 'microsoft', account.id, 'contacts')
@@ -476,6 +525,21 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
 
   return (
     <div id={`contact-capability-${account.id}`} tabIndex={-1} className="border-t border-border bg-secondary/25 px-4 py-3 outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-live="polite">
+      <TlsCertificateDecisionDialog
+        open={setupOpen && cardDavTlsError}
+        pending={discover.isPending}
+        onDecision={(decision) => {
+          if (decision === 'deny') {
+            discover.reset()
+            return
+          }
+          setTlsDecision(decision)
+          discover.mutate(
+            { accountId: account.id, tlsDecision: decision },
+            { onSuccess: rememberDefaultBooks },
+          )
+        }}
+      />
       <div className="flex flex-wrap items-center gap-3">
         <Users className="size-4 text-muted-foreground" />
         <div className="min-w-0 flex-1">
@@ -514,9 +578,9 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
         )}
       </div>
       {discover.data ? <p className="mt-2 text-[11.5px] text-muted-foreground">{t('contacts.discoverySucceeded')}</p> : null}
-      {discover.error ? <p role="alert" className="mt-2 text-[11.5px] text-destructive">{String(discover.error)}</p> : null}
+      {discover.error && !cardDavTlsError ? <p role="alert" className="mt-2 text-[11.5px] text-destructive">{discoveryErrorMessage}</p> : null}
 
-      <Dialog open={setupOpen} onClose={() => setSetupOpen(false)}>
+      <Dialog open={setupOpen && !cardDavTlsError} onClose={() => setSetupOpen(false)}>
         <DialogContent className="w-[min(560px,calc(100vw-2rem))] max-w-none">
           <DialogHeader><DialogTitle>{t('contacts.carddavSetupTitle')}</DialogTitle></DialogHeader>
           <p className="text-[13px] text-muted-foreground">{t('contacts.carddavSetupHelp')}</p>
@@ -538,7 +602,9 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
               ))}
             </fieldset>
           ) : null}
-          {discover.error ? <p role="alert" className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-[12px] text-destructive">{String(discover.error)}</p> : null}
+          {discover.error ? (
+            <p role="alert" className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-[12px] text-destructive">{discoveryErrorMessage}</p>
+          ) : null}
           <details className="mt-4 rounded-md border border-border p-3">
             <summary className="cursor-pointer text-[12.5px] font-semibold">{t('contacts.advancedCarddav')}</summary>
             <Field id={`${account.id}-setup-carddav`} label={t('settings.carddavUrl')}>
@@ -560,7 +626,7 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
             <Button
               disabled={!discover.data || selectedBooks.length === 0 || discover.isPending || enable.isPending}
               onClick={() => discover.mutate(
-                { accountId: account.id, selectedBookRemoteIds: selectedBooks },
+                { accountId: account.id, selectedBookRemoteIds: selectedBooks, tlsDecision },
                 { onSuccess: () => enable.mutate(account.id, { onSuccess: () => setSetupOpen(false) }) },
               )}
             >{t('contacts.enableSelectedBooks')}</Button>

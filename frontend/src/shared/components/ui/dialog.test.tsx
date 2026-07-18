@@ -27,7 +27,7 @@ describe('Dialog keyboard accessibility', () => {
     const trigger = screen.getByRole('button', { name: 'Open setup' })
     await user.click(trigger)
 
-    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Contact setup' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'First action' })).toHaveFocus()
 
     await user.tab({ shift: true })

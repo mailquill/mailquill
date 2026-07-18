@@ -3,7 +3,7 @@
 //! The API crate owns persistence and credentials. This crate owns provider
 //! HTTP calls plus vCard parsing/building into a provider-neutral contact model.
 
-use std::{collections::HashMap, future::Future};
+use std::{collections::HashMap, error::Error as StdError, future::Future};
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -17,6 +17,11 @@ use vcard4::property::Property;
 pub mod adapters;
 pub mod orchestration;
 pub mod repository;
+
+/// Stable marker preserved across the DAV transport boundary for certificate failures.
+pub const TLS_CERTIFICATE_ERROR_PREFIX: &str = "tls certificate validation failed";
+/// User-safe CardDAV error used by orchestration and API recovery flows.
+pub const CARDDAV_TLS_VERIFICATION_FAILED: &str = "CardDAV TLS verification failed";
 
 #[derive(Clone)]
 pub enum DavAuth {
@@ -293,6 +298,9 @@ fn client_with_tls_options(
 }
 
 fn explain_transport_error(err: reqwest::Error) -> String {
+    if error_chain_contains_certificate_failure(&err) {
+        return format!("{TLS_CERTIFICATE_ERROR_PREFIX}: {err}");
+    }
     if err.is_timeout() {
         return format!("request timed out: {err}");
     }
@@ -300,6 +308,32 @@ fn explain_transport_error(err: reqwest::Error) -> String {
         return format!("connection failed: {err}");
     }
     format!("request failed: {err}")
+}
+
+fn error_chain_contains_certificate_failure(mut err: &(dyn StdError + 'static)) -> bool {
+    loop {
+        let message = err.to_string().to_ascii_lowercase();
+        let mentions_certificate = message.contains("certificate") || message.contains("cert ");
+        let indicates_validation_failure = [
+            "invalid",
+            "not valid",
+            "expired",
+            "unknown issuer",
+            "hostname",
+            "name mismatch",
+            "verify",
+            "verification",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle));
+        if mentions_certificate && indicates_validation_failure {
+            return true;
+        }
+        let Some(source) = err.source() else {
+            return false;
+        };
+        err = source;
+    }
 }
 
 fn apply_auth(rb: reqwest::RequestBuilder, auth: &DavAuth) -> reqwest::RequestBuilder {
@@ -1403,7 +1437,18 @@ mod manager_tests {
         Arc,
     };
 
-    use super::ContactSyncManager;
+    use super::{error_chain_contains_certificate_failure, ContactSyncManager};
+
+    #[test]
+    fn identifies_certificate_validation_failures_before_transport_classification() {
+        let certificate_error = std::io::Error::other(
+            "invalid peer certificate: certificate not valid for name dav.example.test",
+        );
+        let connection_error = std::io::Error::other("connection refused");
+
+        assert!(error_chain_contains_certificate_failure(&certificate_error));
+        assert!(!error_chain_contains_certificate_failure(&connection_error));
+    }
 
     #[tokio::test]
     async fn stopping_an_account_cancels_its_running_task() {

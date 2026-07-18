@@ -35,6 +35,7 @@ pub struct NewCalendarAccount {
     access_token: Option<String>,
     refresh_token: Option<String>,
     accept_invalid_tls: Option<bool>,
+    tls_decision: Option<crate::tls::TlsDecision>,
     sync_interval_secs: Option<i64>,
 }
 
@@ -168,12 +169,20 @@ pub async fn create_account(
             "basic".into()
         }
     });
+    let persist_tls_exception = req.accept_invalid_tls == Some(true)
+        || req
+            .tls_decision
+            .is_some_and(crate::tls::TlsDecision::persists_exception);
+    let retry_with_invalid_tls = req.accept_invalid_tls == Some(true)
+        || req
+            .tls_decision
+            .is_some_and(crate::tls::TlsDecision::permits_retry);
     let credentials = serde_json::json!({
         "username": req.username,
         "password": req.password,
         "access_token": req.access_token,
         "refresh_token": req.refresh_token,
-        "accept_invalid_tls": req.accept_invalid_tls.unwrap_or(false),
+        "accept_invalid_tls": persist_tls_exception,
     });
     let encrypted = state
         .credential_key
@@ -198,7 +207,14 @@ pub async fn create_account(
     .fetch_one(&user_db)
     .await?;
 
-    if let Err(err) = sync_calendar_account(&user_db, &state, &id).await {
+    if let Err(err) = sync_calendar_account_with_tls_override(
+        &user_db,
+        &state,
+        &id,
+        retry_with_invalid_tls.then_some(true),
+    )
+    .await
+    {
         let _ = sqlx::query("DELETE FROM calendar_accounts WHERE id = ?")
             .bind(&id)
             .execute(&user_db)
@@ -761,6 +777,15 @@ async fn sync_calendar_account(
     state: &AppState,
     account_id: &str,
 ) -> Result<(), String> {
+    sync_calendar_account_with_tls_override(db, state, account_id, None).await
+}
+
+async fn sync_calendar_account_with_tls_override(
+    db: &sqlx::SqlitePool,
+    state: &AppState,
+    account_id: &str,
+    accept_invalid_tls_override: Option<bool>,
+) -> Result<(), String> {
     sqlx::query(
         "UPDATE calendar_accounts SET sync_status = 'syncing', sync_error = NULL WHERE id = ?",
     )
@@ -768,7 +793,8 @@ async fn sync_calendar_account(
     .execute(db)
     .await
     .map_err(|e| e.to_string())?;
-    let result = sync_calendar_account_inner(db, state, account_id).await;
+    let result =
+        sync_calendar_account_inner(db, state, account_id, accept_invalid_tls_override).await;
     match &result {
         Ok(()) => {
             let _ = sqlx::query("UPDATE calendar_accounts SET sync_status='idle', last_synced_at=?, sync_error=NULL WHERE id=?")
@@ -794,6 +820,7 @@ async fn sync_calendar_account_inner(
     db: &sqlx::SqlitePool,
     state: &AppState,
     account_id: &str,
+    accept_invalid_tls_override: Option<bool>,
 ) -> Result<(), String> {
     let row: (String, Option<String>, String, Vec<u8>, Option<String>) = sqlx::query_as(
         "SELECT type, base_url, auth_scheme, credentials_encrypted, sync_token FROM calendar_accounts WHERE id = ?",
@@ -810,7 +837,8 @@ async fn sync_calendar_account_inner(
     match provider.as_str() {
         "caldav" => {
             let auth = dav_auth(&auth_scheme, &creds)?;
-            let accept_invalid_tls = creds["accept_invalid_tls"].as_bool().unwrap_or(false);
+            let accept_invalid_tls = accept_invalid_tls_override
+                .unwrap_or_else(|| creds["accept_invalid_tls"].as_bool().unwrap_or(false));
             let (base, calendars) =
                 discover_caldav_calendars(base_url.as_deref(), &creds, &auth, accept_invalid_tls)
                     .await?;

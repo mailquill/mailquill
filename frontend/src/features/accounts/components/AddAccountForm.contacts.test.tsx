@@ -104,10 +104,11 @@ describe('first-time mailbox contact setup', () => {
     const { container } = render(<AddAccountForm onCancel={vi.fn()} onCreated={vi.fn()} />)
     await reachCapabilityReview(user, container)
 
-    await user.click(screen.getByRole('button', { name: /Trust certificate/i }))
+    await user.click(screen.getByRole('button', { name: 'Accept once' }))
     await waitFor(() => expect(createMutate.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
       primary_email: 'person@example.test',
       imap_tls_cert: 'trusted-cert',
+      tls_decision: 'accept',
     })))
   })
 })

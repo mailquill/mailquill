@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{error::AppError, middleware::UserId, state::AppState, validate};
+use crate::{error::AppError, middleware::UserId, state::AppState, tls::TlsDecision, validate};
 
 #[derive(Deserialize)]
 pub struct AddAccountRequest {
@@ -33,6 +33,7 @@ pub struct AddAccountRequest {
     /// User-approved TLS trust exceptions: base64 DER certificate per service.
     imap_tls_cert: Option<String>,
     smtp_tls_cert: Option<String>,
+    tls_decision: Option<TlsDecision>,
     /// Mailbox backend: imap (default), gmail_api, gmail_imap, outlook_api.
     provider_kind: Option<String>,
     pgp_key_id: Option<String>,
@@ -60,6 +61,9 @@ pub struct UpdateAccountRequest {
     carddav_url: Option<String>,
     caldav_url: Option<String>,
     caldav_accept_invalid_tls: Option<bool>,
+    imap_tls_cert: Option<String>,
+    smtp_tls_cert: Option<String>,
+    tls_decision: Option<TlsDecision>,
     pgp_key_id: Option<String>,
     sign_by_default: Option<bool>,
     contacts_enabled: Option<bool>,
@@ -188,13 +192,23 @@ pub async fn add_account(
         .clone()
         .unwrap_or_else(|| "plain".into());
 
+    let tls_retry_permitted = req
+        .tls_decision
+        .map(TlsDecision::permits_retry)
+        .unwrap_or(imap_tls_cert_der.is_some());
+    let persist_tls_exception = req
+        .tls_decision
+        .map(TlsDecision::persists_exception)
+        .unwrap_or(imap_tls_cert_der.is_some());
     if let Err(e) = mail_sync::test_imap_connection(
         &imap_host,
         imap_port,
         &imap_user,
         &imap_pass,
         &auth_scheme,
-        imap_tls_cert_der.as_deref(),
+        tls_retry_permitted
+            .then_some(imap_tls_cert_der.as_deref())
+            .flatten(),
     )
     .await
     {
@@ -203,19 +217,14 @@ pub async fn add_account(
         if matches!(e, mail_sync::SessionError::Tls(_)) {
             if let Some(der) = crate::routes::discover::fetch_peer_cert(&imap_host, imap_port).await
             {
-                use base64::Engine;
                 return Ok((
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({
-                        "error": e.to_string(),
-                        "code": "tls_untrusted",
-                        "cert": {
-                            "host": imap_host,
-                            "port": imap_port,
-                            "fingerprint_sha256": crate::routes::discover::cert_fingerprint_sha256(&der),
-                            "der_base64": base64::engine::general_purpose::STANDARD.encode(&der),
-                        },
-                    })),
+                    Json(tls_untrusted_json(
+                        &e.to_string(),
+                        &imap_host,
+                        imap_port,
+                        &der,
+                    )),
                 )
                     .into_response());
             }
@@ -242,8 +251,8 @@ pub async fn add_account(
     .bind(req.carddav_url.as_deref().filter(|s| !s.is_empty()))
     .bind(req.caldav_url.as_deref().filter(|s| !s.is_empty()))
     .bind(req.caldav_accept_invalid_tls.unwrap_or(false))
-    .bind(imap_tls_cert)
-    .bind(smtp_tls_cert)
+    .bind(persist_tls_exception.then_some(imap_tls_cert).flatten())
+    .bind(persist_tls_exception.then_some(smtp_tls_cert).flatten())
     .bind(provider_kind)
     .bind(&req.pgp_key_id)
     .bind(req.sign_by_default.unwrap_or(false))
@@ -346,6 +355,20 @@ pub async fn update_account(
     if let Some(m) = &req.sync_mode {
         validate::one_of("sync_mode", m, validate::SYNC_MODES)?;
     }
+    let request_imap_cert = req
+        .imap_tls_cert
+        .as_deref()
+        .filter(|certificate| !certificate.is_empty());
+    let request_smtp_cert = req
+        .smtp_tls_cert
+        .as_deref()
+        .filter(|certificate| !certificate.is_empty());
+    let request_imap_cert_der = request_imap_cert
+        .map(|certificate| validate::b64_cert("imap_tls_cert", certificate))
+        .transpose()?;
+    if let Some(certificate) = request_smtp_cert {
+        validate::b64_cert("smtp_tls_cert", certificate)?;
+    }
     // Empty string clears the URL (COALESCE keeps old only on NULL, so empty is allowed through).
     if let Some(u) = req.carddav_url.as_deref().filter(|s| !s.is_empty()) {
         validate::http_url("carddav_url", u)?;
@@ -409,27 +432,50 @@ pub async fn update_account(
                 .imap_auth_scheme
                 .clone()
                 .unwrap_or_else(|| "plain".into());
-            let tls_cert: Option<String> =
+            let stored_tls_cert: Option<String> =
                 sqlx::query_scalar("SELECT imap_tls_cert FROM email_accounts WHERE id = ?")
                     .bind(&account_id)
                     .fetch_one(&user_db)
                     .await?;
-            let trusted = mail_sync::session::decode_trusted_cert(tls_cert.as_deref());
-            mail_sync::test_imap_connection(
-                host,
-                port,
-                &imap_user,
-                &imap_pass,
-                &scheme,
-                trusted.as_deref(),
+            let stored_trusted =
+                mail_sync::session::decode_trusted_cert(stored_tls_cert.as_deref());
+            let retry_permitted = req
+                .tls_decision
+                .map(TlsDecision::permits_retry)
+                .unwrap_or(request_imap_cert_der.is_some());
+            let trusted = if retry_permitted {
+                request_imap_cert_der
+                    .as_deref()
+                    .or(stored_trusted.as_deref())
+            } else {
+                stored_trusted.as_deref()
+            };
+            if let Err(error) = mail_sync::test_imap_connection(
+                host, port, &imap_user, &imap_pass, &scheme, trusted,
             )
             .await
-            .map_err(|e| AppError::Unprocessable(e.to_string()))?;
+            {
+                if matches!(error, mail_sync::SessionError::Tls(_)) {
+                    if let Some(der) = crate::routes::discover::fetch_peer_cert(host, port).await {
+                        return Ok((
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(tls_untrusted_json(&error.to_string(), host, port, &der)),
+                        )
+                            .into_response());
+                    }
+                }
+                return Err(AppError::Unprocessable(error.to_string()));
+            }
         }
     }
 
+    let persist_tls_exception = req
+        .tls_decision
+        .map(TlsDecision::persists_exception)
+        .unwrap_or(request_imap_cert.is_some());
+
     sqlx::query(
-        "UPDATE email_accounts SET display_name = COALESCE(?, display_name), imap_host = COALESCE(?, imap_host), imap_port = COALESCE(?, imap_port), imap_auth_scheme = COALESCE(?, imap_auth_scheme), smtp_host = COALESCE(?, smtp_host), smtp_port = COALESCE(?, smtp_port), smtp_auth_scheme = COALESCE(?, smtp_auth_scheme), credentials_encrypted = ?, body_sync_mode = COALESCE(?, body_sync_mode), sync_interval_secs = COALESCE(?, sync_interval_secs), sync_mode = COALESCE(?, sync_mode), carddav_url = COALESCE(?, carddav_url), caldav_url = COALESCE(?, caldav_url), caldav_accept_invalid_tls = COALESCE(?, caldav_accept_invalid_tls), pgp_key_id = COALESCE(?, pgp_key_id), sign_by_default = COALESCE(?, sign_by_default) WHERE id = ?",
+        "UPDATE email_accounts SET display_name = COALESCE(?, display_name), imap_host = COALESCE(?, imap_host), imap_port = COALESCE(?, imap_port), imap_auth_scheme = COALESCE(?, imap_auth_scheme), smtp_host = COALESCE(?, smtp_host), smtp_port = COALESCE(?, smtp_port), smtp_auth_scheme = COALESCE(?, smtp_auth_scheme), credentials_encrypted = ?, body_sync_mode = COALESCE(?, body_sync_mode), sync_interval_secs = COALESCE(?, sync_interval_secs), sync_mode = COALESCE(?, sync_mode), carddav_url = COALESCE(?, carddav_url), caldav_url = COALESCE(?, caldav_url), caldav_accept_invalid_tls = COALESCE(?, caldav_accept_invalid_tls), imap_tls_cert = COALESCE(?, imap_tls_cert), smtp_tls_cert = COALESCE(?, smtp_tls_cert), pgp_key_id = COALESCE(?, pgp_key_id), sign_by_default = COALESCE(?, sign_by_default) WHERE id = ?",
     )
     .bind(req.display_name.as_deref())
     .bind(req.imap_host.as_deref())
@@ -445,6 +491,8 @@ pub async fn update_account(
     .bind(req.carddav_url.as_deref())
     .bind(req.caldav_url.as_deref())
     .bind(req.caldav_accept_invalid_tls)
+    .bind(persist_tls_exception.then_some(request_imap_cert).flatten())
+    .bind(persist_tls_exception.then_some(request_smtp_cert).flatten())
     .bind(req.pgp_key_id.as_deref())
     .bind(req.sign_by_default)
     .bind(&account_id)
@@ -462,7 +510,22 @@ pub async fn update_account(
         .await;
 
     let row = get_account_row(&user_db, &account_id).await?;
-    Ok(Json(row))
+    Ok(Json(row).into_response())
+}
+
+fn tls_untrusted_json(error: &str, host: &str, port: u16, der: &[u8]) -> serde_json::Value {
+    use base64::Engine;
+
+    json!({
+        "error": error,
+        "code": "tls_untrusted",
+        "cert": {
+            "host": host,
+            "port": port,
+            "fingerprint_sha256": crate::routes::discover::cert_fingerprint_sha256(der),
+            "der_base64": base64::engine::general_purpose::STANDARD.encode(der),
+        },
+    })
 }
 
 pub async fn delete_account(

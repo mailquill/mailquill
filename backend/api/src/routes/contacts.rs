@@ -15,11 +15,11 @@ use contact_sync::{
         CardDavAdapter, ContactProviderAdapter, GooglePeopleAdapter, MicrosoftGraphAdapter,
     },
     orchestration::{
-        create_remote_first, delete_remote_first, sync_source_once, update_remote_first,
-        RetryPolicy,
+        create_remote_first, delete_remote_first, provider_error_code, sync_source_once,
+        update_remote_first, RetryPolicy,
     },
     ContactSyncStatus, LabeledValue, ParsedContact, PostalAddress, ProviderError,
-    ProviderErrorCategory,
+    ProviderErrorCategory, CARDDAV_TLS_VERIFICATION_FAILED,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,6 +87,9 @@ pub struct DisableContactsRequest {
 #[derive(Default, Deserialize)]
 pub struct DiscoverContactsRequest {
     selected_book_remote_ids: Option<Vec<String>>,
+    #[serde(default)]
+    accept_invalid_tls: bool,
+    tls_decision: Option<crate::tls::TlsDecision>,
 }
 
 fn default_true() -> bool {
@@ -476,9 +479,25 @@ pub async fn discover_mailbox_contacts(
             .fetch_optional(&user_db)
             .await?
             .ok_or(AppError::NotFound)?;
-    let adapter = contact_adapter(&user_db, &state, &source_id)
-        .await
-        .map_err(provider_discovery_app_error)?;
+    let persist_tls_exception = request.accept_invalid_tls
+        || request
+            .tls_decision
+            .is_some_and(crate::tls::TlsDecision::persists_exception);
+    let retry_with_invalid_tls = request.accept_invalid_tls
+        || request
+            .tls_decision
+            .is_some_and(crate::tls::TlsDecision::permits_retry);
+    if persist_tls_exception {
+        enable_mailbox_dav_tls_exception(&user_db, &account_id, &source_id).await?;
+    }
+    let adapter = contact_adapter_with_tls_override(
+        &user_db,
+        &state,
+        &source_id,
+        retry_with_invalid_tls.then_some(true),
+    )
+    .await
+    .map_err(provider_discovery_app_error)?;
     let books = adapter
         .books()
         .await
@@ -513,6 +532,33 @@ pub async fn discover_mailbox_contacts(
         "source_id": source_id,
         "books": books,
     })))
+}
+
+async fn enable_mailbox_dav_tls_exception(
+    db: &sqlx::SqlitePool,
+    email_account_id: &str,
+    source_id: &str,
+) -> Result<(), AppError> {
+    let updated = sqlx::query(
+        "UPDATE email_accounts
+         SET caldav_accept_invalid_tls = 1
+         WHERE id = ?
+           AND EXISTS (
+               SELECT 1 FROM contact_accounts
+               WHERE id = ? AND email_account_id = email_accounts.id
+                 AND management_mode = 'mailbox' AND type = 'cardav'
+           )",
+    )
+    .bind(email_account_id)
+    .bind(source_id)
+    .execute(db)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::Unprocessable(
+            "TLS exceptions are only available for mailbox CardDAV sources".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn list_contacts(
@@ -919,7 +965,7 @@ pub async fn spawn_contact_sync_task(
                         retry_after_seconds: None,
                     }),
                 };
-                let (status, retry_after, pause) = match result {
+                let (status, retry_delay, pause) = match result {
                     Ok(()) => {
                         consecutive_failures = 0;
                         (
@@ -935,6 +981,10 @@ pub async fn spawn_contact_sync_task(
                     Err(error) => {
                         consecutive_failures = consecutive_failures.saturating_add(1);
                         let pause = pauses_contact_sync(error.category);
+                        let error_code = provider_error_code(&error);
+                        let retry_delay = (!pause).then(|| {
+                            retry_policy.delay(consecutive_failures, error.retry_after_seconds)
+                        });
                         let state_name = match error.category {
                             ProviderErrorCategory::ConsentRequired => "consent_required",
                             ProviderErrorCategory::ReauthenticationRequired
@@ -942,13 +992,23 @@ pub async fn spawn_contact_sync_task(
                             ProviderErrorCategory::Unavailable => "unavailable",
                             _ => "error",
                         };
+                        tracing::info!(
+                            source_id = account_for_task,
+                            operation = "contact_sync_retry_policy",
+                            error_category = ?error.category,
+                            error_code,
+                            retry_action = if pause { "paused" } else { "scheduled" },
+                            retry_in_seconds = ?retry_delay.map(|delay| delay.as_secs()),
+                            provider_retry_after_seconds = ?error.retry_after_seconds,
+                            "contact sync retry policy applied"
+                        );
                         (
                             ContactSyncStatus {
                                 state: state_name.to_owned(),
                                 last_synced_at: None,
-                                error: Some(format!("{:?}", error.category).to_ascii_lowercase()),
+                                error: Some(error_code.to_owned()),
                             },
-                            error.retry_after_seconds,
+                            retry_delay,
                             pause,
                         )
                     }
@@ -960,8 +1020,8 @@ pub async fn spawn_contact_sync_task(
                 if pause {
                     break;
                 }
-                if consecutive_failures > 0 {
-                    tokio::time::sleep(retry_policy.delay(consecutive_failures, retry_after)).await;
+                if let Some(delay) = retry_delay {
+                    tokio::time::sleep(delay).await;
                     should_run = true;
                 }
             }
@@ -1037,6 +1097,15 @@ async fn contact_adapter(
     state: &AppState,
     account_id: &str,
 ) -> Result<std::sync::Arc<dyn ContactProviderAdapter>, ProviderError> {
+    contact_adapter_with_tls_override(db, state, account_id, None).await
+}
+
+async fn contact_adapter_with_tls_override(
+    db: &sqlx::SqlitePool,
+    state: &AppState,
+    account_id: &str,
+    accept_invalid_tls_override: Option<bool>,
+) -> Result<std::sync::Arc<dyn ContactProviderAdapter>, ProviderError> {
     let (provider, base_url, auth_scheme, encrypted, email_account_id): (
         String,
         Option<String>,
@@ -1066,7 +1135,7 @@ async fn contact_adapter(
                         context.base_url,
                         context.auth,
                         context.trusted_cert_der.as_deref(),
-                        context.accept_invalid_tls,
+                        accept_invalid_tls_override.unwrap_or(context.accept_invalid_tls),
                     )?)
                 }
                 "google" => std::sync::Arc::new(GooglePeopleAdapter::new(
@@ -1151,6 +1220,14 @@ fn provider_app_error(error: ProviderError) -> AppError {
 }
 
 fn provider_discovery_app_error(error: ProviderError) -> AppError {
+    if error.category == ProviderErrorCategory::Unavailable
+        && error.message == CARDDAV_TLS_VERIFICATION_FAILED
+    {
+        return AppError::BadGatewayWithCode {
+            code: "carddav_tls_certificate_invalid",
+            message: error.message,
+        };
+    }
     match error.category {
         ProviderErrorCategory::ConsentRequired
         | ProviderErrorCategory::ReauthenticationRequired
@@ -1638,14 +1715,19 @@ mod tests {
     }
 
     #[test]
-    fn discovery_reports_correctable_provider_failures_as_unprocessable() {
+    fn discovery_reports_structured_tls_and_transient_provider_failures() {
         let correctable = provider_discovery_app_error(ProviderError {
             category: ProviderErrorCategory::Unavailable,
-            message: "CardDAV TLS verification failed".to_owned(),
+            message: CARDDAV_TLS_VERIFICATION_FAILED.to_owned(),
             retry_after_seconds: None,
-        })
-        .into_response();
-        assert_eq!(correctable.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        });
+        assert!(matches!(
+            correctable,
+            AppError::BadGatewayWithCode {
+                code: "carddav_tls_certificate_invalid",
+                ..
+            }
+        ));
 
         let transient = provider_discovery_app_error(ProviderError {
             category: ProviderErrorCategory::Transport,
@@ -1680,6 +1762,26 @@ mod tests {
         assert_eq!(page.items[0].groups[0].name, "Friends");
         assert_eq!(page.items[0].source_provider, "cardav");
         assert!(page.items[0].source_writable);
+    }
+
+    #[tokio::test]
+    async fn explicit_carddav_tls_decision_updates_only_the_owning_mailbox() {
+        let db = database().await;
+
+        enable_mailbox_dav_tls_exception(&db, "mail-a", "source-a")
+            .await
+            .unwrap();
+
+        let accepted: bool = sqlx::query_scalar(
+            "SELECT caldav_accept_invalid_tls FROM email_accounts WHERE id = 'mail-a'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(accepted);
+        assert!(enable_mailbox_dav_tls_exception(&db, "mail-a", "source-b")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

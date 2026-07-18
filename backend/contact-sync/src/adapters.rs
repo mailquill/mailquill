@@ -12,6 +12,7 @@ use crate::{
     apply_auth, contact_to_vcard, dav, first_href_in_elem, parse_vcard, resolve,
     ContactBookIdentity, ContactChangePage, ContactTombstone, DavAuth, GroupMembership,
     ParsedContact, ProviderError, ProviderErrorCategory, RemoteContact, RemotePhoto,
+    CARDDAV_TLS_VERIFICATION_FAILED,
 };
 
 pub(crate) const PROVIDER_API_DISABLED_MESSAGE: &str = "contact provider API is not enabled";
@@ -899,7 +900,7 @@ fn carddav_error(error: String) -> ProviderError {
     {
         return provider_error(
             ProviderErrorCategory::Unavailable,
-            "CardDAV TLS verification failed",
+            CARDDAV_TLS_VERIFICATION_FAILED,
             None,
         );
     }

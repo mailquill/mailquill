@@ -10,6 +10,8 @@ import { useAccounts } from '@/shared/hooks/useAccounts'
 import { useCreateCalendar, useCaldavDiscover, type CaldavDiscoverResponse } from '@/shared/hooks/useCalendar'
 import { useSyncDav } from '@/shared/hooks/useDav'
 import { CaldavErrorAlert } from '@/features/caldav-errors'
+import { ApiError } from '@/shared/api'
+import { TlsCertificateDecisionDialog } from '@/shared/components'
 
 type CalKind = 'local' | 'caldav'
 
@@ -30,7 +32,7 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
   const [kind, setKind] = useState<CalKind>('local')
   const [accountId, setAccountId] = useState('')
   const [url, setUrl] = useState('')
-  const [acceptInvalidTls, setAcceptInvalidTls] = useState(false)
+  const [tlsDecision, setTlsDecision] = useState<'accept' | 'accept_always'>()
   const [selectedDiscoveredUrl, setSelectedDiscoveredUrl] = useState('')
   const discoveredAccountIdRef = useRef('')
 
@@ -52,15 +54,15 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
     if (!open || kind !== 'caldav' || !selectedAccount || discoveredAccountIdRef.current === selectedAccount) return
 
     discoveredAccountIdRef.current = selectedAccount
-    discoverCalendars({ accountId: selectedAccount, acceptInvalidTls }, { onSuccess: applyDiscoveredCalendars })
-  }, [acceptInvalidTls, applyDiscoveredCalendars, discoverCalendars, kind, open, selectedAccount])
+    discoverCalendars({ accountId: selectedAccount, tlsDecision }, { onSuccess: applyDiscoveredCalendars })
+  }, [applyDiscoveredCalendars, discoverCalendars, kind, open, selectedAccount, tlsDecision])
 
   function reset() {
     setName('')
     setKind('local')
     setAccountId('')
     setUrl('')
-    setAcceptInvalidTls(false)
+    setTlsDecision(undefined)
     discoveredAccountIdRef.current = ''
     setSelectedDiscoveredUrl('')
     resetDiscover()
@@ -73,7 +75,7 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
   function runDiscover() {
     if (!selectedAccount) return
     discoveredAccountIdRef.current = selectedAccount
-    discoverCalendars({ accountId: selectedAccount, acceptInvalidTls }, { onSuccess: applyDiscoveredCalendars })
+    discoverCalendars({ accountId: selectedAccount, tlsDecision }, { onSuccess: applyDiscoveredCalendars })
   }
 
   function selectDiscoveredCalendar(nextUrl: string) {
@@ -108,9 +110,27 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
   }
 
   const canSubmit = name.trim() && (kind === 'local' || (selectedAccount && url.trim()))
+  const tlsCertificateError =
+    discoverError instanceof ApiError && discoverError.code === 'caldav_tls_certificate_invalid'
 
   return (
-    <Dialog open={open} onClose={close}>
+    <>
+      <TlsCertificateDecisionDialog
+        open={open && tlsCertificateError}
+        pending={discoverPending}
+        onDecision={(decision) => {
+          if (decision === 'deny') {
+            resetDiscover()
+            return
+          }
+          setTlsDecision(decision)
+          discoverCalendars(
+            { accountId: selectedAccount, tlsDecision: decision },
+            { onSuccess: applyDiscoveredCalendars },
+          )
+        }}
+      />
+      <Dialog open={open && !tlsCertificateError} onClose={close}>
       <DialogContent className="w-[min(480px,calc(100vw-2rem))] max-w-none">
         <DialogHeader>
           <DialogTitle>{t('calendar.addCalendar')}</DialogTitle>
@@ -146,6 +166,7 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
                   value={selectedAccount}
                   onChange={(e) => {
                     setAccountId(e.currentTarget.value)
+                    setTlsDecision(undefined)
                     discoveredAccountIdRef.current = ''
                     setSelectedDiscoveredUrl('')
                     setUrl('')
@@ -187,19 +208,7 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
                     {discoverPending ? t('action.syncing') : t('calendar.discover')}
                   </Button>
                 </div>
-                <label className="mt-2 flex items-start gap-2 text-[12px] text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={acceptInvalidTls}
-                    onChange={(e) => {
-                      setAcceptInvalidTls(e.currentTarget.checked)
-                      discoveredAccountIdRef.current = ''
-                    }}
-                    className="mt-0.5 size-4 accent-primary"
-                  />
-                  <span>{t('calendar.acceptInvalidTls')}</span>
-                </label>
-                {discoverError && (
+                {discoverError && !tlsCertificateError && (
                   <div className="mt-3">
                     <CaldavErrorAlert error={discoverError} />
                   </div>
@@ -217,7 +226,8 @@ export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: (
           </Button>
         </div>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+    </>
   )
 }
 

@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use sqlx::SqlitePool;
+use url::Url;
 
 use crate::{
     adapters::{ContactProviderAdapter, MutationResult, PROVIDER_API_DISABLED_MESSAGE},
@@ -58,6 +59,7 @@ pub async fn sync_source_once(
     source_id: &str,
     adapter: Arc<dyn ContactProviderAdapter>,
 ) -> Result<SyncRunResult, ProviderError> {
+    let (provider, endpoint_host) = source_log_context(db, source_id).await;
     set_source_state(db, source_id, "syncing", None)
         .await
         .map_err(repository_error)?;
@@ -95,14 +97,39 @@ pub async fn sync_source_once(
                 .map_err(repository_error)?;
             tracing::warn!(
                 source_id,
+                provider,
+                endpoint_host,
                 operation = "contact_sync",
                 error_category = ?error.category,
+                error_code = provider_error_code(error),
+                retry_after_seconds = ?error.retry_after_seconds,
                 error_detail = %error,
                 "contact sync failed"
             );
         }
     }
     result
+}
+
+async fn source_log_context(db: &SqlitePool, source_id: &str) -> (String, String) {
+    let source: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT type, base_url FROM contact_accounts WHERE id = ?")
+            .bind(source_id)
+            .fetch_optional(db)
+            .await
+            .unwrap_or_default();
+    source.map_or_else(
+        || ("unknown".to_owned(), "unknown".to_owned()),
+        |(provider, base_url)| {
+            let endpoint_host = sanitized_endpoint_host(base_url.as_deref())
+                .unwrap_or_else(|| "provider_api".to_owned());
+            (provider, endpoint_host)
+        },
+    )
+}
+
+fn sanitized_endpoint_host(base_url: Option<&str>) -> Option<String> {
+    Url::parse(base_url?).ok()?.host_str().map(str::to_owned)
 }
 
 pub async fn create_remote_first(
@@ -347,16 +374,19 @@ fn error_state(error: &ProviderError) -> (&'static str, &'static str) {
         ProviderErrorCategory::ReauthenticationRequired | ProviderErrorCategory::Authentication => {
             ("reauth_required", "oauth_reauthentication_required")
         }
-        ProviderErrorCategory::Unavailable if error.message == PROVIDER_API_DISABLED_MESSAGE => {
-            ("unavailable", "provider_configuration_required")
-        }
-        ProviderErrorCategory::Unavailable => ("unavailable", "provider_unavailable"),
-        _ => ("error", provider_reason(error.category)),
+        ProviderErrorCategory::Unavailable => ("unavailable", provider_error_code(error)),
+        _ => ("error", provider_error_code(error)),
     }
 }
 
-fn provider_reason(category: ProviderErrorCategory) -> &'static str {
-    match category {
+pub fn provider_error_code(error: &ProviderError) -> &'static str {
+    if error.message == crate::CARDDAV_TLS_VERIFICATION_FAILED {
+        return "carddav_tls_certificate_invalid";
+    }
+    if error.message == PROVIDER_API_DISABLED_MESSAGE {
+        return "provider_configuration_required";
+    }
+    match error.category {
         ProviderErrorCategory::CursorExpired => "cursor_expired",
         ProviderErrorCategory::Conflict => "remote_conflict",
         ProviderErrorCategory::RateLimited => "rate_limited",
@@ -406,6 +436,27 @@ mod tests {
             error_state(&error),
             ("unavailable", "provider_configuration_required")
         );
+    }
+
+    #[test]
+    fn tls_failures_have_a_stable_error_code_and_sanitized_endpoint_host() {
+        let error = ProviderError {
+            category: ProviderErrorCategory::Unavailable,
+            message: crate::CARDDAV_TLS_VERIFICATION_FAILED.to_owned(),
+            retry_after_seconds: None,
+        };
+
+        assert_eq!(
+            provider_error_code(&error),
+            "carddav_tls_certificate_invalid"
+        );
+        assert_eq!(
+            sanitized_endpoint_host(Some(
+                "https://user:secret@dav.example.test/private/addressbook?token=hidden"
+            )),
+            Some("dav.example.test".to_owned())
+        );
+        assert_eq!(sanitized_endpoint_host(Some("not a URL")), None);
     }
 
     type ChangeCall = (String, Option<String>, Option<String>);

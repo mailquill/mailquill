@@ -1,7 +1,8 @@
-export { ToastRegion } from './ToastRegion'
 export {
   TlsCertificateDecisionDialog,
+} from './TlsCertificateDecisionDialog'
+export {
   tlsCertificateFromError,
   type TlsCertificateInfo,
   type TlsDecision,
-} from './TlsCertificateDecisionDialog'
+} from './tlsCertificateDecision'

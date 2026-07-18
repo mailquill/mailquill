@@ -17,6 +17,7 @@ struct DiscoveredCalendarResponse {
 #[derive(serde::Deserialize)]
 pub struct CaldavDiscoverQuery {
     accept_invalid_tls: Option<bool>,
+    tls_decision: Option<crate::tls::TlsDecision>,
 }
 
 /// Build per-protocol auth from decrypted account credentials. Prefers an OAuth
@@ -389,7 +390,15 @@ pub async fn caldav_discover(
     Query(query): Query<CaldavDiscoverQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
-    if query.accept_invalid_tls == Some(true) {
+    let persist_tls_exception = query.accept_invalid_tls == Some(true)
+        || query
+            .tls_decision
+            .is_some_and(crate::tls::TlsDecision::persists_exception);
+    let retry_with_invalid_tls = query.accept_invalid_tls == Some(true)
+        || query
+            .tls_decision
+            .is_some_and(crate::tls::TlsDecision::permits_retry);
+    if persist_tls_exception {
         sqlx::query("UPDATE email_accounts SET caldav_accept_invalid_tls = 1 WHERE id = ?")
             .bind(&account_id)
             .execute(&user_db)
@@ -420,9 +429,7 @@ pub async fn caldav_discover(
         caldav_url.as_deref(),
         &cal_auth,
         trusted_cert_der.as_deref(),
-        query
-            .accept_invalid_tls
-            .unwrap_or(stored_accept_invalid_tls),
+        retry_with_invalid_tls || stored_accept_invalid_tls,
     )
     .await
     .map_err(super::caldav_error::curated_caldav_error)?;

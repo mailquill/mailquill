@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '@/shared/api'
 import type { Account } from '@/shared/types'
 import { ContactCapabilityRow } from './SettingsPage'
 
@@ -12,14 +13,15 @@ const discoveredBooks = [
   { remote_id: 'default', display_name: 'Personal', parent_remote_id: null, is_default: true, is_writable: true },
   { remote_id: 'team', display_name: 'Team', parent_remote_id: null, is_default: false, is_writable: true },
 ]
-const discoverMutate = vi.fn((_variables: { accountId: string; selectedBookRemoteIds?: string[] }, options?: { onSuccess?: (data: { books: typeof discoveredBooks }) => void }) => {
-  options?.onSuccess?.({ books: discoveredBooks })
+let discoverError: unknown = null
+const discoverMutate = vi.fn((_variables: { accountId: string; selectedBookRemoteIds?: string[]; acceptInvalidTls?: boolean }, options?: { onSuccess?: (data: { books: typeof discoveredBooks }) => void }) => {
+  if (!discoverError) options?.onSuccess?.({ books: discoveredBooks })
 })
 
 vi.mock('@/shared/hooks/useAccounts', () => ({
   useDisableMailboxContacts: () => ({ mutate: disableMutate, isPending: false }),
   useEnableMailboxContacts: () => ({ mutate: enableMutate, isPending: false }),
-  useDiscoverMailboxContacts: () => ({ mutate: discoverMutate, isPending: false, data: { source_id: 'source-1', books: discoveredBooks }, error: null }),
+  useDiscoverMailboxContacts: () => ({ mutate: discoverMutate, isPending: false, data: discoverError ? null : { source_id: 'source-1', books: discoveredBooks }, error: discoverError }),
   useUpdateAccount: () => ({ mutate: updateMutate, isPending: false }),
   useAccounts: () => ({ data: [] }),
   useDeleteAccount: () => ({ mutate: vi.fn(), isPending: false }),
@@ -62,6 +64,7 @@ describe('mailbox Contacts capability controls', () => {
     disableMutate.mockClear()
     enableMutate.mockClear()
     discoverMutate.mockClear()
+    discoverError = null
     updateMutate.mockClear()
     oauthRedirect.mockClear()
   })
@@ -148,6 +151,28 @@ describe('mailbox Contacts capability controls', () => {
 
     await user.click(screen.getByRole('button', { name: 'Grant access' }))
     expect(oauthRedirect).toHaveBeenCalledWith('google', 'mailbox-1', 'contacts')
+  })
+
+  it('requires an explicit CardDAV TLS decision and retries discovery with the opt-in', async () => {
+    discoverError = new ApiError(502, JSON.stringify({
+      code: 'carddav_tls_certificate_invalid',
+      error: 'CardDAV TLS verification failed',
+    }))
+    const user = userEvent.setup()
+    render(<ContactCapabilityRow account={{
+      ...account,
+      contacts: { ...account.contacts!, state: 'error', enabled: true },
+    }} />)
+
+    await user.click(screen.getByRole('button', { name: 'Fix contacts' }))
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(/could not verify the TLS certificate/i)
+    await user.click(within(dialog).getByRole('button', { name: 'Accept once' }))
+
+    expect(discoverMutate).toHaveBeenLastCalledWith(
+      { accountId: 'mailbox-1', tlsDecision: 'accept' },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    )
   })
 
   it('announces synchronization progress and prevents duplicate starts', () => {

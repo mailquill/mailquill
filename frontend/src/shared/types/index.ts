@@ -185,6 +185,7 @@ export interface Contact {
   photo_version: string | null
   photo_content_type: string | null
   source_email_account_id: string | null
+  source_provider: 'cardav' | 'graph' | 'google'
   source_state: ContactCapabilityState
   source_enabled: boolean
   source_writable: boolean
@@ -197,11 +198,24 @@ export interface ContactGroup {
   remote_id: string | null
 }
 
+export interface ContactGroupSummary extends ContactGroup {
+  account_id: string
+  book_id: string | null
+  member_count: number
+}
+
 export interface ContactPage {
   items: Contact[]
   total: number
   limit: number
   offset: number
+}
+
+export interface RecipientSuggestion {
+  id: string
+  display_name: string | null
+  email: string
+  source: 'contact' | 'sender'
 }
 
 export interface NewContact {

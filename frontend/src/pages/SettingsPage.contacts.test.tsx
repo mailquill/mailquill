@@ -101,6 +101,10 @@ describe('mailbox Contacts capability controls', () => {
     }} />)
 
     expect(screen.getByRole('alert')).toHaveTextContent(/Google contacts API is not enabled/i)
+    expect(screen.getByRole('link', { name: 'Open People API' })).toHaveAttribute(
+      'href',
+      'https://console.cloud.google.com/apis/library/people.googleapis.com',
+    )
     await user.click(screen.getByRole('button', { name: 'Try again' }))
     expect(enableMutate).toHaveBeenCalledWith('mailbox-1')
   })

@@ -152,6 +152,7 @@ pub async fn apply_change_page(
 
     let mut tx = db.begin().await?;
     let book_id = upsert_book(&mut tx, source_id, book, generation).await?;
+    upsert_provider_groups(&mut tx, source_id, &book_id, generation, book).await?;
     for contact in &page.upserts {
         if contact.book_remote_id != book.remote_id {
             return Err(sqlx::Error::Protocol(
@@ -305,7 +306,7 @@ async fn upsert_contact(
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(account_id, remote_id) WHERE remote_id IS NOT NULL DO UPDATE SET
                book_id = excluded.book_id,
-               name = excluded.name,
+               name = COALESCE(?, contact_groups.name),
                sync_generation = excluded.sync_generation",
         )
         .bind(&group_id)
@@ -319,6 +320,7 @@ async fn upsert_contact(
         )
         .bind(&membership.remote_group_id)
         .bind(generation)
+        .bind(membership.display_name.as_deref())
         .execute(&mut **tx)
         .await?;
         let stored_group_id: String = sqlx::query_scalar(
@@ -333,6 +335,46 @@ async fn upsert_contact(
         )
         .bind(&contact_id)
         .bind(stored_group_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn upsert_provider_groups(
+    tx: &mut Transaction<'_, Sqlite>,
+    source_id: &str,
+    book_id: &str,
+    generation: i64,
+    book: &ContactBookIdentity,
+) -> Result<(), sqlx::Error> {
+    for group in book.provider_metadata["contact_groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let Some(remote_id) = group["resourceName"].as_str() else {
+            continue;
+        };
+        let name = group["formattedName"]
+            .as_str()
+            .or_else(|| group["name"].as_str())
+            .unwrap_or(remote_id);
+        sqlx::query(
+            "INSERT INTO contact_groups
+             (id, account_id, book_id, name, remote_id, sync_generation)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(account_id, remote_id) WHERE remote_id IS NOT NULL DO UPDATE SET
+               book_id = excluded.book_id,
+               name = excluded.name,
+               sync_generation = excluded.sync_generation",
+        )
+        .bind(Uuid::new_v4().simple().to_string())
+        .bind(source_id)
+        .bind(book_id)
+        .bind(name)
+        .bind(remote_id)
+        .bind(generation)
         .execute(&mut **tx)
         .await?;
     }
@@ -665,6 +707,50 @@ mod tests {
             book_cursor(&db, &source_id, "team").await.unwrap(),
             Some("team-cursor".into())
         );
+    }
+
+    #[tokio::test]
+    async fn provider_group_metadata_resolves_membership_names() {
+        let db = database().await;
+        let source_id = reconcile_mailbox_source(&db, &source()).await.unwrap();
+        let mut google_book = book("contactGroups/myContacts");
+        google_book.provider_metadata = serde_json::json!({
+            "contact_groups": [{
+                "resourceName": "contactGroups/family",
+                "name": "family",
+                "formattedName": "Family",
+                "groupType": "SYSTEM_CONTACT_GROUP"
+            }]
+        });
+        let mut family = contact("one", "contactGroups/myContacts");
+        family.groups = vec![crate::GroupMembership {
+            remote_group_id: "contactGroups/family".into(),
+            display_name: None,
+        }];
+
+        apply_change_page(
+            &db,
+            &source_id,
+            &google_book,
+            1,
+            &ContactChangePage {
+                upserts: vec![family],
+                final_cursor: Some("cursor".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let name: String = sqlx::query_scalar(
+            "SELECT name FROM contact_groups WHERE account_id = ? AND remote_id = ?",
+        )
+        .bind(&source_id)
+        .bind("contactGroups/family")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(name, "Family");
     }
 
     #[tokio::test]

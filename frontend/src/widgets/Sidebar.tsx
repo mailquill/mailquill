@@ -25,7 +25,7 @@ import { formatDate } from '@/shared/lib/format'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { useAccounts, useFolders, useSyncStatus } from '@/shared/hooks/useAccounts'
 import { useMoveMessage, useUnifiedCounts } from '@/shared/hooks/useMessages'
-import { useContactAccounts, useContacts } from '@/shared/hooks/useContacts'
+import { useContactAccounts, useContactGroups, useContacts } from '@/shared/hooks/useContacts'
 import { useCalendars, useUpdateCalendar, useDeleteCalendar } from '@/shared/hooks/useCalendar'
 import { AddCalendarDialog } from '@/widgets/AddCalendarDialog'
 import { CalendarEditDialog } from '@/features/calendar'
@@ -324,6 +324,7 @@ function ContactsNav() {
   const { contactGroup, setContactGroup } = useModuleNav()
   const { data: contacts = [] } = useContacts()
   const { data: accounts = [] } = useContactAccounts()
+  const { data: groups = [] } = useContactGroups()
 
   return (
     <>
@@ -346,6 +347,19 @@ function ContactsNav() {
             </span>
           </SbRow>
         ))}
+        {groups.length > 0 && <div className={CAP}>{t('sidebar.groups')}</div>}
+        {groups.map((group) => {
+          const selection = `group:${group.id}`
+          return (
+            <SbRow key={group.id} active={contactGroup === selection} onClick={() => setContactGroup(selection)}>
+              <Users className={cn('size-4', contactGroup === selection ? 'text-[#f8fafc]' : 'text-[#94a3b8]')} />
+              <span className="flex-1 truncate" title={group.name}>{group.name}</span>
+              <span className="text-[11px] font-bold tabular-nums text-[#475569]" title={t('sidebar.groupMembers', { count: group.member_count })}>
+                {group.member_count}
+              </span>
+            </SbRow>
+          )
+        })}
       </nav>
     </>
   )

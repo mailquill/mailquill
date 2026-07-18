@@ -52,6 +52,7 @@ export const en = {
     allContacts: 'All contacts',
     favourites: 'Favourites',
     groups: 'Groups',
+    groupMembers: '{{count}} group members',
     newEvent: 'New event',
     myCalendars: 'My calendars',
     noCalendars: 'No calendars yet.',
@@ -421,6 +422,11 @@ export const en = {
     account: 'Account',
     accountName: 'Account name',
     provider: 'Provider',
+    providers: {
+      google: 'Google',
+      graph: 'Microsoft',
+      cardav: 'CardDAV',
+    },
     baseUrl: 'Base URL',
     accessToken: 'Access token',
     chooseAccount: 'Choose an account',
@@ -465,6 +471,7 @@ export const en = {
     discoverySucceeded: 'Contact books were found. Start sync when you are ready.',
     oauthReturnComplete: 'Contact permission was updated. The current status is shown below.',
     providerConfigurationRequired: 'The {{provider}} contacts API is not enabled for this Mailquill installation. Enable the API in the OAuth project, then try again.',
+    openProviderConsole: 'Open People API',
     carddavSetupTitle: 'Set up mailbox contacts',
     carddavSetupHelp: 'Mailquill is checking for address books with the credentials already stored for this mailbox.',
     discovering: 'Looking for address books…',
@@ -487,6 +494,8 @@ export const en = {
     book: 'Contact book',
     defaultBook: 'Default writable book',
     groups: 'Groups',
+    allGroups: 'All contacts',
+    groupMembers: '{{count}} group members',
     independentCarddavHelp: 'Advanced: connect a separate CardDAV server. Google and Microsoft contacts are enabled from their mailbox card.',
     state: {
       disabled: 'Contact sync is off',
@@ -500,6 +509,10 @@ export const en = {
     },
   },
   compose: {
+    suggestionSource: {
+      contact: 'Contact',
+      sender: 'Known sender',
+    },
     newMessage: 'New message',
     from: 'From',
     to: 'To',

@@ -20,7 +20,7 @@ vi.mock('@/shared/hooks/usePgp', () => ({
 }))
 
 vi.mock('@/shared/hooks/useContacts', () => ({
-  useContactSearch: () => ({ data: [] }),
+  useRecipientSuggestions: () => ({ data: [] }),
 }))
 
 describe('ComposeDialog account bootstrap', () => {

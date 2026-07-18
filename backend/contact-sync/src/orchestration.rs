@@ -8,8 +8,8 @@ use crate::{
         apply_change_page, book_cursor, finish_book_discovery, finish_full_sync, set_source_state,
         source_generation,
     },
-    ContactBookIdentity, ContactChangePage, ContactTombstone, ParsedContact, ProviderError,
-    ProviderErrorCategory, RemoteContact,
+    ContactBookIdentity, ContactChangePage, ContactProvider, ContactTombstone, ParsedContact,
+    ProviderError, ProviderErrorCategory, RemoteContact,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,18 +234,20 @@ async fn sync_source_attempt(
     allow_incremental: bool,
 ) -> Result<SyncRunResult, ProviderError> {
     let mut books = adapter.books().await?;
-    let provider_metadata: String =
-        sqlx::query_scalar("SELECT provider_metadata FROM contact_accounts WHERE id = ?")
+    let (provider_metadata, provider): (String, String) =
+        sqlx::query_as("SELECT provider_metadata, type FROM contact_accounts WHERE id = ?")
             .bind(source_id)
             .fetch_one(db)
             .await
             .map_err(repository_error)?;
-    if let Some(selected) = serde_json::from_str::<serde_json::Value>(&provider_metadata)
-        .ok()
-        .and_then(|value| value.get("selected_book_remote_ids").cloned())
-        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
-    {
-        books.retain(|book| selected.contains(&book.remote_id));
+    if provider != ContactProvider::Google.as_str() {
+        if let Some(selected) = serde_json::from_str::<serde_json::Value>(&provider_metadata)
+            .ok()
+            .and_then(|value| value.get("selected_book_remote_ids").cloned())
+            .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+        {
+            books.retain(|book| selected.contains(&book.remote_id));
+        }
     }
     let generation = source_generation(db, source_id)
         .await
@@ -611,12 +613,14 @@ mod tests {
     #[tokio::test]
     async fn sync_honors_selected_address_books() {
         let (db, source_id) = database().await;
-        sqlx::query("UPDATE contact_accounts SET provider_metadata = ? WHERE id = ?")
-            .bind(serde_json::json!({ "selected_book_remote_ids": ["team"] }).to_string())
-            .bind(&source_id)
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE contact_accounts SET type = 'graph', provider_metadata = ? WHERE id = ?",
+        )
+        .bind(serde_json::json!({ "selected_book_remote_ids": ["team"] }).to_string())
+        .bind(&source_id)
+        .execute(&db)
+        .await
+        .unwrap();
         let adapter = Arc::new(MockAdapter::new(
             vec![book("default"), book("team")],
             HashMap::from([(
@@ -643,6 +647,39 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(synced, vec!["selected"]);
+    }
+
+    #[tokio::test]
+    async fn google_ignores_legacy_group_book_selection() {
+        let (db, source_id) = database().await;
+        sqlx::query("UPDATE contact_accounts SET provider_metadata = ? WHERE id = ?")
+            .bind(
+                serde_json::json!({
+                    "selected_book_remote_ids": ["contactGroups/family"]
+                })
+                .to_string(),
+            )
+            .bind(&source_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let adapter = Arc::new(MockAdapter::new(
+            vec![book("contactGroups/myContacts")],
+            HashMap::from([(
+                "contactGroups/myContacts".into(),
+                VecDeque::from([Ok(ContactChangePage {
+                    upserts: vec![contact("selected", "contactGroups/myContacts")],
+                    final_cursor: Some("cursor".into()),
+                    ..Default::default()
+                })]),
+            )]),
+        ));
+
+        sync_source_once(&db, &source_id, adapter.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(adapter.calls.lock().await.len(), 1);
     }
 
     #[tokio::test]

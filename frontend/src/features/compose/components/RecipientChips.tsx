@@ -6,7 +6,7 @@ import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { parseFromAddr } from '@/shared/lib/format'
 import { isValidEmail } from '@/shared/lib/email'
 import { useUiPrefs } from '@/shared/hooks/useUiPrefs'
-import { useContactSearch } from '@/shared/hooks/useContacts'
+import { useRecipientSuggestions } from '@/shared/hooks/useContacts'
 
 interface RecipientChipsProps {
   label: string
@@ -25,10 +25,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
   const suggestionListId = useId()
   const limit = useUiPrefs((s) => s.maxRecipients)
   const atLimit = value.length >= limit
-  const { data: suggestions = [] } = useContactSearch(focused ? draft : '', mailboxId)
-  const suggestionRows = suggestions.flatMap((contact) =>
-    contact.emails.slice(0, 2).map((email) => ({ contact, email })),
-  )
+  const { data: suggestionRows = [] } = useRecipientSuggestions(focused ? draft : '', mailboxId)
 
   function commit(raw: string) {
     const parts = raw
@@ -59,7 +56,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
     if (suggestionRows.length && event.key === 'Enter') {
       event.preventDefault()
       const selected = suggestionRows[activeSuggestion] ?? suggestionRows[0]
-      selectSuggestion(selected.contact.display_name ?? '', selected.email.value)
+      selectSuggestion(selected.display_name ?? '', selected.email)
       return
     }
     if (['Enter', ',', ';', ' ', 'Tab'].includes(event.key)) {
@@ -144,7 +141,10 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
             <input
               autoFocus={autoFocus}
               value={draft}
-              onChange={(e) => setDraft(e.currentTarget.value)}
+              onChange={(e) => {
+                setDraft(e.currentTarget.value)
+                setActiveSuggestion(0)
+              }}
               onKeyDown={onKeyDown}
               onFocus={() => setFocused(true)}
               onBlur={() => {
@@ -160,30 +160,33 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
               aria-controls={suggestionListId}
               aria-activedescendant={suggestionRows.length ? `${suggestionListId}-${activeSuggestion}` : undefined}
             />
-            {focused && draft.trim().length >= 2 && suggestionRows.length > 0 && (
+            {focused && draft.trim().length >= 1 && suggestionRows.length > 0 && (
               <span id={suggestionListId} role="listbox" className="absolute left-0 top-7 z-50 flex w-[320px] max-w-[80vw] flex-col overflow-hidden rounded-md border border-border bg-popover shadow-lg">
-                {suggestionRows.map(({ contact, email }, index) => (
+                {suggestionRows.map((suggestion, index) => (
                     <button
-                      key={`${contact.id}-${email.value}`}
+                      key={suggestion.id}
                       id={`${suggestionListId}-${index}`}
                       role="option"
                       aria-selected={index === activeSuggestion}
                       type="button"
                       onMouseDown={(event) => event.preventDefault()}
-                      onClick={() => selectSuggestion(contact.display_name ?? '', email.value)}
+                      onClick={() => selectSuggestion(suggestion.display_name ?? '', suggestion.email)}
                       className={cn('flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent', index === activeSuggestion && 'bg-accent')}
                     >
                       <span
                         className="flex size-7 shrink-0 items-center justify-center rounded-full text-[10px] font-bold uppercase text-white"
-                        style={{ backgroundColor: accountColor(contact.id) }}
+                        style={{ backgroundColor: accountColor(suggestion.email) }}
                       >
-                        {accountInitials(contact.display_name ?? email.value)}
+                        {accountInitials(suggestion.display_name ?? suggestion.email)}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium text-foreground">
-                          {contact.display_name ?? email.value}
+                          {suggestion.display_name ?? suggestion.email}
                         </span>
-                        <span className="block truncate font-mono text-xs text-muted-foreground">{email.value}</span>
+                        <span className="block truncate font-mono text-xs text-muted-foreground">{suggestion.email}</span>
+                        <span className="block text-[10px] text-muted-foreground">
+                          {t(`compose.suggestionSource.${suggestion.source}`)}
+                        </span>
                       </span>
                     </button>
                 ))}

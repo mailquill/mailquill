@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 interface ModuleNavState {
-  contactGroup: string // 'all' | 'fav' | group name
+  contactGroup: string // 'all' | 'fav' | source id | `group:${group id}`
   hiddenCalendars: string[]
   setContactGroup: (group: string) => void
   toggleCalendar: (id: string) => void

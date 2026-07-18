@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     body::Body,
     extract::{Extension, Path, Query, State},
@@ -114,6 +116,7 @@ pub struct Contact {
     photo_version: Option<String>,
     photo_content_type: Option<String>,
     source_email_account_id: Option<String>,
+    source_provider: String,
     source_state: String,
     source_enabled: bool,
     source_writable: bool,
@@ -127,12 +130,30 @@ pub struct ContactGroup {
     remote_id: Option<String>,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ContactGroupSummary {
+    id: String,
+    account_id: String,
+    book_id: Option<String>,
+    name: String,
+    remote_id: Option<String>,
+    member_count: i64,
+}
+
 #[derive(Serialize)]
 pub struct ContactPage {
     items: Vec<Contact>,
     total: i64,
     limit: i64,
     offset: i64,
+}
+
+#[derive(Serialize)]
+pub struct RecipientSuggestion {
+    id: String,
+    display_name: Option<String>,
+    email: String,
+    source: &'static str,
 }
 
 #[derive(sqlx::FromRow)]
@@ -165,8 +186,16 @@ pub struct ContactQuery {
     account_id: Option<String>,
     mailbox_id: Option<String>,
     book_id: Option<String>,
+    group_id: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct ContactGroupQuery {
+    account_id: Option<String>,
+    mailbox_id: Option<String>,
+    book_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -495,6 +524,42 @@ pub async fn list_contacts(
     Ok(Json(contact_page(&user_db, &query, false).await?))
 }
 
+pub async fn list_contact_groups(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Query(query): Query<ContactGroupQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    Ok(Json(contact_groups(&user_db, &query).await?))
+}
+
+async fn contact_groups(
+    db: &sqlx::SqlitePool,
+    query: &ContactGroupQuery,
+) -> Result<Vec<ContactGroupSummary>, AppError> {
+    let groups = sqlx::query_as(
+        "SELECT g.id, g.account_id, g.book_id, g.name, g.remote_id,
+                count(DISTINCT gm.contact_id) AS member_count
+         FROM contact_groups AS g
+         JOIN contact_accounts AS ca ON ca.id = g.account_id
+         LEFT JOIN contact_group_members AS gm ON gm.group_id = g.id
+         WHERE (? IS NULL OR g.account_id = ?)
+           AND (? IS NULL OR ca.email_account_id = ?)
+           AND (? IS NULL OR g.book_id = ?)
+         GROUP BY g.id, g.account_id, g.book_id, g.name, g.remote_id
+         ORDER BY g.name COLLATE NOCASE, g.id",
+    )
+    .bind(query.account_id.as_deref())
+    .bind(query.account_id.as_deref())
+    .bind(query.mailbox_id.as_deref())
+    .bind(query.mailbox_id.as_deref())
+    .bind(query.book_id.as_deref())
+    .bind(query.book_id.as_deref())
+    .fetch_all(db)
+    .await?;
+    Ok(groups)
+}
+
 pub async fn search_contacts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -514,6 +579,123 @@ pub async fn search_contacts(
             .await?
             .items,
     ))
+}
+
+pub async fn recipient_suggestions(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Query(query): Query<ContactQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    Ok(Json(recipient_suggestion_rows(&user_db, &query).await?))
+}
+
+async fn recipient_suggestion_rows(
+    db: &sqlx::SqlitePool,
+    query: &ContactQuery,
+) -> Result<Vec<RecipientSuggestion>, AppError> {
+    let term = query.q.as_deref().map(str::trim).unwrap_or_default();
+    if term.is_empty() {
+        return Ok(Vec::new());
+    }
+    let contact_query = ContactQuery {
+        q: Some(term.to_owned()),
+        account_id: None,
+        mailbox_id: None,
+        book_id: None,
+        group_id: None,
+        limit: Some(10),
+        offset: Some(0),
+    };
+    let mut contacts = contact_page(db, &contact_query, true).await?.items;
+    contacts.sort_by_key(|contact| {
+        contact.source_email_account_id.as_deref() != query.mailbox_id.as_deref()
+    });
+
+    let mut seen = HashSet::new();
+    let mut suggestions = Vec::new();
+    for contact in contacts {
+        for email in contact.emails.into_iter().take(2) {
+            let normalized = email.value.trim().to_ascii_lowercase();
+            if valid_sender_email(&normalized) && seen.insert(normalized.clone()) {
+                suggestions.push(RecipientSuggestion {
+                    id: format!("contact:{}:{normalized}", contact.id),
+                    display_name: contact.display_name.clone(),
+                    email: email.value,
+                    source: "contact",
+                });
+            }
+        }
+    }
+
+    let own_addresses: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(primary_email) FROM email_accounts
+         UNION SELECT lower(email) FROM account_aliases",
+    )
+    .fetch_all(db)
+    .await?;
+    let own_addresses = own_addresses.into_iter().collect::<HashSet<_>>();
+    let like = format!("%{term}%");
+    let senders: Vec<String> = sqlx::query_scalar(
+        "SELECT from_addr
+         FROM messages
+         WHERE is_deleted = 0 AND from_addr <> '' AND from_addr LIKE ?
+         GROUP BY lower(from_addr)
+         ORDER BY max(CASE WHEN account_id = ? THEN 1 ELSE 0 END) DESC,
+                  count(*) DESC, max(internal_date) DESC
+         LIMIT 30",
+    )
+    .bind(&like)
+    .bind(query.mailbox_id.as_deref())
+    .fetch_all(db)
+    .await?;
+    for sender in senders {
+        let Some((display_name, email)) = parse_sender_identity(&sender) else {
+            continue;
+        };
+        let normalized = email.to_ascii_lowercase();
+        if own_addresses.contains(&normalized) || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        suggestions.push(RecipientSuggestion {
+            id: format!("sender:{normalized}"),
+            display_name,
+            email,
+            source: "sender",
+        });
+        if suggestions.len() >= 12 {
+            break;
+        }
+    }
+    suggestions.truncate(12);
+    Ok(suggestions)
+}
+
+fn parse_sender_identity(raw: &str) -> Option<(Option<String>, String)> {
+    let raw = raw.trim();
+    let (name, email) = if raw.ends_with('>') {
+        let start = raw.rfind('<')?;
+        (
+            raw[..start].trim().trim_matches('"'),
+            raw[start + 1..raw.len() - 1].trim(),
+        )
+    } else {
+        ("", raw)
+    };
+    valid_sender_email(email).then(|| {
+        (
+            (!name.is_empty()).then(|| name.to_owned()),
+            email.to_owned(),
+        )
+    })
+}
+
+fn valid_sender_email(email: &str) -> bool {
+    let mut parts = email.split('@');
+    parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_none()
+        && !email.chars().any(char::is_whitespace)
 }
 
 pub async fn create_contact(
@@ -1054,6 +1236,10 @@ async fn contact_page(
     let where_clause = "(? IS NULL OR c.account_id = ?)
         AND (? IS NULL OR ca.email_account_id = ?)
         AND (? IS NULL OR c.book_id = ?)
+        AND (? IS NULL OR EXISTS (
+            SELECT 1 FROM contact_group_members AS cgm
+            WHERE cgm.contact_id = c.id AND cgm.group_id = ?
+        ))
         AND (? IS NULL OR c.display_name LIKE ? OR c.given_name LIKE ?
              OR c.family_name LIKE ? OR c.emails LIKE ? OR c.org LIKE ?)";
     let sql = format!(
@@ -1077,6 +1263,8 @@ async fn contact_page(
         .bind(query.mailbox_id.as_deref())
         .bind(query.book_id.as_deref())
         .bind(query.book_id.as_deref())
+        .bind(query.group_id.as_deref())
+        .bind(query.group_id.as_deref())
         .bind(like.as_deref())
         .bind(like.as_deref())
         .bind(like.as_deref())
@@ -1109,6 +1297,8 @@ async fn contact_page(
         .bind(query.mailbox_id.as_deref())
         .bind(query.book_id.as_deref())
         .bind(query.book_id.as_deref())
+        .bind(query.group_id.as_deref())
+        .bind(query.group_id.as_deref())
         .bind(like.as_deref())
         .bind(like.as_deref())
         .bind(like.as_deref())
@@ -1130,8 +1320,8 @@ async fn contact_page(
 }
 
 async fn enrich_contact(db: &sqlx::SqlitePool, mut contact: Contact) -> Result<Contact, AppError> {
-    let source: (Option<String>, String, bool, bool) = sqlx::query_as(
-        "SELECT email_account_id, capability_state, enabled,
+    let source: (Option<String>, String, String, bool, bool) = sqlx::query_as(
+        "SELECT email_account_id, type, capability_state, enabled,
                 CASE WHEN enabled = 1 AND capability_state IN ('idle', 'pending') THEN 1 ELSE 0 END
          FROM contact_accounts WHERE id = ?",
     )
@@ -1157,9 +1347,10 @@ async fn enrich_contact(db: &sqlx::SqlitePool, mut contact: Contact) -> Result<C
     .fetch_all(db)
     .await?;
     contact.source_email_account_id = source.0;
-    contact.source_state = source.1;
-    contact.source_enabled = source.2;
-    contact.source_writable = source.3 && book_writable;
+    contact.source_provider = source.1;
+    contact.source_state = source.2;
+    contact.source_enabled = source.3;
+    contact.source_writable = source.4 && book_writable;
     contact.groups = groups
         .into_iter()
         .map(|(id, name, remote_id)| ContactGroup {
@@ -1274,6 +1465,7 @@ fn row_to_contact(row: ContactRow) -> Result<Contact, AppError> {
         photo_version: row.photo_version,
         photo_content_type: row.photo_content_type,
         source_email_account_id: None,
+        source_provider: String::new(),
         source_state: "idle".to_owned(),
         source_enabled: true,
         source_writable: false,
@@ -1408,7 +1600,14 @@ mod tests {
              INSERT INTO contact_groups (id, account_id, book_id, name, remote_id)
              VALUES ('friends', 'source-a', 'book-a', 'Friends', 'group/friends');
              INSERT INTO contact_group_members (contact_id, group_id)
-             VALUES ('contact-a', 'friends')",
+             VALUES ('contact-a', 'friends');
+             INSERT INTO folders (id, account_id, name, full_path, folder_type)
+             VALUES ('folder-a', 'mail-a', 'Inbox', 'INBOX', 'INBOX'),
+                    ('folder-b', 'mail-b', 'Inbox', 'INBOX', 'INBOX');
+             INSERT INTO messages (id, account_id, folder_id, uid, from_addr, internal_date)
+             VALUES ('message-a1', 'mail-a', 'folder-a', 1, 'Alice Recent <alice@example.com>', '2026-01-01T00:00:00Z'),
+                    ('message-a2', 'mail-a', 'folder-a', 2, 'Alicia Sender <alicia@example.net>', '2026-01-02T00:00:00Z'),
+                    ('message-b1', 'mail-b', 'folder-b', 1, 'Alistair Remote <alistair@example.net>', '2026-01-03T00:00:00Z')",
         )
         .execute(&db)
         .await
@@ -1467,6 +1666,7 @@ mod tests {
                 account_id: None,
                 mailbox_id: Some("mail-a".into()),
                 book_id: Some("book-a".into()),
+                group_id: None,
                 limit: Some(20),
                 offset: Some(0),
             },
@@ -1478,7 +1678,77 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].display_name.as_deref(), Some("Alice"));
         assert_eq!(page.items[0].groups[0].name, "Friends");
+        assert_eq!(page.items[0].source_provider, "cardav");
         assert!(page.items[0].source_writable);
+    }
+
+    #[tokio::test]
+    async fn contact_groups_return_resolved_names_counts_and_filter_contacts() {
+        let db = database().await;
+        let groups = contact_groups(
+            &db,
+            &ContactGroupQuery {
+                account_id: Some("source-a".into()),
+                mailbox_id: None,
+                book_id: Some("book-a".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Friends");
+        assert_eq!(groups[0].member_count, 1);
+
+        let page = contact_page(
+            &db,
+            &ContactQuery {
+                q: None,
+                account_id: None,
+                mailbox_id: None,
+                book_id: None,
+                group_id: Some("friends".into()),
+                limit: Some(20),
+                offset: Some(0),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].display_name.as_deref(), Some("Alice"));
+    }
+
+    #[tokio::test]
+    async fn recipient_suggestions_merge_contacts_and_known_senders() {
+        let db = database().await;
+        let suggestions = recipient_suggestion_rows(
+            &db,
+            &ContactQuery {
+                q: Some("ali".into()),
+                account_id: None,
+                mailbox_id: Some("mail-b".into()),
+                book_id: None,
+                group_id: None,
+                limit: None,
+                offset: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(suggestions[0].email, "alice@example.com");
+        assert_eq!(suggestions[0].source, "contact");
+        assert_eq!(suggestions[1].email, "alistair@example.net");
+        assert_eq!(suggestions[1].source, "sender");
+        assert_eq!(suggestions[2].email, "alicia@example.net");
+        assert_eq!(suggestions[2].source, "sender");
+        assert_eq!(
+            suggestions
+                .iter()
+                .filter(|suggestion| suggestion.email == "alice@example.com")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1491,6 +1761,7 @@ mod tests {
                 account_id: Some("source-b".into()),
                 mailbox_id: None,
                 book_id: None,
+                group_id: None,
                 limit: Some(20),
                 offset: Some(0),
             },
@@ -1525,6 +1796,7 @@ mod tests {
                 account_id: None,
                 mailbox_id: Some("mail-b".into()),
                 book_id: None,
+                group_id: None,
                 limit: Some(10),
                 offset: Some(0),
             },

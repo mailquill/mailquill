@@ -52,6 +52,7 @@ export const de = {
     allContacts: 'Alle Kontakte',
     favourites: 'Favoriten',
     groups: 'Gruppen',
+    groupMembers: '{{count}} Gruppenmitglieder',
     newEvent: 'Neuer Termin',
     myCalendars: 'Meine Kalender',
     noCalendars: 'Noch keine Kalender.',
@@ -421,6 +422,11 @@ export const de = {
     account: 'Konto',
     accountName: 'Kontoname',
     provider: 'Anbieter',
+    providers: {
+      google: 'Google',
+      graph: 'Microsoft',
+      cardav: 'CardDAV',
+    },
     baseUrl: 'Basis-URL',
     accessToken: 'Zugriffstoken',
     chooseAccount: 'Konto auswählen',
@@ -465,6 +471,7 @@ export const de = {
     discoverySucceeded: 'Kontaktbücher wurden gefunden. Sie können die Synchronisierung starten.',
     oauthReturnComplete: 'Die Kontaktfreigabe wurde aktualisiert. Der aktuelle Status steht unten.',
     providerConfigurationRequired: 'Die {{provider}}-Kontakt-API ist für diese Mailquill-Installation nicht aktiviert. Aktivieren Sie die API im OAuth-Projekt und versuchen Sie es danach erneut.',
+    openProviderConsole: 'People API öffnen',
     carddavSetupTitle: 'Postfachkontakte einrichten',
     carddavSetupHelp: 'Mailquill sucht mit den bereits gespeicherten Zugangsdaten dieses Postfachs nach Kontaktbüchern.',
     discovering: 'Kontaktbücher werden gesucht…',
@@ -487,6 +494,8 @@ export const de = {
     book: 'Kontaktbuch',
     defaultBook: 'Standard-Schreibbuch',
     groups: 'Gruppen',
+    allGroups: 'Alle Kontakte',
+    groupMembers: '{{count}} Gruppenmitglieder',
     independentCarddavHelp: 'Erweitert: Verbinden Sie einen separaten CardDAV-Server. Google- und Microsoft-Kontakte werden über die Postfachkarte aktiviert.',
     state: {
       disabled: 'Kontaktsynchronisierung ist aus',
@@ -500,6 +509,10 @@ export const de = {
     },
   },
   compose: {
+    suggestionSource: {
+      contact: 'Kontakt',
+      sender: 'Bekannter Absender',
+    },
     newMessage: 'Neue Nachricht',
     from: 'Von',
     to: 'An',

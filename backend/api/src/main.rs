@@ -316,6 +316,14 @@ async fn main() {
         )
         .route("/contacts/search", get(routes::contacts::search_contacts))
         .route(
+            "/recipient-suggestions",
+            get(routes::contacts::recipient_suggestions),
+        )
+        .route(
+            "/contact-groups",
+            get(routes::contacts::list_contact_groups),
+        )
+        .route(
             "/contacts",
             get(routes::contacts::list_contacts).post(routes::contacts::create_contact),
         )

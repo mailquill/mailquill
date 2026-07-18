@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useOutletContext, useSearchParams } from 'react-router-dom'
-import { Building2, Edit3, Mail, MapPin, Phone, Plus, RefreshCw, Search, Trash2, UserRound, Users } from 'lucide-react'
+import { Building2, Edit3, Mail, MapPin, Phone, Plus, Search, Trash2, UserRound, Users } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
 import { Input } from '@/shared/components/ui/input'
@@ -10,14 +10,13 @@ import { Label } from '@/shared/components/ui/label'
 import { Select } from '@/shared/components/ui/select'
 import { Textarea } from '@/shared/components/ui/textarea'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/shared/components/ui/dialog'
+import { Badge } from '@/shared/components/ui/badge'
 import {
   useContactAccounts,
   useContacts,
   useCreateContact,
   useCreateContactAccount,
   useDeleteContact,
-  useDeleteContactAccount,
-  useSyncContactAccount,
   useUpdateContact,
   useContactBooks,
 } from '@/shared/hooks/useContacts'
@@ -73,12 +72,9 @@ export function ContactsPage() {
   const { data: accounts = [] } = useContactAccounts()
   const { data: mailboxes = [] } = useAccounts()
   const [search, setSearch] = useState('')
-  const [mailboxFilter, setMailboxFilter] = useState('')
-  const [bookFilter, setBookFilter] = useState('')
-  const accountFilter = contactGroup === 'all' || contactGroup === 'fav' ? undefined : contactGroup
-  const sourceForMailbox = accounts.find((account) => account.email_account_id === mailboxFilter)?.id
-  const { data: books = [] } = useContactBooks(sourceForMailbox)
-  const { data: contacts = [], isLoading } = useContacts(accountFilter, search, mailboxFilter || undefined, bookFilter || undefined)
+  const groupFilter = contactGroup.startsWith('group:') ? contactGroup.slice('group:'.length) : undefined
+  const accountFilter = contactGroup === 'all' || contactGroup === 'fav' || groupFilter ? undefined : contactGroup
+  const { data: contacts = [], isLoading } = useContacts(accountFilter, search, undefined, undefined, groupFilter)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editing, setEditing] = useState<Contact | null>(null)
   const [accountDialogOpen, setAccountDialogOpen] = useState(false)
@@ -109,17 +105,6 @@ export function ContactsPage() {
             <Button size="icon" variant="outline" title={t('contacts.newContact')} onClick={openAdd}>
               <Plus className="size-4" />
             </Button>
-          </div>
-          <AccountStrip accounts={accounts} />
-          <div className="grid grid-cols-2 gap-2">
-            <Select aria-label={t('contacts.filterMailbox')} value={mailboxFilter} onChange={(event) => { setMailboxFilter(event.currentTarget.value); setBookFilter('') }}>
-              <option value="">{t('contacts.allMailboxes')}</option>
-              {mailboxes.map((mailbox) => <option key={mailbox.id} value={mailbox.id}>{mailbox.display_name}</option>)}
-            </Select>
-            <Select aria-label={t('contacts.filterBook')} value={bookFilter} onChange={(event) => setBookFilter(event.currentTarget.value)} disabled={!mailboxFilter}>
-              <option value="">{t('contacts.allBooks')}</option>
-              {books.map((book) => <option key={book.id} value={book.id}>{book.display_name}</option>)}
-            </Select>
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -169,43 +154,6 @@ export function ContactsPage() {
   )
 }
 
-function AccountStrip({ accounts }: { accounts: { id: string; display_name: string; type: string; capability_state: string; management_mode: string }[] }) {
-  const { t } = useTranslation()
-  const deleteAccount = useDeleteContactAccount()
-  const syncAccount = useSyncContactAccount()
-  if (!accounts.length) {
-    return <p className="text-xs text-muted-foreground">{t('contacts.noAccounts')}</p>
-  }
-  return (
-    <div className="flex gap-2 overflow-x-auto">
-      {accounts.map((account) => (
-        <span key={account.id} className="inline-flex items-center gap-2 rounded-md border border-border px-2 py-1 text-xs">
-          <span className="font-semibold">{account.display_name}</span>
-          <span className="text-muted-foreground">{account.type}</span>
-          <span className="text-muted-foreground">{t(`contacts.state.${account.capability_state}`)}</span>
-          <button
-            type="button"
-            aria-label={t('contacts.syncAccount', { name: account.display_name })}
-            onClick={() => syncAccount.mutate(account.id)}
-            disabled={syncAccount.isPending || account.capability_state === 'syncing' || account.capability_state === 'disabled'}
-            className="text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-          >
-            <RefreshCw className={cn('size-3', account.capability_state === 'syncing' && 'animate-spin motion-reduce:animate-none')} />
-          </button>
-          {account.management_mode === 'independent' && <button
-            type="button"
-            aria-label={t('contacts.deleteAccount', { name: account.display_name })}
-            onClick={() => deleteAccount.mutate(account.id)}
-            className="text-muted-foreground transition-colors hover:text-destructive"
-          >
-            <Trash2 className="size-3" />
-          </button>}
-        </span>
-      ))}
-    </div>
-  )
-}
-
 function EligibleMailboxCards({ mailboxes }: { mailboxes: import('@/shared/types').Account[] }) {
   const { t } = useTranslation()
   const enable = useEnableMailboxContacts()
@@ -226,11 +174,21 @@ function EligibleMailboxCards({ mailboxes }: { mailboxes: import('@/shared/types
             <div className="text-[13px] font-bold">{mailbox.display_name}</div>
             <div className="mt-0.5 text-[11.5px] text-muted-foreground">{capability ? t(`contacts.state.${capability.state}`) : t('contacts.state.disabled')}</div>
             {capability?.reason === 'provider_configuration_required' ? (
-              <p role="alert" className="mt-1 text-[11.5px] text-destructive">
-                {t('contacts.providerConfigurationRequired', {
+              <div role="alert" className="mt-1 text-[11.5px] text-destructive">
+                <span>{t('contacts.providerConfigurationRequired', {
                   provider: capability.provider === 'google' ? 'Google' : capability.provider === 'graph' ? 'Microsoft' : 'CardDAV',
-                })}
-              </p>
+                })}</span>{' '}
+                {capability.provider === 'google' ? (
+                  <a
+                    className="font-semibold underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    href="https://console.cloud.google.com/apis/library/people.googleapis.com"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t('contacts.openProviderConsole')}
+                  </a>
+                ) : null}
+              </div>
             ) : null}
             <Button className="mt-2" size="sm" onClick={action} disabled={enable.isPending || discover.isPending}>
               {capability?.reason === 'provider_configuration_required' ? t('contacts.tryAgain') : capability?.state === 'consent_required' ? t('contacts.grantAccess') : capability?.state === 'reauth_required' ? t('contacts.reconnect') : capability?.state === 'error' ? t('contacts.fixContacts') : t('contacts.enable')}
@@ -264,6 +222,9 @@ function ContactDetail({ contact, onEdit, onDeleted }: { contact: Contact; onEdi
         <Avatar contact={contact} size={84} className="text-[30px]" />
         <div className="min-w-0">
           <h1 className="text-[24px] font-bold tracking-tight">{contactName(contact)}</h1>
+          <Badge variant="secondary" className="mt-2">
+            {t(`contacts.providers.${contact.source_provider}`)}
+          </Badge>
           {(contact.title || contact.org) && (
             <p className="mt-1 text-[14px] text-muted-foreground">
               {[contact.title, contact.org].filter(Boolean).join(' · ')}

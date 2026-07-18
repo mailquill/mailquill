@@ -489,9 +489,19 @@ export function ContactCapabilityRow({ account }: { account: Account }) {
             {state === 'disabled' && capability?.cache_retained ? ` · ${t('contacts.cacheReadOnly')}` : ''}
           </p>
           {providerConfigurationRequired ? (
-            <p role="alert" className="mt-1 text-[11.5px] text-destructive">
-              {t('contacts.providerConfigurationRequired', { provider })}
-            </p>
+            <div role="alert" className="mt-1 text-[11.5px] text-destructive">
+              <span>{t('contacts.providerConfigurationRequired', { provider })}</span>{' '}
+              {capability?.provider === 'google' ? (
+                <a
+                  className="font-semibold underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  href="https://console.cloud.google.com/apis/library/people.googleapis.com"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('contacts.openProviderConsole')}
+                </a>
+              ) : null}
+            </div>
           ) : null}
         </div>
         <Button size="sm" variant={state === 'idle' ? 'outline' : 'default'} onClick={primaryAction} disabled={busy || state === 'syncing' || state === 'pending'}>

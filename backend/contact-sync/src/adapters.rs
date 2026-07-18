@@ -442,7 +442,7 @@ impl GooglePeopleAdapter {
 impl ContactProviderAdapter for GooglePeopleAdapter {
     async fn books(&self) -> Result<Vec<ContactBookIdentity>, ProviderError> {
         let mut next = Some(format!("{}/contactGroups?pageSize=1000", self.base_url));
-        let mut books = Vec::new();
+        let mut groups = Vec::new();
         while let Some(url) = next.take() {
             let response = self
                 .authorized(self.client.get(url))
@@ -450,12 +450,13 @@ impl ContactProviderAdapter for GooglePeopleAdapter {
                 .await
                 .map_err(transport_error)?;
             let value: Value = checked_json(response).await?;
-            books.extend(
+            groups.extend(
                 value["contactGroups"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(google_group_book),
+                    .filter(|group| group["resourceName"].as_str().is_some())
+                    .cloned(),
             );
             next = value["nextPageToken"].as_str().map(|token| {
                 format!(
@@ -464,10 +465,7 @@ impl ContactProviderAdapter for GooglePeopleAdapter {
                 )
             });
         }
-        if books.is_empty() {
-            books.push(google_default_book());
-        }
-        Ok(books)
+        Ok(vec![google_default_book(groups)])
     }
 
     async fn changes(
@@ -949,28 +947,25 @@ fn provider_error(
     }
 }
 
-fn google_default_book() -> ContactBookIdentity {
+fn google_default_book(groups: Vec<Value>) -> ContactBookIdentity {
+    let display_name = groups
+        .iter()
+        .find(|group| group["resourceName"] == "contactGroups/myContacts")
+        .and_then(|group| {
+            group["formattedName"]
+                .as_str()
+                .or_else(|| group["name"].as_str())
+        })
+        .unwrap_or("Contacts")
+        .to_owned();
     ContactBookIdentity {
         remote_id: "contactGroups/myContacts".to_owned(),
-        display_name: "Contacts".to_owned(),
+        display_name,
         parent_remote_id: None,
         is_default: true,
         is_writable: true,
-        provider_metadata: Value::Null,
+        provider_metadata: json!({ "contact_groups": groups }),
     }
-}
-
-fn google_group_book(value: &Value) -> Option<ContactBookIdentity> {
-    let remote_id = value["resourceName"].as_str()?.to_owned();
-    Some(ContactBookIdentity {
-        display_name: value["name"].as_str().unwrap_or(&remote_id).to_owned(),
-        is_default: remote_id == "contactGroups/myContacts",
-        is_writable: value["groupType"].as_str() != Some("SYSTEM_CONTACT_GROUP")
-            || remote_id == "contactGroups/myContacts",
-        remote_id,
-        parent_remote_id: None,
-        provider_metadata: value.clone(),
-    })
 }
 
 fn parse_google_page(value: &Value, book_remote_id: &str) -> ContactChangePage {
@@ -1442,6 +1437,39 @@ mod tests {
         assert_eq!(page.tombstones[0].remote_id, "people/2");
         assert_eq!(page.continuation.as_deref(), Some("page-2"));
         assert!(page.final_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn google_exposes_groups_as_metadata_of_one_address_book() {
+        let body = json!({
+            "contactGroups": [
+                {"resourceName": "contactGroups/myContacts", "name": "myContacts", "formattedName": "My contacts", "groupType": "SYSTEM_CONTACT_GROUP"},
+                {"resourceName": "contactGroups/friends", "name": "Friends", "groupType": "USER_CONTACT_GROUP"}
+            ]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let (base, server) = one_shot_server(response).await;
+        let books = GooglePeopleAdapter::with_base_url(&base, "token")
+            .books()
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].remote_id, "contactGroups/myContacts");
+        assert_eq!(books[0].display_name, "My contacts");
+        assert_eq!(
+            books[0].provider_metadata["contact_groups"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

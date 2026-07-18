@@ -9,6 +9,7 @@ export {
   ApiError,
   setAccessToken,
   getAccessToken,
+  ensureFreshAccessToken,
   refreshAccessToken,
   setRefreshSubscriber,
 } from './client'

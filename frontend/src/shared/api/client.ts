@@ -17,6 +17,36 @@ export function setRefreshSubscriber(subscriber: (token: string | null) => void)
 
 let refreshInFlight: Promise<string | null> | null = null
 
+const ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60
+
+function accessTokenExpiresWithin(token: string, seconds: number): boolean {
+  try {
+    const payload = token.split('.')[1]
+    if (!payload) return false
+    const normalized = payload.replaceAll('-', '+').replaceAll('_', '/')
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+    const decoded = JSON.parse(atob(padded)) as { exp?: unknown }
+    return typeof decoded.exp === 'number'
+      && decoded.exp <= Math.floor(Date.now() / 1000) + seconds
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Return the current access token, refreshing it first when it is close to
+ * expiry. Calls share the same refresh request through `refreshAccessToken`.
+ *
+ * @returns The usable access token, or null when no session can be refreshed.
+ */
+export async function ensureFreshAccessToken(): Promise<string | null> {
+  if (!accessToken) return null
+  if (accessTokenExpiresWithin(accessToken, ACCESS_TOKEN_REFRESH_SKEW_SECONDS)) {
+    return refreshAccessToken()
+  }
+  return accessToken
+}
+
 export async function refreshAccessToken(): Promise<string | null> {
   // Single-flight: when the access token expires the app fires many requests at
   // once, each hitting 401. The refresh token rotates server-side (the old one
@@ -59,8 +89,9 @@ export async function apiFetch(
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
   }
-  if (accessToken) {
-    headers['Authorization'] = `Bearer ${accessToken}`
+  const currentToken = await ensureFreshAccessToken()
+  if (currentToken) {
+    headers['Authorization'] = `Bearer ${currentToken}`
   }
 
   let res = await fetch(`${BASE}${path}`, {

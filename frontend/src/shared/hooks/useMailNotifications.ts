@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { getAccessToken } from '@/shared/api'
+import { ensureFreshAccessToken } from '@/shared/api'
 import { getStoredPushSubscriptionId } from '@/shared/hooks/usePushNotifications'
 import type { SyncStatus } from '@/shared/types'
 
@@ -42,10 +42,11 @@ export function useMailNotifications(enabled: boolean) {
       }, 500)
     }
 
-    const connect = () => {
-      const token = getAccessToken()
+    const connect = async () => {
+      const token = await ensureFreshAccessToken()
+      if (closed) return
       if (!token) {
-        retry = setTimeout(connect, 3000)
+        retry = setTimeout(() => void connect(), 3000)
         return
       }
       source = new EventSource(`/api/events?token=${encodeURIComponent(token)}`)
@@ -107,11 +108,11 @@ export function useMailNotifications(enabled: boolean) {
         // fresh token after a short delay.
         source?.close()
         source = null
-        if (!closed) retry = setTimeout(connect, 5000)
+        if (!closed) retry = setTimeout(() => void connect(), 5000)
       }
     }
 
-    connect()
+    void connect()
 
     return () => {
       closed = true

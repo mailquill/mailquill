@@ -18,6 +18,10 @@ pub struct FolderInfo {
 #[derive(Debug, Default)]
 pub struct FetchedMessage {
     pub uid: u32,
+    /// Provider-native message id correlated during fetch. Gmail-over-IMAP
+    /// supplies X-GM-MSGID here so the sync chunk can persist it atomically
+    /// with the message instead of opening a separate SQLite transaction.
+    pub remote_id: Option<String>,
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,

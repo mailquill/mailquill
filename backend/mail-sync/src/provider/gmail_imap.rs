@@ -57,14 +57,33 @@ impl GmailImapProvider {
         })
     }
 
-    /// Bind each fetched IMAP uid to its Gmail message id (hex X-GM-MSGID) so a
-    /// later label op can address it via the API. Best-effort: a failure here
-    /// must not break the fetch itself.
-    async fn record_gmail_ids(&mut self, folder: &str, uid_set: &str) -> Result<(), ProviderError> {
+    async fn fetch_gmail_ids(
+        &mut self,
+        folder: &str,
+        uid_set: &str,
+    ) -> Result<Vec<(u32, String)>, ProviderError> {
         self.imap.ensure_selected(folder).await?;
-        let pairs = session::fetch_gmail_msgids(self.imap.session_mut(), uid_set).await?;
-        for (uid, remote) in pairs {
-            self.ids.set(folder, uid, &remote).await?;
+        session::fetch_gmail_msgids(self.imap.session_mut(), uid_set)
+            .await
+            .map_err(ProviderError::from)
+    }
+
+    /// Attach each Gmail id to the fetched message. The sync pipeline persists
+    /// it in the same transaction as the message metadata, avoiding a second
+    /// SQLite writer acquisition for every IMAP fetch.
+    async fn attach_gmail_ids(
+        &mut self,
+        folder: &str,
+        uid_set: &str,
+        messages: &mut [FetchedMessage],
+    ) -> Result<(), ProviderError> {
+        let pairs: HashMap<u32, String> = self
+            .fetch_gmail_ids(folder, uid_set)
+            .await?
+            .into_iter()
+            .collect();
+        for message in messages {
+            message.remote_id = pairs.get(&message.uid).cloned();
         }
         Ok(())
     }
@@ -76,7 +95,8 @@ impl GmailImapProvider {
         if let Ok(remote_id) = self.ids.remote_id(folder, uid).await {
             return Ok(remote_id);
         }
-        self.record_gmail_ids(folder, &uid.to_string()).await?;
+        let pairs = self.fetch_gmail_ids(folder, &uid.to_string()).await?;
+        self.ids.set_many(folder, &pairs).await?;
         self.ids.remote_id(folder, uid).await.map_err(|_| {
             ProviderError::Other(format!(
                 "Gmail did not return X-GM-MSGID for folder {folder} uid {uid}"
@@ -191,8 +211,8 @@ impl MailProvider for GmailImapProvider {
         folder: &str,
         uid_set: &str,
     ) -> Result<Vec<FetchedMessage>, ProviderError> {
-        let msgs = self.imap.fetch_headers(folder, uid_set).await?;
-        if let Err(error) = self.record_gmail_ids(folder, uid_set).await {
+        let mut msgs = self.imap.fetch_headers(folder, uid_set).await?;
+        if let Err(error) = self.attach_gmail_ids(folder, uid_set, &mut msgs).await {
             tracing::warn!(
                 "gmail X-GM-MSGID correlation failed: account={} folder={folder} uid_set={uid_set} error={error}",
                 self.account_id
@@ -206,8 +226,8 @@ impl MailProvider for GmailImapProvider {
         folder: &str,
         uid_set: &str,
     ) -> Result<Vec<FetchedMessage>, ProviderError> {
-        let msgs = self.imap.fetch_full(folder, uid_set).await?;
-        if let Err(error) = self.record_gmail_ids(folder, uid_set).await {
+        let mut msgs = self.imap.fetch_full(folder, uid_set).await?;
+        if let Err(error) = self.attach_gmail_ids(folder, uid_set, &mut msgs).await {
             tracing::warn!(
                 "gmail X-GM-MSGID correlation failed: account={} folder={folder} uid_set={uid_set} error={error}",
                 self.account_id

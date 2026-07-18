@@ -17,20 +17,13 @@ use std::collections::{HashMap, HashSet};
 pub const STARRED_COUNT_SQL: &str =
     "SELECT COUNT(*) FROM messages INDEXED BY idx_msg_flagged WHERE is_flagged = 1 AND is_deleted = 0";
 
-/// Count live messages in the folders enabled for an account's sync.
+/// Sum trigger-maintained live counts for the folders enabled for sync.
 ///
-/// Driving the count from `folders` keeps the outer scan tiny. The correlated
-/// count then performs one covering lookup per enabled folder through the
-/// partial undeleted-message index. This avoids SQLite choosing an account
-/// index and loading every message row merely to evaluate `is_deleted` and the
-/// joined folder's `sync_enabled` flag.
-pub const SYNCED_MESSAGE_COUNT_SQL: &str = "SELECT COALESCE(SUM((\
-         SELECT COUNT(*) \
-         FROM messages INDEXED BY idx_msg_folder_undeleted \
-         WHERE folder_id = f.id AND is_deleted = 0\
-     )), 0) \
-     FROM folders f \
-     WHERE f.account_id = ? AND f.sync_enabled = 1";
+/// This reads only the account's folder rows. Recounting the partial message
+/// index after every imported chunk was normally quick, but became I/O-bound
+/// while several account backfills were writing to the same SQLite database.
+pub const SYNCED_MESSAGE_COUNT_SQL: &str =
+    "SELECT COALESCE(SUM(live_message_count), 0) FROM folders WHERE account_id = ? AND sync_enabled = 1";
 
 /// One conversation row as rendered in a mail list.
 #[derive(Serialize, Clone)]
@@ -372,7 +365,8 @@ mod tests {
                 full_path TEXT NOT NULL,
                 folder_type TEXT NOT NULL,
                 unread_count INTEGER NOT NULL DEFAULT 0,
-                sync_enabled INTEGER NOT NULL DEFAULT 1
+                sync_enabled INTEGER NOT NULL DEFAULT 1,
+                live_message_count INTEGER NOT NULL DEFAULT 0
             )",
         )
         .execute(&db)
@@ -396,6 +390,35 @@ mod tests {
                 list_id TEXT,
                 phishing_verdict TEXT
             )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "CREATE TRIGGER messages_live_count_after_insert
+             AFTER INSERT ON messages WHEN NEW.is_deleted = 0 BEGIN
+                 UPDATE folders SET live_message_count = live_message_count + 1
+                 WHERE id = NEW.folder_id;
+             END;
+             CREATE TRIGGER messages_live_count_after_delete
+             AFTER DELETE ON messages WHEN OLD.is_deleted = 0 BEGIN
+                 UPDATE folders SET live_message_count = MAX(live_message_count - 1, 0)
+                 WHERE id = OLD.folder_id;
+             END;
+             CREATE TRIGGER messages_live_count_after_visibility_change
+             AFTER UPDATE OF folder_id, is_deleted ON messages
+             WHEN OLD.folder_id <> NEW.folder_id OR OLD.is_deleted <> NEW.is_deleted BEGIN
+                 UPDATE folders
+                 SET live_message_count = MAX(
+                     live_message_count - CASE WHEN OLD.is_deleted = 0 THEN 1 ELSE 0 END,
+                     0
+                 )
+                 WHERE id = OLD.folder_id;
+                 UPDATE folders
+                 SET live_message_count = live_message_count
+                     + CASE WHEN NEW.is_deleted = 0 THEN 1 ELSE 0 END
+                 WHERE id = NEW.folder_id;
+             END;",
         )
         .execute(&db)
         .await
@@ -438,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn synced_message_count_uses_covering_folder_index() {
+    async fn synced_message_count_uses_trigger_maintained_folder_totals() {
         let db = test_db().await;
         sqlx::query(
             "INSERT INTO folders (id, account_id, full_path, folder_type, sync_enabled) VALUES
@@ -476,9 +499,35 @@ mod tests {
                 .unwrap();
         assert!(
             plan.iter()
-                .any(|(_, _, _, detail)| detail.contains("idx_msg_folder_undeleted")),
-            "synced-message count did not use the covering partial index: {plan:?}"
+                .all(|(_, _, _, detail)| !detail.contains("messages")),
+            "synced-message count unexpectedly scanned messages: {plan:?}"
         );
+
+        sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = 'live'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let after_delete: i64 = sqlx::query_scalar(SYNCED_MESSAGE_COUNT_SQL)
+            .bind("account-a")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(after_delete, 0);
+
+        sqlx::query("UPDATE messages SET is_deleted = 0 WHERE id = 'live'")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM messages WHERE id = 'live'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let after_hard_delete: i64 = sqlx::query_scalar(SYNCED_MESSAGE_COUNT_SQL)
+            .bind("account-a")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(after_hard_delete, 0);
     }
 
     #[tokio::test]

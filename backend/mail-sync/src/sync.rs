@@ -1,6 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::{sync::mpsc, time};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 use crate::{
     manager::{NewMessageNotification, SyncAppState, SyncCommand},
@@ -13,15 +16,10 @@ use crate::{
 pub async fn run_sync_task(
     account_id: String,
     user_id: String,
-    mut rx: mpsc::Receiver<SyncCommand>,
+    rx: mpsc::Receiver<SyncCommand>,
     self_tx: mpsc::Sender<SyncCommand>,
     app_state: Arc<dyn SyncAppState>,
 ) {
-    info!("sync task starting: account={account_id}");
-
-    // Initial sync
-    do_sync(&account_id, &user_id, &app_state).await;
-
     let db = match app_state.user_db(&user_id).await {
         Ok(db) => db,
         Err(e) => {
@@ -30,39 +28,93 @@ pub async fn run_sync_task(
         }
     };
 
-    let interval_secs: i64 =
-        sqlx::query_scalar("SELECT sync_interval_secs FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&db)
-            .await
-            .unwrap_or(None)
-            .unwrap_or(300);
+    let context = match load_sync_task_context(&db, &account_id).await {
+        Ok(Some(context)) => context,
+        Ok(None) => {
+            error!("sync task: account={account_id} user={user_id} no longer exists");
+            return;
+        }
+        Err(error) => {
+            error!("sync task: account={account_id} user={user_id} cannot load account context: {error}");
+            return;
+        }
+    };
+    let span = tracing::info_span!(
+        "mail_sync_account",
+        account_id = %account_id,
+        account_name = %context.account_name,
+        account_email = %context.account_email,
+    );
+    run_sync_task_with_context(account_id, user_id, rx, self_tx, app_state, context)
+        .instrument(span)
+        .await;
+}
 
-    let mut ticker = time::interval(time::Duration::from_secs(interval_secs as u64));
+#[derive(Debug, PartialEq, Eq)]
+struct SyncTaskContext {
+    account_name: String,
+    account_email: String,
+    interval_secs: i64,
+    provider_kind: String,
+    sync_mode: String,
+}
+
+async fn load_sync_task_context(
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+) -> Result<Option<SyncTaskContext>, sqlx::Error> {
+    let row: Option<(String, String, i64, String, String)> = sqlx::query_as(
+        "SELECT display_name, primary_email, sync_interval_secs, provider_kind, sync_mode
+         FROM email_accounts WHERE id = ?",
+    )
+    .bind(account_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(
+        |(account_name, account_email, interval_secs, provider_kind, sync_mode)| SyncTaskContext {
+            account_name,
+            account_email,
+            interval_secs,
+            provider_kind,
+            sync_mode,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_sync_task_with_context(
+    account_id: String,
+    user_id: String,
+    mut rx: mpsc::Receiver<SyncCommand>,
+    self_tx: mpsc::Sender<SyncCommand>,
+    app_state: Arc<dyn SyncAppState>,
+    context: SyncTaskContext,
+) {
+    info!("sync task starting: account={account_id}");
+
+    // Initial sync
+    do_sync(&account_id, &user_id, &app_state).await;
+
+    let mut ticker = time::interval(time::Duration::from_secs(context.interval_secs as u64));
     ticker.reset();
 
     // In idle mode a dedicated IMAP connection triggers an immediate poll for
     // INBOX activity. Keep the periodic ticker as a safety net for changes in
     // other folders/labels, because one IMAP IDLE connection watches only one
     // selected mailbox. API-only providers use the same periodic path.
-    let (provider_kind, sync_mode): (String, String) =
-        sqlx::query_as("SELECT provider_kind, sync_mode FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| ("imap".into(), "idle".into()));
-
-    let idle_mode = sync_mode == "idle" && ProviderKind::parse(&provider_kind).syncs_over_imap();
+    let idle_mode = context.sync_mode == "idle"
+        && ProviderKind::parse(&context.provider_kind).syncs_over_imap();
     // The guard aborts the IDLE child when this sync task shuts down or is dropped.
     let _idle_guard = if idle_mode {
-        let handle = tokio::spawn(run_idle_task(
-            account_id.clone(),
-            user_id.clone(),
-            app_state.clone(),
-            self_tx.clone(),
-        ));
+        let handle = tokio::spawn(
+            run_idle_task(
+                account_id.clone(),
+                user_id.clone(),
+                app_state.clone(),
+                self_tx.clone(),
+            )
+            .in_current_span(),
+        );
         Some(AbortOnDrop(handle))
     } else {
         None
@@ -620,69 +672,23 @@ async fn sync_folder(
             provider.fetch_headers(folder_path, &uid_set).await?
         };
         messages.sort_by_key(|msg| msg.uid);
-        let mut phishing_batch: Vec<(String, &[u8])> = Vec::new();
 
-        for msg in &messages {
-            let thread_id = assign_thread_id(
-                msg.message_id.as_deref(),
-                msg.in_reply_to.as_deref(),
-                msg.references.as_deref(),
-                msg.list_id.as_deref(),
-                &msg.subject,
-                &existing_threads,
-            );
-
-            let subject_normalized = crate::threading::normalize_subject(&msg.subject);
-
-            let snippet = if let Some(ref body) = msg.body {
-                if let Ok(parsed) = parse_mime(body) {
-                    compute_snippet(&msg.subject, parsed.text.as_deref())
-                } else {
-                    compute_snippet(&msg.subject, None)
-                }
-            } else {
-                compute_snippet(&msg.subject, None)
-            };
-
-            let is_new_message: bool = !sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM messages WHERE folder_id = ? AND uid = ?)",
-            )
-            .bind(&folder_id)
-            .bind(msg.uid as i64)
-            .fetch_one(db)
-            .await?;
-
-            // Insert or update message (task 4.6)
-            let msg_id: Option<String> = sqlx::query_scalar(
-            "INSERT INTO messages (account_id, folder_id, uid, message_id_header, thread_id, in_reply_to, \"references\", list_id, subject, subject_normalized, snippet, from_addr, to_addrs, cc_addrs, date, internal_date, is_read, is_flagged, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id, uid) DO UPDATE SET thread_id = excluded.thread_id, is_read = excluded.is_read, is_flagged = excluded.is_flagged, is_deleted = MAX(excluded.is_deleted, messages.is_deleted), subject = excluded.subject, subject_normalized = excluded.subject_normalized, snippet = excluded.snippet, from_addr = excluded.from_addr, to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs RETURNING id",
+        let imported_messages = persist_message_metadata_chunk(
+            account_id,
+            &folder_id,
+            folder_path,
+            chunk_start,
+            chunk_end,
+            body_sync_mode,
+            &messages,
+            &existing_threads,
+            db,
         )
-        .bind(account_id)
-        .bind(&folder_id)
-        .bind(msg.uid as i64)
-        .bind(msg.message_id.as_deref())
-        .bind(&thread_id)
-        .bind(msg.in_reply_to.as_deref())
-        .bind(msg.references.as_deref())
-        .bind(msg.list_id.as_deref())
-        .bind(&msg.subject)
-        .bind(&subject_normalized)
-        .bind(&snippet)
-        .bind(&msg.from_addr)
-        .bind(&msg.to_addrs)
-        .bind(&msg.cc_addrs)
-        .bind(msg.date.as_deref())
-        .bind(&msg.internal_date)
-        .bind(msg.is_seen as i64)
-        .bind(msg.is_flagged as i64)
-        .bind(msg.is_deleted as i64)
-        .fetch_optional(db)
-        .await?
-        .flatten();
+        .await?;
 
-            let msg_db_id = match msg_id {
-                Some(id) => id,
-                None => continue,
-            };
+        let mut phishing_batch: Vec<(String, &[u8])> = Vec::new();
+        for (message_index, msg_db_id, is_new_message) in imported_messages {
+            let msg = &messages[message_index];
 
             // For full sync mode, store body in blob store (task 4.3)
             if body_sync_mode == "full" {
@@ -766,20 +772,6 @@ async fn sync_folder(
                 }
             }
 
-            // Update FTS for lazy sync with subject + from_addr (no body text)
-            if body_sync_mode == "lazy" {
-                // OR IGNORE keeps any existing row (with body) intact; FTS5
-                // does not support ON CONFLICT here.
-                let _ = sqlx::query(
-                "INSERT OR IGNORE INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, '')",
-            )
-            .bind(&msg_db_id)
-            .bind(&msg.subject)
-            .bind(&msg.from_addr)
-            .execute(db)
-            .await;
-            }
-
             let should_notify = is_new_message
                 && notify_allowed
                 && !msg.is_seen
@@ -858,6 +850,133 @@ async fn sync_folder(
     }
 
     Ok(())
+}
+
+/// Persist one fetched chunk atomically. SQLite permits only one writer, so
+/// both the message metadata and lazy FTS rows deliberately share one short
+/// transaction. CPU-heavy MIME parsing happens before the transaction starts;
+/// blob and notification I/O happens after this function returns.
+#[allow(clippy::too_many_arguments)]
+async fn persist_message_metadata_chunk(
+    account_id: &str,
+    folder_id: &str,
+    folder_path: &str,
+    chunk_start: u32,
+    chunk_end: u32,
+    body_sync_mode: &str,
+    messages: &[crate::session::FetchedMessage],
+    existing_threads: &HashMap<String, String>,
+    db: &sqlx::SqlitePool,
+) -> Result<Vec<(usize, String, bool)>, sqlx::Error> {
+    // Determine newness once for the whole fetched range instead of issuing
+    // one EXISTS query per message.
+    let existing_uids: HashSet<i64> =
+        sqlx::query_scalar("SELECT uid FROM messages WHERE folder_id = ? AND uid BETWEEN ? AND ?")
+            .bind(folder_id)
+            .bind(i64::from(chunk_start))
+            .bind(i64::from(chunk_end))
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .collect();
+    let prepared_metadata: Vec<(String, String, String)> = messages
+        .iter()
+        .map(|msg| {
+            let thread_id = assign_thread_id(
+                msg.message_id.as_deref(),
+                msg.in_reply_to.as_deref(),
+                msg.references.as_deref(),
+                msg.list_id.as_deref(),
+                &msg.subject,
+                existing_threads,
+            );
+            let subject_normalized = crate::threading::normalize_subject(&msg.subject);
+            let snippet = if let Some(ref body) = msg.body {
+                if let Ok(parsed) = parse_mime(body) {
+                    compute_snippet(&msg.subject, parsed.text.as_deref())
+                } else {
+                    compute_snippet(&msg.subject, None)
+                }
+            } else {
+                compute_snippet(&msg.subject, None)
+            };
+            (thread_id, subject_normalized, snippet)
+        })
+        .collect();
+
+    let mut imported_messages = Vec::with_capacity(messages.len());
+    let mut metadata_tx = db.begin().await?;
+    for (message_index, (msg, (thread_id, subject_normalized, snippet))) in
+        messages.iter().zip(prepared_metadata.iter()).enumerate()
+    {
+        let is_new_message = !existing_uids.contains(&i64::from(msg.uid));
+        let msg_id: Option<String> = sqlx::query_scalar(
+            "INSERT INTO messages (account_id, folder_id, uid, message_id_header, thread_id, in_reply_to, \"references\", list_id, subject, subject_normalized, snippet, from_addr, to_addrs, cc_addrs, date, internal_date, is_read, is_flagged, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id, uid) DO UPDATE SET thread_id = excluded.thread_id, is_read = excluded.is_read, is_flagged = excluded.is_flagged, is_deleted = MAX(excluded.is_deleted, messages.is_deleted), subject = excluded.subject, subject_normalized = excluded.subject_normalized, snippet = excluded.snippet, from_addr = excluded.from_addr, to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs RETURNING id",
+        )
+        .bind(account_id)
+        .bind(folder_id)
+        .bind(i64::from(msg.uid))
+        .bind(msg.message_id.as_deref())
+        .bind(thread_id)
+        .bind(msg.in_reply_to.as_deref())
+        .bind(msg.references.as_deref())
+        .bind(msg.list_id.as_deref())
+        .bind(&msg.subject)
+        .bind(subject_normalized)
+        .bind(snippet)
+        .bind(&msg.from_addr)
+        .bind(&msg.to_addrs)
+        .bind(&msg.cc_addrs)
+        .bind(msg.date.as_deref())
+        .bind(&msg.internal_date)
+        .bind(msg.is_seen as i64)
+        .bind(msg.is_flagged as i64)
+        .bind(msg.is_deleted as i64)
+        .fetch_optional(&mut *metadata_tx)
+        .await?
+        .flatten();
+
+        let Some(msg_db_id) = msg_id else {
+            continue;
+        };
+
+        if body_sync_mode == "lazy" {
+            // OR IGNORE keeps any existing row containing a downloaded body.
+            // FTS5 virtual tables do not support ON CONFLICT.
+            sqlx::query(
+                "INSERT OR IGNORE INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, '')",
+            )
+            .bind(&msg_db_id)
+            .bind(&msg.subject)
+            .bind(&msg.from_addr)
+            .execute(&mut *metadata_tx)
+            .await?;
+        }
+
+        imported_messages.push((message_index, msg_db_id, is_new_message));
+    }
+
+    let remote_mappings: Vec<&crate::session::FetchedMessage> = messages
+        .iter()
+        .filter(|message| message.remote_id.is_some())
+        .collect();
+    if !remote_mappings.is_empty() {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "INSERT INTO remote_message_ids (account_id, folder_path, uid, remote_id) ",
+        );
+        query.push_values(remote_mappings, |mut row, message| {
+            row.push_bind(account_id)
+                .push_bind(folder_path)
+                .push_bind(i64::from(message.uid))
+                .push_bind(message.remote_id.as_deref().expect("filtered remote id"));
+        });
+        query.push(
+            " ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET remote_id = excluded.remote_id WHERE remote_message_ids.remote_id <> excluded.remote_id",
+        );
+        query.build().execute(&mut *metadata_tx).await?;
+    }
+    metadata_tx.commit().await?;
+    Ok(imported_messages)
 }
 
 fn contiguous_uid(current: i64, sorted_uids: &[i64]) -> i64 {
@@ -1101,9 +1220,152 @@ async fn do_imap_expunge(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_folder_sync_enabled, folder_sync_priority, oauth_reauthentication_error,
-        ProviderError, ProviderKind,
+        default_folder_sync_enabled, folder_sync_priority, load_sync_task_context,
+        oauth_reauthentication_error, persist_message_metadata_chunk, ProviderError, ProviderKind,
+        SyncTaskContext,
     };
+    use crate::session::FetchedMessage;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn sync_task_context_loads_readable_account_identity() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE email_accounts (
+                 id TEXT PRIMARY KEY,
+                 display_name TEXT NOT NULL,
+                 primary_email TEXT NOT NULL,
+                 sync_interval_secs INTEGER NOT NULL,
+                 provider_kind TEXT NOT NULL,
+                 sync_mode TEXT NOT NULL
+             );
+             INSERT INTO email_accounts VALUES (
+                 'account-id', 'Personal Gmail', 'person@example.test', 300, 'gmail_imap', 'idle'
+             );",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let context = load_sync_task_context(&db, "account-id").await.unwrap();
+        assert_eq!(
+            context,
+            Some(SyncTaskContext {
+                account_name: "Personal Gmail".to_owned(),
+                account_email: "person@example.test".to_owned(),
+                interval_secs: 300,
+                provider_kind: "gmail_imap".to_owned(),
+                sync_mode: "idle".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn message_chunk_rolls_back_when_gmail_mapping_upsert_fails() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE messages (
+                 id TEXT NOT NULL PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                 account_id TEXT NOT NULL,
+                 folder_id TEXT NOT NULL,
+                 uid INTEGER NOT NULL,
+                 message_id_header TEXT,
+                 thread_id TEXT,
+                 in_reply_to TEXT,
+                 \"references\" TEXT,
+                 list_id TEXT,
+                 subject TEXT NOT NULL DEFAULT '',
+                 subject_normalized TEXT NOT NULL DEFAULT '',
+                 snippet TEXT NOT NULL DEFAULT '',
+                 from_addr TEXT NOT NULL DEFAULT '',
+                 to_addrs TEXT NOT NULL DEFAULT '',
+                 cc_addrs TEXT NOT NULL DEFAULT '',
+                 date TEXT,
+                 internal_date TEXT NOT NULL,
+                 is_read INTEGER NOT NULL DEFAULT 0,
+                 is_flagged INTEGER NOT NULL DEFAULT 0,
+                 is_deleted INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE(folder_id, uid)
+             );
+             CREATE VIRTUAL TABLE messages_fts USING fts5(
+                 subject, from_addr, body_text, content='', contentless_delete=1
+             );
+             CREATE TABLE remote_message_ids (
+                 account_id TEXT NOT NULL,
+                 folder_path TEXT NOT NULL,
+                 uid INTEGER NOT NULL,
+                 remote_id TEXT NOT NULL,
+                 PRIMARY KEY (account_id, folder_path, uid),
+                 UNIQUE (account_id, folder_path, remote_id)
+             );
+             CREATE TRIGGER reject_second_gmail_mapping
+             BEFORE INSERT ON remote_message_ids WHEN NEW.uid = 2
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected chunk failure');
+             END;",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let messages = vec![
+            FetchedMessage {
+                uid: 1,
+                remote_id: Some("gmail-1".to_owned()),
+                subject: "first".to_owned(),
+                from_addr: "first@example.test".to_owned(),
+                internal_date: "2026-07-18T15:00:00Z".to_owned(),
+                ..FetchedMessage::default()
+            },
+            FetchedMessage {
+                uid: 2,
+                remote_id: Some("gmail-2".to_owned()),
+                subject: "second".to_owned(),
+                from_addr: "second@example.test".to_owned(),
+                internal_date: "2026-07-18T15:01:00Z".to_owned(),
+                ..FetchedMessage::default()
+            },
+        ];
+
+        let result = persist_message_metadata_chunk(
+            "account",
+            "inbox",
+            "INBOX",
+            1,
+            2,
+            "lazy",
+            &messages,
+            &HashMap::new(),
+            &db,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let message_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let fts_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let mapping_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_message_ids")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(message_count, 0, "the first row must be rolled back");
+        assert_eq!(fts_count, 0, "its FTS row must be rolled back as well");
+        assert_eq!(mapping_count, 0, "Gmail ids must share the rollback");
+    }
 
     #[test]
     fn gmail_defaults_skip_archive_and_custom_labels() {

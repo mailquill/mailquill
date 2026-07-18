@@ -126,16 +126,35 @@ impl IdMap {
     /// used by the Gmail-over-IMAP hybrid to bind IMAP uids to Gmail message ids
     /// (hex X-GM-MSGID). Overwrites any prior remote_id for that uid.
     pub async fn set(&self, folder: &str, uid: u32, remote_id: &str) -> Result<(), ProviderError> {
-        sqlx::query(
-            "INSERT INTO remote_message_ids (account_id, folder_path, uid, remote_id) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET remote_id = excluded.remote_id",
-        )
-        .bind(&self.account_id)
-        .bind(folder)
-        .bind(uid as i64)
-        .bind(remote_id)
-        .execute(&self.db)
-        .await
-        .map_err(wrap)?;
+        self.set_many(folder, &[(uid, remote_id.to_owned())])
+            .await?;
+        Ok(())
+    }
+
+    /// Store several IMAP uid → Gmail id mappings with one statement per
+    /// bounded chunk. Gmail fetches these mappings in the same batches as mail
+    /// headers, so committing every row separately only creates avoidable
+    /// SQLite writer contention with the message import.
+    pub async fn set_many(
+        &self,
+        folder: &str,
+        mappings: &[(u32, String)],
+    ) -> Result<(), ProviderError> {
+        for chunk in mappings.chunks(ASSIGN_BATCH_SIZE) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO remote_message_ids (account_id, folder_path, uid, remote_id) ",
+            );
+            query.push_values(chunk, |mut row, (uid, remote_id)| {
+                row.push_bind(&self.account_id)
+                    .push_bind(folder)
+                    .push_bind(i64::from(*uid))
+                    .push_bind(remote_id);
+            });
+            query.push(
+                " ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET remote_id = excluded.remote_id",
+            );
+            query.build().execute(&self.db).await.map_err(wrap)?;
+        }
         Ok(())
     }
 
@@ -310,5 +329,48 @@ mod tests {
         assert_eq!(count, 1_200);
         assert_eq!(first, "id-0000");
         assert_eq!(last, "id-1199");
+    }
+
+    #[tokio::test]
+    async fn stores_fetched_gmail_ids_in_batches_and_updates_conflicts() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE remote_message_ids (
+                account_id TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                uid INTEGER NOT NULL,
+                remote_id TEXT NOT NULL,
+                PRIMARY KEY (account_id, folder_path, uid),
+                UNIQUE (account_id, folder_path, remote_id)
+            )",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let ids = IdMap::new(db.clone(), "account".to_owned());
+        let mappings: Vec<(u32, String)> = (1..=1_200)
+            .map(|uid| (uid, format!("gmail-{uid}")))
+            .collect();
+        ids.set_many("INBOX", &mappings).await.unwrap();
+        ids.set("INBOX", 700, "gmail-700-updated").await.unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_message_ids")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let updated: String = sqlx::query_scalar(
+            "SELECT remote_id FROM remote_message_ids WHERE account_id = 'account' AND folder_path = 'INBOX' AND uid = 700",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        assert_eq!(count, 1_200);
+        assert_eq!(updated, "gmail-700-updated");
     }
 }

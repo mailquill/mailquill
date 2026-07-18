@@ -234,14 +234,11 @@ async fn sync_account(
     // Count over the same set `total` covers: synced (enabled) folders, live
     // messages only. Counting every folder or including soft-deleted rows made
     // `synced` exceed `total` (e.g. "519 / 226").
-    let already: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages m JOIN folders f ON f.id = m.folder_id \
-         WHERE m.account_id = ? AND f.sync_enabled = 1 AND m.is_deleted = 0",
-    )
-    .bind(account_id)
-    .fetch_one(&db)
-    .await
-    .unwrap_or(0);
+    let already: i64 = sqlx::query_scalar(db::queries::SYNCED_MESSAGE_COUNT_SQL)
+        .bind(account_id)
+        .fetch_one(&db)
+        .await
+        .unwrap_or(0);
     app.sync_manager()
         .set_progress(account_id, already, total)
         .await;
@@ -625,6 +622,7 @@ async fn sync_folder(
             provider.fetch_headers(folder_path, &uid_set).await?
         };
         messages.sort_by_key(|msg| msg.uid);
+        let mut phishing_batch: Vec<(String, &[u8])> = Vec::new();
 
         for msg in &messages {
             let thread_id = assign_thread_id(
@@ -766,7 +764,7 @@ async fn sync_folder(
             // message; lazy sync: header block — body checks don't fire).
             if is_new_message {
                 if let Some(ref raw) = msg.body {
-                    phishing::analyse_and_store(db, &msg_db_id, raw).await;
+                    phishing_batch.push((msg_db_id.clone(), raw));
                 }
             }
 
@@ -806,6 +804,12 @@ async fn sync_folder(
             }
         }
 
+        let phishing_inputs: Vec<(&str, &[u8])> = phishing_batch
+            .iter()
+            .map(|(message_id, raw)| (message_id.as_str(), *raw))
+            .collect();
+        phishing::analyse_and_store_batch(db, &phishing_inputs).await;
+
         // Persist progress after each chunk (task 4.14) so messages stream into
         // the UI and an interrupted sync resumes from the last committed UID.
         // Only advance through a contiguous run of locally stored UIDs: API
@@ -839,14 +843,11 @@ async fn sync_folder(
 
         // Report sync progress (synced / total) for the live UI indicator.
         // Match the denominator: enabled folders, live messages only.
-        let synced: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages m JOIN folders f ON f.id = m.folder_id \
-             WHERE m.account_id = ? AND f.sync_enabled = 1 AND m.is_deleted = 0",
-        )
-        .bind(account_id)
-        .fetch_one(db)
-        .await
-        .unwrap_or(0);
+        let synced: i64 = sqlx::query_scalar(db::queries::SYNCED_MESSAGE_COUNT_SQL)
+            .bind(account_id)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
         app.sync_manager()
             .set_progress(account_id, synced, total)
             .await;

@@ -9,6 +9,29 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 
+/// Count live starred messages through the small partial starred index.
+///
+/// Without `INDEXED BY`, SQLite can choose `idx_msg_deleted_date` and scan
+/// every live message even though `idx_msg_flagged` contains only the rows the
+/// query needs. Optional unread/account predicates can safely be appended.
+pub const STARRED_COUNT_SQL: &str =
+    "SELECT COUNT(*) FROM messages INDEXED BY idx_msg_flagged WHERE is_flagged = 1 AND is_deleted = 0";
+
+/// Count live messages in the folders enabled for an account's sync.
+///
+/// Driving the count from `folders` keeps the outer scan tiny. The correlated
+/// count then performs one covering lookup per enabled folder through the
+/// partial undeleted-message index. This avoids SQLite choosing an account
+/// index and loading every message row merely to evaluate `is_deleted` and the
+/// joined folder's `sync_enabled` flag.
+pub const SYNCED_MESSAGE_COUNT_SQL: &str = "SELECT COALESCE(SUM((\
+         SELECT COUNT(*) \
+         FROM messages INDEXED BY idx_msg_folder_undeleted \
+         WHERE folder_id = f.id AND is_deleted = 0\
+     )), 0) \
+     FROM folders f \
+     WHERE f.account_id = ? AND f.sync_enabled = 1";
+
 /// One conversation row as rendered in a mail list.
 #[derive(Serialize, Clone)]
 pub struct ThreadRow {
@@ -139,9 +162,7 @@ async fn view_total(
     };
     let unread_clause = if unread { "AND is_read = 0" } else { "" };
     if view == Some("starred") {
-        let sql = format!(
-            "SELECT COUNT(*) FROM messages WHERE is_flagged = 1 AND is_deleted = 0 {unread_clause} {account_clause}",
-        );
+        let sql = format!("{STARRED_COUNT_SQL} {unread_clause} {account_clause}");
         let mut q = sqlx::query_scalar::<_, i64>(&sql);
         if let Some(a) = account_id {
             q = q.bind(a);
@@ -336,7 +357,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
 
 #[cfg(test)]
 mod tests {
-    use super::unified_page;
+    use super::{unified_page, STARRED_COUNT_SQL, SYNCED_MESSAGE_COUNT_SQL};
     use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 
     async fn test_db() -> SqlitePool {
@@ -350,7 +371,8 @@ mod tests {
                 account_id TEXT NOT NULL,
                 full_path TEXT NOT NULL,
                 folder_type TEXT NOT NULL,
-                unread_count INTEGER NOT NULL DEFAULT 0
+                unread_count INTEGER NOT NULL DEFAULT 0,
+                sync_enabled INTEGER NOT NULL DEFAULT 1
             )",
         )
         .execute(&db)
@@ -382,7 +404,81 @@ mod tests {
             .execute(&db)
             .await
             .unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_msg_flagged ON messages(folder_id, internal_date DESC) \
+             WHERE is_flagged = 1 AND is_deleted = 0",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_msg_folder_undeleted ON messages(folder_id) \
+             WHERE is_deleted = 0",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn starred_count_forces_the_partial_flagged_index() {
+        let db = test_db().await;
+        let plan: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(&format!("EXPLAIN QUERY PLAN {STARRED_COUNT_SQL}"))
+                .fetch_all(&db)
+                .await
+                .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_msg_flagged")),
+            "unexpected query plan: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn synced_message_count_uses_covering_folder_index() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO folders (id, account_id, full_path, folder_type, sync_enabled) VALUES
+             ('enabled', 'account-a', 'INBOX', 'INBOX', 1),
+             ('disabled', 'account-a', 'Archive', 'ARCHIVE', 0),
+             ('other', 'account-b', 'INBOX', 'INBOX', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages
+             (id, account_id, folder_id, uid, internal_date, is_deleted) VALUES
+             ('live', 'account-a', 'enabled', 1, '2026-01-01T00:00:00Z', 0),
+             ('deleted', 'account-a', 'enabled', 2, '2026-01-02T00:00:00Z', 1),
+             ('disabled-live', 'account-a', 'disabled', 3, '2026-01-03T00:00:00Z', 0),
+             ('other-live', 'account-b', 'other', 4, '2026-01-04T00:00:00Z', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let count: i64 = sqlx::query_scalar(SYNCED_MESSAGE_COUNT_SQL)
+            .bind("account-a")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let plan: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(&format!("EXPLAIN QUERY PLAN {SYNCED_MESSAGE_COUNT_SQL}"))
+                .bind("account-a")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_msg_folder_undeleted")),
+            "synced-message count did not use the covering partial index: {plan:?}"
+        );
     }
 
     #[tokio::test]

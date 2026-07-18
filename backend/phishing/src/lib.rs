@@ -587,6 +587,19 @@ fn url_domain(url: &str) -> Option<String> {
 /// Run analysis and persist: upsert into `phishing_analysis` and denormalize
 /// the verdict onto `messages.phishing_verdict`.
 pub async fn analyse_and_store(db: &SqlitePool, message_id: &str, raw: &[u8]) {
+    analyse_and_store_batch(db, &[(message_id, raw)]).await;
+}
+
+/// Analyse and persist a fetched sync chunk with one SQLite commit.
+///
+/// Keeping the report upsert and denormalized message verdict in the same
+/// transaction avoids two autocommits per message. Loading custom brands once
+/// per chunk also keeps large mailbox backfills from repeating the same query.
+pub async fn analyse_and_store_batch(db: &SqlitePool, messages: &[(&str, &[u8])]) {
+    if messages.is_empty() {
+        return;
+    }
+
     // Custom DB entries first: they take precedence over the file list.
     let mut brands: Vec<(String, String)> =
         sqlx::query_as("SELECT domain, brand_name FROM user_brand_entries")
@@ -595,31 +608,109 @@ pub async fn analyse_and_store(db: &SqlitePool, message_id: &str, raw: &[u8]) {
             .unwrap_or_default();
     brands.extend(current_brands());
 
-    let report = {
-        let guard = FEED.get().map(|lock| lock.read().unwrap());
-        let empty = OpenPhishFeed::default();
-        let feed: &OpenPhishFeed = guard.as_deref().unwrap_or(&empty);
-        analyse(raw, &brands, feed)
-    };
-    let checks_json = serde_json::to_string(&report.checks).unwrap_or_else(|_| "[]".into());
+    let feed = FEED
+        .get()
+        .map(|lock| lock.read().unwrap().clone())
+        .unwrap_or_default();
+    let reports: Vec<(&str, Report, String)> = messages
+        .iter()
+        .map(|(message_id, raw)| {
+            let report = analyse(raw, &brands, &feed);
+            let checks_json = serde_json::to_string(&report.checks).unwrap_or_else(|_| "[]".into());
+            (*message_id, report, checks_json)
+        })
+        .collect();
 
-    if let Err(e) = sqlx::query(
-        "INSERT INTO phishing_analysis (message_id, score, verdict, checks_json, analysed_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ON CONFLICT(message_id) DO UPDATE SET score = excluded.score, verdict = excluded.verdict, checks_json = excluded.checks_json, analysed_at = excluded.analysed_at",
-    )
-    .bind(message_id)
-    .bind(report.score)
-    .bind(report.verdict)
-    .bind(&checks_json)
-    .execute(db)
-    .await
-    {
-        warn!("phishing analysis store failed for {message_id}: {e}");
-        return;
+    let mut transaction = match db.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            warn!(
+                "phishing analysis transaction failed for {} messages: {error}",
+                messages.len()
+            );
+            return;
+        }
+    };
+
+    for (message_id, report, checks_json) in reports {
+        if let Err(error) = sqlx::query(
+            "INSERT INTO phishing_analysis (message_id, score, verdict, checks_json, analysed_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) ON CONFLICT(message_id) DO UPDATE SET score = excluded.score, verdict = excluded.verdict, checks_json = excluded.checks_json, analysed_at = excluded.analysed_at",
+        )
+        .bind(message_id)
+        .bind(report.score)
+        .bind(report.verdict)
+        .bind(&checks_json)
+        .execute(&mut *transaction)
+        .await
+        {
+            warn!("phishing analysis store failed for {message_id}: {error}");
+            return;
+        }
+
+        if let Err(error) = sqlx::query("UPDATE messages SET phishing_verdict = ? WHERE id = ?")
+            .bind(report.verdict)
+            .bind(message_id)
+            .execute(&mut *transaction)
+            .await
+        {
+            warn!("phishing verdict store failed for {message_id}: {error}");
+            return;
+        }
     }
 
-    let _ = sqlx::query("UPDATE messages SET phishing_verdict = ? WHERE id = ?")
-        .bind(report.verdict)
-        .bind(message_id)
-        .execute(db)
+    if let Err(error) = transaction.commit().await {
+        warn!(
+            "phishing analysis commit failed for {} messages: {error}",
+            messages.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::analyse_and_store_batch;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn batch_persists_reports_and_denormalized_verdicts() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE user_brand_entries (domain TEXT NOT NULL, brand_name TEXT NOT NULL);
+             CREATE TABLE messages (id TEXT PRIMARY KEY, phishing_verdict TEXT);
+             CREATE TABLE phishing_analysis (
+                 message_id TEXT PRIMARY KEY,
+                 score INTEGER NOT NULL,
+                 verdict TEXT NOT NULL,
+                 checks_json TEXT NOT NULL,
+                 analysed_at TEXT NOT NULL
+             );
+             INSERT INTO messages (id) VALUES ('first'), ('second');",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let first = b"From: Alice <alice@example.test>\r\nSubject: First\r\n\r\nHello";
+        let second = b"From: Bob <bob@example.test>\r\nSubject: Second\r\n\r\nHello";
+        analyse_and_store_batch(
+            &db,
+            &[("first", first.as_slice()), ("second", second.as_slice())],
+        )
         .await;
+
+        let reports: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM phishing_analysis")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let verdicts: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE phishing_verdict IS NOT NULL")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!((reports, verdicts), (2, 2));
+    }
 }

@@ -538,15 +538,10 @@ async fn account_sync_progress(
             .fetch_one(db)
             .await?;
 
-    let synced: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) \
-         FROM messages m \
-         JOIN folders f ON f.id = m.folder_id \
-         WHERE m.account_id = ? AND f.sync_enabled = 1 AND m.is_deleted = 0",
-    )
-    .bind(account_id)
-    .fetch_one(db)
-    .await?;
+    let synced: i64 = sqlx::query_scalar(db::queries::SYNCED_MESSAGE_COUNT_SQL)
+        .bind(account_id)
+        .fetch_one(db)
+        .await?;
 
     let discovered_remote: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) \
@@ -558,12 +553,44 @@ async fn account_sync_progress(
     .fetch_one(db)
     .await?;
 
-    let total = match provider_kind.as_str() {
-        "gmail_api" | "outlook_api" => synced.max(discovered_remote),
-        _ => synced.max(fallback_total),
-    };
+    let total = sync_progress_total(&provider_kind, synced, discovered_remote, fallback_total);
 
     Ok((synced, total))
+}
+
+fn sync_progress_total(
+    provider_kind: &str,
+    synced: i64,
+    discovered_remote: i64,
+    fallback_total: i64,
+) -> i64 {
+    match provider_kind {
+        // API providers discover remote ids in bounded pages. Keep the
+        // provider-reported denominator while a backfill is active so the GET
+        // response cannot replace a larger SSE total with the smaller number
+        // discovered locally so far.
+        "gmail_api" | "outlook_api" => synced.max(discovered_remote).max(fallback_total),
+        _ => synced.max(fallback_total),
+    }
+}
+
+#[cfg(test)]
+mod sync_progress_tests {
+    use super::sync_progress_total;
+
+    #[test]
+    fn gmail_rest_progress_keeps_the_larger_provider_total_from_sse() {
+        assert_eq!(
+            sync_progress_total("gmail_api", 13_226, 12_896, 38_327),
+            38_327
+        );
+    }
+
+    #[test]
+    fn api_progress_never_falls_below_local_or_discovered_rows() {
+        assert_eq!(sync_progress_total("gmail_api", 15, 20, 10), 20);
+        assert_eq!(sync_progress_total("outlook_api", 25, 20, 10), 25);
+    }
 }
 
 pub async fn trigger_sync(

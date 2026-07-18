@@ -70,11 +70,10 @@ pub async fn unified_counts(
             .unwrap_or(0)
     };
 
-    let starred: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE is_flagged = 1 AND is_deleted = 0")
-            .fetch_one(&user_db)
-            .await
-            .unwrap_or(0);
+    let starred: i64 = sqlx::query_scalar(db::queries::STARRED_COUNT_SQL)
+        .fetch_one(&user_db)
+        .await
+        .unwrap_or(0);
 
     Ok(Json(json!({
         "inbox": unread("INBOX"),

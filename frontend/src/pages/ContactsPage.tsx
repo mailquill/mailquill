@@ -86,7 +86,7 @@ export function ContactsPage() {
   const selected = contacts.find((c) => c.id === selectedId) ?? contacts[0] ?? null
 
   return (
-    <section className="grid h-full min-h-0 grid-cols-[minmax(320px,400px)_1fr]">
+    <section aria-label={t('contacts.contactsCapability')} className="grid h-full min-h-0 grid-cols-[minmax(320px,400px)_1fr]">
       <div className="flex min-h-0 flex-col border-r border-border bg-card">
         <header className="flex flex-col gap-3 border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
@@ -190,7 +190,7 @@ function EligibleMailboxCards({ mailboxes }: { mailboxes: import('@/shared/types
                 ) : null}
               </div>
             ) : null}
-            <Button className="mt-2" size="sm" onClick={action} disabled={enable.isPending || discover.isPending}>
+            <Button className="mt-2" size="sm" variant="outline" onClick={action} disabled={enable.isPending || discover.isPending}>
               {capability?.reason === 'provider_configuration_required' ? t('contacts.tryAgain') : capability?.state === 'consent_required' ? t('contacts.grantAccess') : capability?.state === 'reauth_required' ? t('contacts.reconnect') : capability?.state === 'error' ? t('contacts.fixContacts') : t('contacts.enable')}
             </Button>
           </div>

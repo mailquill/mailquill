@@ -56,11 +56,11 @@
 - [x] 6.9 Update the populated contacts workspace to group/filter by mailbox and book, display group membership and photos, surface sync progress/errors without color-only meaning, and default creation to the selected writable book.
 - [x] 6.10 Wire mailbox-context contact ranking into compose To/Cc/Bcc autocomplete and calendar attendee inputs while retaining cross-account fallback results.
 - [x] 6.11 Add English and German copy plus accessible labels, focus restoration, associated validation errors, live status announcements, keyboard coverage, reduced-motion handling, and semantic-token styling for every setup/recovery state.
-- [ ] 6.12 Add frontend integration and end-to-end tests for first-time opt-in/skip, later OAuth re-consent return, automatic/manual CardDAV setup, TLS recovery, progress, error recovery, disable/cache choices, empty-state entry, and compose/calendar autocomplete selection.
+- [x] 6.12 Add frontend integration and end-to-end tests for first-time opt-in/skip, later OAuth re-consent return, automatic/manual CardDAV setup, TLS recovery, progress, error recovery, disable/cache choices, empty-state entry, and compose/calendar autocomplete selection.
 
 ## 7. Validation, Migration, and Documentation
 
 - [x] 7.1 Add migration fixture tests for fresh databases, linked legacy provider sources, ambiguous independent sources, repeated migration/reconciliation, and mailbox deletion cascades.
-- [ ] 7.2 Run provider, repository, API, frontend integration/E2E, keyboard, and accessibility test suites plus warning-free Rust checks, clippy, frontend typecheck/lint/build, and strict OpenSpec validation; resolve all failures in changed code.
+- [x] 7.2 Run provider, repository, API, frontend integration/E2E, keyboard, and accessibility test suites plus warning-free Rust checks, clippy, frontend typecheck/lint/build, and strict OpenSpec validation; resolve all failures in changed code.
 - [x] 7.3 Document OAuth application scope changes, Google People API enablement, Microsoft Graph delegated permissions, CardDAV/TLS behavior, re-consent rollout, operational status/error categories, and rollback steps.
 - [ ] 7.4 Verify the staged rollout against representative Google, Microsoft work/school and personal, multi-book CardDAV, expired-consent, rate-limit, and large-address-book accounts without logging contact content.

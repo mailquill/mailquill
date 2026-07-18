@@ -1,11 +1,13 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Account } from '@/shared/types'
 import { ContactCapabilityRow } from './SettingsPage'
 
 const disableMutate = vi.fn()
 const enableMutate = vi.fn()
+const updateMutate = vi.fn((_variables: unknown, options?: { onSuccess?: () => void }) => options?.onSuccess?.())
+const { oauthRedirect } = vi.hoisted(() => ({ oauthRedirect: vi.fn() }))
 const discoveredBooks = [
   { remote_id: 'default', display_name: 'Personal', parent_remote_id: null, is_default: true, is_writable: true },
   { remote_id: 'team', display_name: 'Team', parent_remote_id: null, is_default: false, is_writable: true },
@@ -18,12 +20,14 @@ vi.mock('@/shared/hooks/useAccounts', () => ({
   useDisableMailboxContacts: () => ({ mutate: disableMutate, isPending: false }),
   useEnableMailboxContacts: () => ({ mutate: enableMutate, isPending: false }),
   useDiscoverMailboxContacts: () => ({ mutate: discoverMutate, isPending: false, data: { source_id: 'source-1', books: discoveredBooks }, error: null }),
-  useUpdateAccount: () => ({ mutate: vi.fn(), isPending: false }),
+  useUpdateAccount: () => ({ mutate: updateMutate, isPending: false }),
   useAccounts: () => ({ data: [] }),
   useDeleteAccount: () => ({ mutate: vi.fn(), isPending: false }),
   useFolders: () => ({ data: [] }),
   useSetFolderSync: () => ({ mutate: vi.fn() }),
 }))
+
+vi.mock('@/shared/lib/oauth', () => ({ startOAuthRedirect: oauthRedirect }))
 
 vi.mock('@/shared/hooks/useContacts', () => ({
   useSyncContactAccount: () => ({ mutate: vi.fn(), isPending: false }),
@@ -54,6 +58,14 @@ const account = {
 } as Account
 
 describe('mailbox Contacts capability controls', () => {
+  beforeEach(() => {
+    disableMutate.mockClear()
+    enableMutate.mockClear()
+    discoverMutate.mockClear()
+    updateMutate.mockClear()
+    oauthRedirect.mockClear()
+  })
+
   it('defaults disablement to retaining a read-only local cache', async () => {
     const user = userEvent.setup()
     render(<ContactCapabilityRow account={account} />)
@@ -86,6 +98,67 @@ describe('mailbox Contacts capability controls', () => {
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     )
     expect(enableMutate).toHaveBeenCalledWith('mailbox-1', expect.objectContaining({ onSuccess: expect.any(Function) }))
+  })
+
+  it('requires confirmation before removing the local cache', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const user = userEvent.setup()
+    render(<ContactCapabilityRow account={account} />)
+
+    await user.click(screen.getByRole('button', { name: 'Disable' }))
+    await user.click(screen.getByRole('radio', { name: /Remove downloaded contacts/ }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Disable' }))
+
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(disableMutate).toHaveBeenCalledWith(
+      { accountId: 'mailbox-1', keepDownloadedContacts: false },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    )
+  })
+
+  it('preserves a manually entered CardDAV URL and retries discovery', async () => {
+    const user = userEvent.setup()
+    render(<ContactCapabilityRow account={{
+      ...account,
+      carddav_url: '',
+      contacts: { ...account.contacts!, state: 'disabled', enabled: false },
+    }} />)
+
+    await user.click(screen.getByRole('button', { name: 'Enable contacts' }))
+    const dialog = screen.getByRole('dialog')
+    await user.click(within(dialog).getByText(/Advanced CardDAV/))
+    const url = within(dialog).getByRole('textbox', { name: 'CardDAV URL' })
+    fireEvent.change(url, { target: { value: 'https://dav.example.test/addressbooks/' } })
+    await user.click(within(dialog).getByRole('button', { name: 'Try this address' }))
+
+    expect(url).toHaveValue('https://dav.example.test/addressbooks/')
+    expect(updateMutate).toHaveBeenCalledWith(
+      { id: 'mailbox-1', data: { carddav_url: 'https://dav.example.test/addressbooks/' } },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    )
+    expect(discoverMutate).toHaveBeenCalledTimes(2)
+  })
+
+  it('starts scoped re-consent for an existing OAuth mailbox', async () => {
+    const user = userEvent.setup()
+    render(<ContactCapabilityRow account={{
+      ...account,
+      contacts: { ...account.contacts!, provider: 'google', state: 'consent_required', enabled: false },
+    }} />)
+
+    await user.click(screen.getByRole('button', { name: 'Grant access' }))
+    expect(oauthRedirect).toHaveBeenCalledWith('google', 'mailbox-1', 'contacts')
+  })
+
+  it('announces synchronization progress and prevents duplicate starts', () => {
+    render(<ContactCapabilityRow account={{
+      ...account,
+      contacts: { ...account.contacts!, state: 'syncing', enabled: true },
+    }} />)
+
+    const action = screen.getByRole('button', { name: 'Syncing…' })
+    expect(action).toBeDisabled()
+    expect(action.closest('[aria-live="polite"]')).not.toBeNull()
   })
 
   it('shows disabled provider API guidance and retries without another consent redirect', async () => {

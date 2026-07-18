@@ -22,6 +22,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
   const [draft, setDraft] = useState('')
   const [focused, setFocused] = useState(false)
   const [activeSuggestion, setActiveSuggestion] = useState(0)
+  const inputId = useId()
   const suggestionListId = useId()
   const limit = useUiPrefs((s) => s.maxRecipients)
   const atLimit = value.length >= limit
@@ -83,7 +84,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2">
-        <label className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">{label}</label>
+        <label htmlFor={inputId} className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">{label}</label>
         {accessory}
         {focused && (
           <span className="ml-auto text-[11px] text-muted-foreground">
@@ -124,7 +125,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
               <span className="max-w-[220px] truncate">{addr}</span>
               <button
                 type="button"
-                aria-label={`Remove ${addr}`}
+                aria-label={t('compose.removeRecipient', { recipient: addr })}
                 onClick={(e) => {
                   e.stopPropagation()
                   onChange(value.filter((v) => v !== addr))
@@ -139,6 +140,7 @@ export function RecipientChips({ label, value, onChange, accessory, autoFocus, m
         {!atLimit && (
           <span className="relative min-w-[180px] flex-1">
             <input
+              id={inputId}
               autoFocus={autoFocus}
               value={draft}
               onChange={(e) => {

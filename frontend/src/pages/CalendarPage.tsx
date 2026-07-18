@@ -616,7 +616,7 @@ function EventDialog({
                   label={t('calendar.attendees')}
                   value={splitAttendees(form.attendees)}
                   onChange={(next) => set('attendees', next.join(', '))}
-                  mailboxId={calendars.find((calendar) => calendar.id === form.calendar_id)?.account_id ?? undefined}
+                  mailboxId={calendars.find((calendar) => calendar.id === selectedCalendar)?.account_id ?? undefined}
                 />
               </div>
               <Button variant="outline" onClick={() => discoverAttendees(form.attendees)} title={t('calendar.discoverKeys')}>

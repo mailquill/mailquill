@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import i18n from '@/shared/i18n'
@@ -6,6 +7,8 @@ import { ContactsPage } from './ContactsPage'
 
 const useContacts = vi.fn()
 let contactGroup = 'all'
+let mailboxes: import('@/shared/types').Account[] = []
+const enableContacts = vi.fn()
 
 vi.mock('@/shared/hooks/useContacts', () => ({
   useContactAccounts: () => ({ data: [] }),
@@ -23,9 +26,9 @@ vi.mock('@/shared/hooks/useContacts', () => ({
 }))
 
 vi.mock('@/shared/hooks/useAccounts', () => ({
-  useAccounts: () => ({ data: [] }),
+  useAccounts: () => ({ data: mailboxes }),
   useDiscoverMailboxContacts: () => ({ mutate: vi.fn(), isPending: false }),
-  useEnableMailboxContacts: () => ({ mutate: vi.fn(), isPending: false }),
+  useEnableMailboxContacts: () => ({ mutate: enableContacts, isPending: false }),
 }))
 
 vi.mock('@/shared/hooks/useModuleNav', () => ({
@@ -42,6 +45,8 @@ describe('ContactsPage groups', () => {
     useContacts.mockReset()
     useContacts.mockReturnValue({ data: [], isLoading: false })
     contactGroup = 'all'
+    mailboxes = []
+    enableContacts.mockClear()
   })
 
   it('applies a group selected in the sidebar', () => {
@@ -80,5 +85,23 @@ describe('ContactsPage groups', () => {
     render(<MemoryRouter><ContactsPage /></MemoryRouter>)
 
     expect(screen.getByText('Google')).toBeInTheDocument()
+  })
+
+  it('offers mailbox-scoped setup from the empty contacts workspace', async () => {
+    mailboxes = [{
+      id: 'mailbox-1',
+      display_name: 'Work',
+      primary_email: 'work@example.test',
+      contacts: {
+        source_id: 'source-1', provider: 'cardav', state: 'disabled', reason: null,
+        enabled: false, last_synced_at: null, cache_retained: true,
+      },
+    } as import('@/shared/types').Account]
+    const user = userEvent.setup()
+    render(<MemoryRouter><ContactsPage /></MemoryRouter>)
+
+    expect(screen.getByText('Work')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Enable contacts' }))
+    expect(enableContacts).toHaveBeenCalledWith('mailbox-1')
   })
 })

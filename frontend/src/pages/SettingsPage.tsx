@@ -201,7 +201,7 @@ function AccountsSection() {
   useEffect(() => {
     if (!connected || !contactsReturn) return
     window.requestAnimationFrame(() => document.getElementById(`contact-capability-${connected}`)?.focus())
-  }, [connected, contactsReturn])
+  }, [accounts, connected, contactsReturn])
 
   function closeAdd() {
     setAdding(false)

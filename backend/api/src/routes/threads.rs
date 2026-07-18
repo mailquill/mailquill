@@ -27,7 +27,7 @@ pub async fn get_thread(
         String, String, String, i64, Option<String>, Option<String>, Option<String>,
         String, String, String, String, String, Option<String>, String, bool, bool,
     )> = sqlx::query_as(
-        "SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id_header, m.in_reply_to, m.list_id, m.subject, m.from_addr, m.to_addrs, m.snippet, m.internal_date, f.folder_type, f.full_path, m.is_read, m.is_flagged FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0 ORDER BY m.internal_date ASC",
+        "SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id_header, m.in_reply_to, m.list_id, m.subject, m.from_addr, m.to_addrs, m.snippet, m.internal_date, f.folder_type, f.full_path, m.is_read, m.is_flagged FROM messages m INDEXED BY idx_msg_thread_undeleted_date LEFT JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0 ORDER BY m.internal_date ASC",
     )
     .bind(&thread_id)
     .fetch_all(&user_db)

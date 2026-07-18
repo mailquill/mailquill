@@ -51,6 +51,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_hot_paths_use_covering_indexes_without_temporary_btrees() {
+        let pool = memory_database().await;
+        run_mail_migrations(&pool).await.unwrap();
+
+        let thread_plan: Vec<String> = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN
+             SELECT m.id, m.account_id, m.folder_id, m.uid, m.message_id_header,
+                    m.in_reply_to, m.list_id, m.subject, m.from_addr, m.to_addrs,
+                    m.snippet, m.internal_date, f.folder_type, f.full_path,
+                    m.is_read, m.is_flagged
+             FROM messages AS m INDEXED BY idx_msg_thread_undeleted_date
+             LEFT JOIN folders AS f ON f.id = m.folder_id
+             WHERE m.thread_id = ? AND m.is_deleted = 0
+             ORDER BY m.internal_date ASC",
+        )
+        .bind("thread-id")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, _, detail)| detail)
+        .collect();
+        assert!(
+            thread_plan
+                .iter()
+                .any(|detail| detail.contains("idx_msg_thread_undeleted_date")),
+            "thread query did not use chronological partial index: {thread_plan:?}"
+        );
+        assert!(
+            thread_plan
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE")),
+            "thread query still needs a temporary sort: {thread_plan:?}"
+        );
+
+        let count_plan: Vec<String> = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN
+             SELECT COUNT(DISTINCT COALESCE(message_id_header, id))
+             FROM messages INDEXED BY idx_msg_thread_folder_identity_undeleted
+             WHERE thread_id = ? AND folder_id = ? AND is_deleted = 0",
+        )
+        .bind("thread-id")
+        .bind("folder-id")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, _, detail)| detail)
+        .collect();
+        assert!(
+            count_plan
+                .iter()
+                .any(|detail| { detail.contains("idx_msg_thread_folder_identity_undeleted") }),
+            "thread count did not use identity index: {count_plan:?}"
+        );
+        assert!(
+            count_plan
+                .iter()
+                .all(|detail| !detail.contains("USE TEMP B-TREE")),
+            "thread count still needs a temporary DISTINCT B-tree: {count_plan:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn mailbox_contact_migration_links_only_unambiguous_carddav_and_cascades() {
         let pool = memory_database().await;
         sqlx::raw_sql(

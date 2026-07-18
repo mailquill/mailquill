@@ -218,7 +218,7 @@ pub async fn get_message(
     // Thread summary
     let (thread_size, thread_unread) = if let Some(ref tid) = row.thread_id {
         let size: i64 = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT COALESCE(message_id_header, id)) FROM messages WHERE thread_id = ? AND folder_id = ? AND is_deleted = 0",
+            "SELECT COUNT(DISTINCT COALESCE(message_id_header, id)) FROM messages INDEXED BY idx_msg_thread_folder_identity_undeleted WHERE thread_id = ? AND folder_id = ? AND is_deleted = 0",
         )
         .bind(tid)
         .bind(&row.folder_id)

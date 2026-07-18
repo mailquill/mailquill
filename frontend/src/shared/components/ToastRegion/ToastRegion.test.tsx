@@ -12,11 +12,11 @@ vi.mock('sonner', () => ({
 }))
 
 describe('ToastRegion', () => {
-  it('configures an accessible notification region in the top-left corner', () => {
+  it('configures an accessible notification region in the top-right corner', () => {
     render(<ToastRegion />)
 
     expect(toaster).toHaveBeenCalledWith(expect.objectContaining({
-      position: 'top-left',
+      position: 'top-right',
       containerAriaLabel: 'Notifications',
       toastOptions: expect.objectContaining({ closeButtonAriaLabel: 'Dismiss notification' }),
     }))

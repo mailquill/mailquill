@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Toaster } from 'sonner'
 
 /**
- * Render accessible application notifications in the top-left corner.
+ * Render accessible application notifications in the top-right corner.
  * @returns The global Sonner notification region.
  */
 export function ToastRegion() {
@@ -11,7 +11,7 @@ export function ToastRegion() {
 
   return (
     <Toaster
-      position="top-left"
+      position="top-right"
       closeButton
       containerAriaLabel={t('notifications.regionLabel')}
       visibleToasts={4}

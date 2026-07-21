@@ -163,8 +163,8 @@ async fn bulk_thread_action(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(user_id).await?;
 
-    let messages: Vec<(String, String, i64, String)> = sqlx::query_as(
-        "SELECT m.id, m.account_id, m.uid, f.full_path FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0",
+    let messages: Vec<(String, String, i64, String, bool)> = sqlx::query_as(
+        "SELECT m.id, m.account_id, m.uid, f.full_path, m.is_local_draft FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0",
     )
     .bind(thread_id)
     .fetch_all(&user_db)
@@ -174,7 +174,23 @@ async fn bulk_thread_action(
         return Err(AppError::NotFound);
     }
 
-    for (msg_id, account_id, uid, folder_path) in &messages {
+    for (msg_id, account_id, uid, folder_path, is_local_draft) in &messages {
+        if *is_local_draft {
+            match action {
+                ThreadAction::Delete => {
+                    crate::routes::drafts::delete_local_draft(state, &user_db, msg_id).await?;
+                }
+                ThreadAction::MarkRead(is_read) => {
+                    sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
+                        .bind(is_read)
+                        .bind(msg_id)
+                        .execute(&user_db)
+                        .await?;
+                }
+                ThreadAction::Archive => {}
+            }
+            continue;
+        }
         match action {
             ThreadAction::Archive => {
                 state

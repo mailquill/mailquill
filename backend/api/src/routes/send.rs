@@ -16,6 +16,8 @@ const BACKGROUND_SEND_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Deserialize)]
 pub struct SendRequest {
+    /// Local draft to remove after successful delivery.
+    draft_id: Option<String>,
     /// account_id to send from
     account_id: String,
     /// from address (must be primary_email or an alias)
@@ -91,6 +93,19 @@ pub async fn send_email(
 
     let account = account.ok_or(AppError::NotFound)?;
 
+    if let Some(draft_id) = req.draft_id.as_deref() {
+        let valid_draft: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND account_id = ? AND is_local_draft = 1)",
+        )
+        .bind(draft_id)
+        .bind(&req.account_id)
+        .fetch_one(&user_db)
+        .await?;
+        if !valid_draft {
+            return Err(AppError::NotFound);
+        }
+    }
+
     // Verify from is primary or an alias
     let is_primary = req.from.to_lowercase() == account.primary_email.to_lowercase();
     let is_alias: bool = if !is_primary {
@@ -127,6 +142,7 @@ pub async fn send_email(
     let response_send_id = send_id.clone();
     let user_id = user.0;
     let subject = req.subject.clone();
+    let draft_id = req.draft_id.clone();
     let event_state = state.clone();
     tokio::spawn(async move {
         let result = match tokio::time::timeout(
@@ -139,15 +155,25 @@ pub async fn send_email(
             Err(_) => Err(AppError::BadGateway("send timed out".to_owned())),
         };
         match result {
-            Ok(message_id) => publish_send_status(
-                &event_state,
-                &user_id,
-                &send_id,
-                "sent",
-                Some(&message_id),
-                Some(&subject),
-                None,
-            ),
+            Ok(message_id) => {
+                if let Some(draft_id) = draft_id {
+                    if let Err(error) =
+                        crate::routes::drafts::delete_local_draft(&event_state, &user_db, &draft_id)
+                            .await
+                    {
+                        tracing::warn!(draft_id, error = %error, "sent draft cleanup failed");
+                    }
+                }
+                publish_send_status(
+                    &event_state,
+                    &user_id,
+                    &send_id,
+                    "sent",
+                    Some(&message_id),
+                    Some(&subject),
+                    None,
+                )
+            }
             Err(error) => {
                 tracing::warn!(send_id, user_id, error = %error, "background send failed");
                 let detail = send_failure_detail(&error);

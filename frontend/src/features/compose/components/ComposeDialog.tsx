@@ -11,7 +11,7 @@ import { Select } from '@/shared/components/ui/select'
 import { cn } from '@/shared/lib/utils'
 import { apiGet, ApiError } from '@/shared/api'
 import { useAccounts } from '@/shared/hooks/useAccounts'
-import { useSendMessage } from '@/shared/hooks/useMessages'
+import { useSaveDraft, useSendMessage } from '@/shared/hooks/useMessages'
 import { useOnlineStatus } from '@/shared/hooks/useOnlineStatus'
 import { usePgpKeys, type DiscoveryResponse } from '@/shared/hooks/usePgp'
 import {
@@ -72,6 +72,7 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
   const senderData = useSenderIdentityData(accounts)
   const identities = senderData.groups.flatMap((group) => group.identities)
   const sendMessage = useSendMessage()
+  const saveDraft = useSaveDraft()
   const { data: pgpKeys = [] } = usePgpKeys()
   const sourceMessage = initialState.sourceMessage
   const sourceEncrypted =
@@ -82,20 +83,27 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
 
   const initialTo =
     initialState.to ??
+    sourceMessage?.draft_to ??
     (initialState.mode === 'reply' && sourceMessage ? parseAddressList(sourceMessage.from_addr) : [])
   const initialBody = buildBody(initialState.mode, sourceMessage, t)
+  const draftIdRef = useRef(initialState.mode === 'draft' ? sourceMessage?.id : undefined)
 
   const [from, setFrom] = useState('')
   const [to, setTo] = useState<string[]>(initialTo)
-  const [cc, setCc] = useState<string[]>([])
-  const [bcc, setBcc] = useState<string[]>([])
-  const [showCc, setShowCc] = useState(false)
-  const [showBcc, setShowBcc] = useState(false)
+  const [cc, setCc] = useState<string[]>(sourceMessage?.draft_cc ?? [])
+  const [bcc, setBcc] = useState<string[]>(sourceMessage?.draft_bcc ?? [])
+  const [showCc, setShowCc] = useState((sourceMessage?.draft_cc?.length ?? 0) > 0)
+  const [showBcc, setShowBcc] = useState((sourceMessage?.draft_bcc?.length ?? 0) > 0)
   const [subject, setSubject] = useState(buildSubject(initialState.mode, sourceMessage))
   const [bodyHtml, setBodyHtml] = useState(initialBody)
-  const [bodyText, setBodyText] = useState('')
-  const [plainText, setPlainText] = useState(false)
-  const [attachments, setAttachments] = useState<AttachmentDraft[]>([])
+  const [bodyText, setBodyText] = useState(sourceMessage?.body_text ?? '')
+  const [plainText, setPlainText] = useState(initialState.mode === 'draft' && !sourceMessage?.body_html)
+  const [attachments, setAttachments] = useState<AttachmentDraft[]>(() =>
+    (sourceMessage?.draft_attachments ?? []).map((attachment) => ({
+      ...attachment,
+      size: Math.floor(attachment.data.length * 3 / 4),
+    })),
+  )
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [signOverride, setSignOverride] = useState<boolean | null>(null)
   const [encryptOverride, setEncryptOverride] = useState<boolean | null>(null)
@@ -121,7 +129,9 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
       ? t('action.reply')
       : initialState.mode === 'forward'
         ? t('action.forward')
-        : t('compose.newMessage')
+        : initialState.mode === 'draft'
+          ? t('compose.editDraft')
+          : t('compose.newMessage')
 
   const allRecipients = useMemo(() => [...to, ...cc, ...bcc], [bcc, cc, to])
   const recipientsValid =
@@ -208,6 +218,7 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
       }
       sendMessage.mutate(
         {
+          draft_id: draftIdRef.current,
           account_id: selectedIdentity.accountId,
           from: selectedIdentity.email,
           to,
@@ -234,6 +245,39 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
     }
   }
 
+  async function handleSaveAndClose() {
+    const html = plainText ? undefined : editorRef.current?.innerHTML ?? bodyHtml
+    const hasContent = Boolean(
+      to.length || cc.length || bcc.length || subject.trim() || bodyText.trim() || htmlToText(html ?? '').trim() || attachments.length,
+    )
+    if (!hasContent) {
+      onClose()
+      return
+    }
+    if (!selectedIdentity) return
+
+    try {
+      const result = await saveDraft.mutateAsync({
+        draft_id: draftIdRef.current,
+        account_id: selectedIdentity.accountId,
+        from: selectedIdentity.email,
+        to,
+        cc,
+        bcc,
+        subject,
+        body_html: html,
+        body_text: plainText ? bodyText : htmlToText(html ?? ''),
+        in_reply_to: initialState.mode === 'reply' ? sourceMessage?.message_id_header : sourceMessage?.in_reply_to,
+        references: sourceMessage?.references,
+        attachments: attachments.map(toAttachmentInput),
+      })
+      draftIdRef.current = result.id
+      onClose()
+    } catch {
+      // The mutation error is rendered below; keep the composer open.
+    }
+  }
+
   async function ensureUnlockedPrimaryKey(): Promise<string> {
     if (!primaryPgpKey) throw new Error('compose.noSigningKey')
     const cached = getUnlockedKey(primaryPgpKey.fingerprint)
@@ -246,7 +290,7 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
   }
 
   return (
-    <Dialog open={open} onClose={onClose}>
+    <Dialog open={open} onClose={() => void handleSaveAndClose()}>
       <DialogContent className="flex h-[min(820px,90vh)] w-[min(860px,calc(100vw-2rem))] max-w-none flex-col overflow-hidden p-0">
         <DialogHeader className="mb-0 shrink-0 border-b border-border px-6 pb-3 pt-5">
           <DialogTitle>{title}</DialogTitle>
@@ -463,16 +507,18 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
               {t('compose.sendFailed')} {sendErrorDetail(sendMessage.error)}
             </p>
           ) : null}
+          {saveDraft.error ? <p className="text-sm text-destructive">{t('compose.draftSaveFailed')}</p> : null}
 
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={onClose}>
-              {t('action.cancel')}
+            <Button type="button" variant="ghost" onClick={() => void handleSaveAndClose()} disabled={saveDraft.isPending}>
+              {saveDraft.isPending ? t('compose.savingDraft') : t('compose.saveDraft')}
             </Button>
             <Button
               type="button"
               onClick={handleSend}
               disabled={
                 sendMessage.isPending ||
+                saveDraft.isPending ||
                 !selectedIdentity ||
                 !recipientsValid ||
                 !isOnline ||
@@ -524,9 +570,15 @@ function identityKey(identity: SenderIdentity): string {
 
 function defaultFromIdentity(initialState: ComposeInitialState, identities: SenderIdentity[]): string {
   const sourceMessage = initialState.sourceMessage
-  if (!sourceMessage || initialState.mode !== 'reply') return identityKey(identities[0])
+  if (!sourceMessage || (initialState.mode !== 'reply' && initialState.mode !== 'draft')) return identityKey(identities[0])
 
   const accountIdentities = identities.filter((identity) => identity.accountId === sourceMessage.account_id)
+  if (initialState.mode === 'draft') {
+    const draftIdentity = accountIdentities.find(
+      (identity) => identity.email.toLowerCase() === sourceMessage.from_addr.toLowerCase(),
+    )
+    return identityKey(draftIdentity ?? accountIdentities[0] ?? identities[0])
+  }
   const candidates = parseAddressList(`${sourceMessage.to_addrs},${sourceMessage.cc_addrs}`).map((address) =>
     address.toLowerCase(),
   )
@@ -552,12 +604,14 @@ function sendErrorDetail(error: unknown): string {
 
 function buildSubject(mode: ComposeInitialState['mode'], message?: Message): string {
   if (!message) return ''
+  if (mode === 'draft') return message.subject
   if (mode === 'reply') return message.subject.toLowerCase().startsWith('re:') ? message.subject : `Re: ${message.subject}`
   if (mode === 'forward') return message.subject.toLowerCase().startsWith('fwd:') ? message.subject : `Fwd: ${message.subject}`
   return ''
 }
 
 function buildBody(mode: ComposeInitialState['mode'], message: Message | undefined, t: TFunction): string {
+  if (mode === 'draft') return message?.body_html ?? ''
   if (!message || mode === 'new') return ''
   const quoted = escapeHtml(messagePlain(message)).replaceAll(/\r?\n/g, '<br>')
   if (mode === 'reply') {

@@ -263,6 +263,8 @@ async fn main() {
             get(routes::mailbox::unified_counts),
         )
         .route("/mailbox/bulk", post(routes::mailbox::bulk_action))
+        .route("/drafts", post(routes::drafts::save_draft))
+        .route("/drafts/{id}", delete(routes::drafts::delete_draft))
         // Messages
         .route("/messages/{id}", get(routes::messages::get_message))
         .route("/messages/{id}/read", patch(routes::messages::mark_read))

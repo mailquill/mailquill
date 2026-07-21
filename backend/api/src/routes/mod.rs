@@ -5,6 +5,7 @@ pub mod calendar;
 pub mod contacts;
 pub mod dav;
 pub mod discover;
+pub mod drafts;
 pub mod events;
 pub mod mailbox;
 pub mod messages;

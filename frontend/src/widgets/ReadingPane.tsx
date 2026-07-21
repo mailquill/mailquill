@@ -22,6 +22,7 @@ import {
   ChevronDown,
   ShieldAlert,
   ShieldCheck,
+  FilePenLine,
 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { Button } from '@/shared/components/ui/button'
@@ -138,19 +139,31 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   const lastMessageSource = lastMessageDetail ?? lastMessage
   const lastMessageBodyReady = hasCompleteBody(lastMessageDetail)
   const lastMessageIsSpam = isSpamMessage(lastMessage)
+  const lastMessageIsDraft = Boolean(lastMessage.is_local_draft)
   const hasSpamMessages = messages.some(isSpamMessage)
 
   return (
     <article className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
       {/* toolbar — sticky so the actions stay reachable while the thread scrolls */}
       <div className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b border-border bg-card px-5 py-3">
-        <ToolButton
-          label={t('action.archive')}
-          onClick={() => archiveThread.mutate(threadId, { onSuccess: () => onThreadGone?.() })}
-          disabled={archiveThread.isPending}
-        >
-          <Archive className="size-4" />
-        </ToolButton>
+        {lastMessageIsDraft ? (
+          <ToolButton
+            label={t('compose.editDraft')}
+            onClick={() => lastMessageDetail && openCompose({ mode: 'draft', sourceMessage: lastMessageDetail })}
+            disabled={isLastMessageLoading || !lastMessageDetail}
+          >
+            <FilePenLine className="size-4" />
+          </ToolButton>
+        ) : null}
+        {!lastMessageIsDraft ? (
+          <ToolButton
+            label={t('action.archive')}
+            onClick={() => archiveThread.mutate(threadId, { onSuccess: () => onThreadGone?.() })}
+            disabled={archiveThread.isPending}
+          >
+            <Archive className="size-4" />
+          </ToolButton>
+        ) : null}
         {lastMessageIsSpam && (
           <ToolButton
             label={t('action.notSpam')}
@@ -168,20 +181,24 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
         >
           <Trash2 className="size-4" />
         </ToolButton>
-        <ToolButton
-          label={t('action.markRead')}
-          onClick={() => markThreadRead.mutate({ threadId, is_read: true })}
-          disabled={markThreadRead.isPending}
-        >
-          <MailCheck className="size-4" />
-        </ToolButton>
-        <ToolButton
-          label={t('action.markUnread')}
-          onClick={() => markThreadRead.mutate({ threadId, is_read: false })}
-          disabled={markThreadRead.isPending}
-        >
-          <Mail className="size-4" />
-        </ToolButton>
+        {!lastMessageIsDraft ? (
+          <>
+            <ToolButton
+              label={t('action.markRead')}
+              onClick={() => markThreadRead.mutate({ threadId, is_read: true })}
+              disabled={markThreadRead.isPending}
+            >
+              <MailCheck className="size-4" />
+            </ToolButton>
+            <ToolButton
+              label={t('action.markUnread')}
+              onClick={() => markThreadRead.mutate({ threadId, is_read: false })}
+              disabled={markThreadRead.isPending}
+            >
+              <Mail className="size-4" />
+            </ToolButton>
+          </>
+        ) : null}
         <span
           className="ml-auto inline-flex items-center gap-2 rounded-full px-3 py-1 text-[12px] font-semibold"
           style={{ color, backgroundColor: `${color}1f` }}
@@ -220,15 +237,16 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
           />
         ))}
 
-        <div className="mt-1.5 flex shrink-0 gap-2.5">
-          <button
-            onClick={() => openCompose({ mode: 'reply', sourceMessage: lastMessageSource })}
-            disabled={isLastMessageLoading || !lastMessageBodyReady}
-            className="inline-flex h-9 items-center gap-2 rounded-md bg-[#2563eb] px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[#1d4ed8] disabled:opacity-50"
-          >
-            <Reply className="size-[15px]" />
-            {t('action.reply')}
-          </button>
+        {!lastMessageIsDraft ? (
+          <div className="mt-1.5 flex shrink-0 gap-2.5">
+            <button
+              onClick={() => openCompose({ mode: 'reply', sourceMessage: lastMessageSource })}
+              disabled={isLastMessageLoading || !lastMessageBodyReady}
+              className="inline-flex h-9 items-center gap-2 rounded-md bg-[#2563eb] px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[#1d4ed8] disabled:opacity-50"
+            >
+              <Reply className="size-[15px]" />
+              {t('action.reply')}
+            </button>
           <button
             onClick={() => openCompose({ mode: 'reply', sourceMessage: lastMessageSource })}
             disabled={isLastMessageLoading || !lastMessageBodyReady}
@@ -245,7 +263,8 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
             <Forward className="size-[15px]" />
             {t('action.forward')}
           </button>
-        </div>
+          </div>
+        ) : null}
       </div>
     </article>
   )
@@ -656,34 +675,38 @@ function MessageCard({
 
           {/* per-message actions */}
           <div className="mt-3 flex items-center gap-1 pl-[3.25rem]">
-            <ToolButton
-              label={displayed.is_flagged ? t('action.unstar') : t('action.star')}
-              onClick={() => toggleFlag.mutate({ id: displayed.id, is_flagged: !displayed.is_flagged })}
-              disabled={toggleFlag.isPending}
-            >
-              <Star className={cn('size-4', displayed.is_flagged && 'fill-primary text-primary')} />
-            </ToolButton>
-            <ToolButton
-              label={t('action.reply')}
-              onClick={() => openCompose({ mode: 'reply', sourceMessage: displayed })}
-              disabled={isLoading || !hasCompleteBody(detail)}
-            >
-              <Reply className="size-4" />
-            </ToolButton>
-            <ToolButton
-              label={t('action.forward')}
-              onClick={() => openCompose({ mode: 'forward', sourceMessage: displayed })}
-              disabled={isLoading || !hasCompleteBody(detail)}
-            >
-              <Forward className="size-4" />
-            </ToolButton>
-            <ToolButton
-              label={t('action.reanalyse')}
-              onClick={() => reanalyseMessage.mutate(displayed.id)}
-              disabled={reanalyseMessage.isPending}
-            >
-              <ShieldAlert className="size-4" />
-            </ToolButton>
+            {!displayed.is_local_draft ? (
+              <>
+                <ToolButton
+                  label={displayed.is_flagged ? t('action.unstar') : t('action.star')}
+                  onClick={() => toggleFlag.mutate({ id: displayed.id, is_flagged: !displayed.is_flagged })}
+                  disabled={toggleFlag.isPending}
+                >
+                  <Star className={cn('size-4', displayed.is_flagged && 'fill-primary text-primary')} />
+                </ToolButton>
+                <ToolButton
+                  label={t('action.reply')}
+                  onClick={() => openCompose({ mode: 'reply', sourceMessage: displayed })}
+                  disabled={isLoading || !hasCompleteBody(detail)}
+                >
+                  <Reply className="size-4" />
+                </ToolButton>
+                <ToolButton
+                  label={t('action.forward')}
+                  onClick={() => openCompose({ mode: 'forward', sourceMessage: displayed })}
+                  disabled={isLoading || !hasCompleteBody(detail)}
+                >
+                  <Forward className="size-4" />
+                </ToolButton>
+                <ToolButton
+                  label={t('action.reanalyse')}
+                  onClick={() => reanalyseMessage.mutate(displayed.id)}
+                  disabled={reanalyseMessage.isPending}
+                >
+                  <ShieldAlert className="size-4" />
+                </ToolButton>
+              </>
+            ) : null}
             {isSpam && (
               <ToolButton
                 label={t('action.notSpam')}

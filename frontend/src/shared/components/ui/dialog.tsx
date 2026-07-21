@@ -12,7 +12,12 @@ interface DialogProps {
 export function Dialog({ open, onClose, children }: DialogProps) {
   const dialogRef = React.useRef<HTMLDivElement>(null)
   const restoreFocusRef = React.useRef<HTMLElement | null>(null)
+  const onCloseRef = React.useRef(onClose)
   const titleId = React.useId()
+
+  React.useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   React.useEffect(() => {
     if (!open) return
@@ -24,7 +29,7 @@ export function Dialog({ open, onClose, children }: DialogProps) {
     ;(focusable ?? dialog)?.focus()
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose()
+        onCloseRef.current()
         return
       }
       if (e.key !== 'Tab' || !dialog) return
@@ -50,7 +55,7 @@ export function Dialog({ open, onClose, children }: DialogProps) {
       document.removeEventListener('keydown', handler)
       restoreFocusRef.current?.focus()
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
   return (

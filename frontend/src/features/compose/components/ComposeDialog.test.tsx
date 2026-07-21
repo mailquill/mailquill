@@ -7,6 +7,7 @@ import { ComposeDialog } from './ComposeDialog'
 
 let accounts: Account[] = []
 const mutateSend = vi.fn()
+const mutateSave = vi.fn()
 
 vi.mock('@/shared/hooks/useAccounts', () => ({
   useAccounts: () => ({ data: accounts }),
@@ -14,6 +15,7 @@ vi.mock('@/shared/hooks/useAccounts', () => ({
 
 vi.mock('@/shared/hooks/useMessages', () => ({
   useSendMessage: () => ({ mutate: mutateSend, isPending: false, error: null }),
+  useSaveDraft: () => ({ mutateAsync: mutateSave, isPending: false, error: null }),
 }))
 
 vi.mock('@/shared/hooks/useOnlineStatus', () => ({
@@ -32,6 +34,7 @@ describe('ComposeDialog account bootstrap', () => {
   beforeEach(() => {
     accounts = []
     mutateSend.mockReset()
+    mutateSave.mockReset()
   })
 
   it('opens safely before mailbox identities have loaded', () => {
@@ -77,6 +80,34 @@ describe('ComposeDialog account bootstrap', () => {
     await user.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(onSendQueued).toHaveBeenCalledWith({ sendId: 'send-1', subject: 'Invoice' })
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('saves a non-empty message as a draft before closing', async () => {
+    accounts = [{
+      id: 'mailbox-1', display_name: 'Work', primary_email: 'sender@example.test',
+      imap_host: 'imap.example.test', imap_port: 993, imap_auth_scheme: 'password',
+      smtp_host: 'smtp.example.test', smtp_port: 465, smtp_auth_scheme: 'password',
+      body_sync_mode: 'full', sync_interval_secs: 60, sync_mode: 'poll', provider_kind: 'imap',
+      created_at: '2026-07-18T00:00:00Z', sign_by_default: false, contacts: null,
+    }]
+    mutateSave.mockResolvedValue({ id: 'draft-1' })
+    const onClose = vi.fn()
+    const user = userEvent.setup()
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ComposeDialog open initialState={{ mode: 'new' }} onClose={onClose} />
+      </QueryClientProvider>,
+    )
+
+    await user.type(screen.getByRole('textbox', { name: 'Subject' }), 'Unfinished')
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+
+    expect(mutateSave).toHaveBeenCalledWith(expect.objectContaining({
+      account_id: 'mailbox-1',
+      subject: 'Unfinished',
+    }))
     expect(onClose).toHaveBeenCalledOnce()
   })
 })

@@ -6,7 +6,7 @@ import {
   type QueryClient,
 } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPatch, apiDelete } from '@/shared/api'
-import type { Message, SendMessageInput } from '@/shared/types'
+import type { Message, SaveDraftInput, SendMessageInput } from '@/shared/types'
 import type { UnifiedCounts, UnifiedView } from '@/shared/lib/unifiedViews'
 
 export function useUnifiedInbox(view: UnifiedView = 'inbox', accountId?: string, unread = false) {
@@ -376,6 +376,15 @@ export function useSendMessage() {
       apiPost<{ send_id: string; status: 'queued' }>('/send', message),
     // The SSE "send" event refreshes mail lists once provider delivery has
     // actually finished. The mutation only acknowledges queue acceptance.
+  })
+}
+
+/** Persist a provider-neutral local draft and refresh draft lists. */
+export function useSaveDraft() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (draft: SaveDraftInput) => apiPost<{ id: string }>('/drafts', draft),
+    onSuccess: () => invalidateMailLists(qc),
   })
 }
 

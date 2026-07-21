@@ -85,6 +85,7 @@ export interface Message {
   is_read: boolean
   is_flagged: boolean
   is_deleted: boolean
+  is_local_draft?: boolean
   body_html?: string | null
   body_text?: string | null
   body_available?: boolean
@@ -97,6 +98,10 @@ export interface Message {
   phishing_score?: number | null
   phishing_checks?: PhishingCheck[]
   attachments?: MessageAttachment[]
+  draft_to?: string[]
+  draft_cc?: string[]
+  draft_bcc?: string[]
+  draft_attachments?: AttachmentInput[]
 }
 
 export interface MessageAttachment {
@@ -395,6 +400,7 @@ export interface AttachmentInput {
 }
 
 export interface SendMessageInput {
+  draft_id?: string
   account_id: string
   from: string
   to: string[]
@@ -408,4 +414,19 @@ export interface SendMessageInput {
   in_reply_to?: string | null
   references?: string | null
   attachments?: AttachmentInput[]
+}
+
+export interface SaveDraftInput {
+  draft_id?: string
+  account_id: string
+  from: string
+  to: string[]
+  cc: string[]
+  bcc: string[]
+  subject: string
+  body_text?: string
+  body_html?: string
+  in_reply_to?: string | null
+  references?: string | null
+  attachments: AttachmentInput[]
 }

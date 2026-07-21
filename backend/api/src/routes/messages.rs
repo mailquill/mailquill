@@ -31,6 +31,7 @@ struct MessageRow {
     is_read: bool,
     is_flagged: bool,
     is_deleted: bool,
+    is_local_draft: bool,
 }
 
 #[derive(Deserialize)]
@@ -58,7 +59,7 @@ pub async fn get_message(
     let row: Option<MessageRow> = sqlx::query_as(
         "SELECT m.id, m.account_id, m.folder_id, f.folder_type, m.uid, m.message_id_header, m.thread_id, m.in_reply_to, \
          m.\"references\", m.list_id, m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.snippet, m.date, \
-         m.internal_date, m.is_read, m.is_flagged, m.is_deleted FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE m.id = ?",
+         m.internal_date, m.is_read, m.is_flagged, m.is_deleted, m.is_local_draft FROM messages m LEFT JOIN folders f ON f.id = m.folder_id WHERE m.id = ?",
     )
     .bind(&message_id)
     .fetch_optional(&user_db)
@@ -246,6 +247,27 @@ pub async fn get_message(
     .fetch_all(&user_db)
     .await
     .unwrap_or_default();
+    let local_draft: Option<(String, String, String, String)> = if row.is_local_draft {
+        sqlx::query_as(
+            "SELECT to_addrs_json, cc_addrs_json, bcc_addrs_json, attachments_json FROM local_drafts WHERE message_id = ?",
+        )
+        .bind(&message_id)
+        .fetch_optional(&user_db)
+        .await?
+    } else {
+        None
+    };
+    let (draft_to, draft_cc, draft_bcc, draft_attachments) = local_draft
+        .map(|(to, cc, bcc, attachments)| {
+            (
+                serde_json::from_str::<serde_json::Value>(&to).unwrap_or_else(|_| json!([])),
+                serde_json::from_str::<serde_json::Value>(&cc).unwrap_or_else(|_| json!([])),
+                serde_json::from_str::<serde_json::Value>(&bcc).unwrap_or_else(|_| json!([])),
+                serde_json::from_str::<serde_json::Value>(&attachments)
+                    .unwrap_or_else(|_| json!([])),
+            )
+        })
+        .unwrap_or_else(|| (json!([]), json!([]), json!([]), json!([])));
 
     Ok(Json(json!({
         "id": row.id,
@@ -268,6 +290,7 @@ pub async fn get_message(
         "is_read": row.is_read,
         "is_flagged": row.is_flagged,
         "is_deleted": row.is_deleted,
+        "is_local_draft": row.is_local_draft,
         "body_html": body_html,
         "body_text": body_text,
         "body_available": body_available,
@@ -283,6 +306,10 @@ pub async fn get_message(
             "content_id": content_id,
             "size_bytes": size,
         })).collect::<Vec<_>>(),
+        "draft_to": draft_to,
+        "draft_cc": draft_cc,
+        "draft_bcc": draft_bcc,
+        "draft_attachments": draft_attachments,
     })))
 }
 
@@ -420,6 +447,17 @@ pub async fn archive_message(
     Path(message_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
+    let is_local_draft: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND is_local_draft = 1)",
+    )
+    .bind(&message_id)
+    .fetch_one(&user_db)
+    .await?;
+    if is_local_draft {
+        return Err(AppError::Unprocessable(
+            "local drafts cannot be archived".into(),
+        ));
+    }
     let (account_id, uid, folder_full_path) = get_message_location(&user_db, &message_id).await?;
 
     // Queue IMAP MOVE to Archive
@@ -444,6 +482,16 @@ pub async fn delete_message(
     Path(message_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
+    let is_local_draft: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND is_local_draft = 1)",
+    )
+    .bind(&message_id)
+    .fetch_one(&user_db)
+    .await?;
+    if is_local_draft {
+        crate::routes::drafts::delete_local_draft(&state, &user_db, &message_id).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let (account_id, uid, folder_full_path) = get_message_location(&user_db, &message_id).await?;
 
     // Already-in-trash means hard delete. Detect by the folder's type, not its

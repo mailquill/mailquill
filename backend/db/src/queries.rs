@@ -42,6 +42,7 @@ pub struct ThreadRow {
     pub folder_path: String,
     pub list_id: Option<String>,
     pub phishing_verdict: Option<String>,
+    pub is_local_draft: bool,
     pub thread_size: i64,
     pub thread_unread: i64,
     pub thread_participants: Vec<String>,
@@ -70,6 +71,7 @@ type RawRow = (
     Option<String>,
     String,
     String,
+    bool,
 );
 
 /// SQL predicate selecting the messages for a cross-account unified view.
@@ -85,7 +87,7 @@ pub fn view_filter(view: Option<&str>) -> &'static str {
     }
 }
 
-const LIST_COLUMNS: &str = "m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path, f.folder_type";
+const LIST_COLUMNS: &str = "m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path, f.folder_type, m.is_local_draft";
 
 /// Cross-account unified inbox/view page, newest first. Pass `account_id` to
 /// scope the same view to a single mailbox (e.g. that account's starred list).
@@ -305,6 +307,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
                 phishing_verdict,
                 folder_path,
                 folder_type,
+                is_local_draft,
             ) = r;
 
             let (thread_size, thread_unread, thread_participants) = match &thread_id {
@@ -338,6 +341,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
                 folder_path,
                 list_id,
                 phishing_verdict,
+                is_local_draft,
                 thread_size,
                 thread_unread,
                 thread_participants,
@@ -387,6 +391,7 @@ mod tests {
                 is_read INTEGER NOT NULL DEFAULT 0,
                 is_flagged INTEGER NOT NULL DEFAULT 0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
+                is_local_draft INTEGER NOT NULL DEFAULT 0,
                 list_id TEXT,
                 phishing_verdict TEXT
             )",
@@ -559,5 +564,33 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert!(page.items[0].is_read);
         assert_eq!(page.items[0].thread_unread, 0);
+    }
+
+    #[tokio::test]
+    async fn local_draft_is_returned_by_the_unified_drafts_view() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO folders (id, account_id, full_path, folder_type) VALUES
+             ('drafts', 'acc', 'Mailquill Drafts', 'DRAFTS')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages
+             (id, account_id, folder_id, uid, thread_id, subject, from_addr, internal_date, is_read, is_local_draft)
+             VALUES ('draft-1', 'acc', 'drafts', -1, 'draft-1', 'Unfinished', 'me@example.test', '2026-01-01T00:00:00Z', 1, 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let page = unified_page(&db, Some("drafts"), None, None, 50, false)
+            .await
+            .unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].is_local_draft);
     }
 }

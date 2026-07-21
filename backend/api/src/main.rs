@@ -14,7 +14,11 @@ use mailquill_core::{
 };
 use rust_embed::RustEmbed;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
-use std::sync::Arc;
+use std::{
+    io::{self, IsTerminal, Read},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tower_http::{set_header::SetResponseHeaderLayer, trace::TraceLayer};
 use web_push::IsahcWebPushClient;
 
@@ -65,6 +69,18 @@ enum Command {
     VapidKeys,
     /// Generate CREDENTIAL_ENCRYPTION_KEY and JWT_SECRET as env lines.
     Secrets,
+    /// Reset a local application account password, reading it from stdin.
+    ResetPassword {
+        /// Email address of the local application account.
+        #[arg(long)]
+        email: String,
+        /// Read the new password from stdin instead of exposing it as an argument.
+        #[arg(long, required = true)]
+        password_stdin: bool,
+        /// Storage directory containing app.db; defaults to DATA_DIR or ./data.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -76,6 +92,18 @@ async fn main() {
         }
         Some(Command::Secrets) => {
             api::secrets::print_generated();
+            return;
+        }
+        Some(Command::ResetPassword {
+            email,
+            password_stdin: _,
+            data_dir,
+        }) => {
+            if let Err(error) = reset_account_password(&email, data_dir).await {
+                eprintln!("password reset failed: {error}");
+                std::process::exit(1);
+            }
+            println!("password reset for {}", email.trim().to_lowercase());
             return;
         }
         Some(Command::Serve) | None => {}
@@ -452,6 +480,49 @@ async fn main() {
     tracing::info!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn reset_account_password(email: &str, data_dir: Option<PathBuf>) -> Result<(), String> {
+    if io::stdin().is_terminal() {
+        return Err("no password received; pipe it to stdin and pass --password-stdin".into());
+    }
+    let mut password = String::new();
+    io::stdin()
+        .read_to_string(&mut password)
+        .map_err(|error| format!("cannot read password from stdin: {error}"))?;
+    while matches!(password.chars().last(), Some('\n' | '\r')) {
+        password.pop();
+    }
+
+    let data_dir = data_dir
+        .or_else(|| std::env::var_os("DATA_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("./data"));
+    let db_path = data_dir.join("app.db");
+    if !db_path.is_file() {
+        return Err(format!(
+            "application database not found at {}",
+            db_path.display()
+        ));
+    }
+    let app_db = open_existing_app_db(&db_path).await?;
+    api::passwords::reset_password(&app_db, email, &password)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn open_existing_app_db(db_path: &Path) -> Result<SqlitePool, String> {
+    let options = SqliteConnectOptions::new().filename(db_path);
+    let pool = SqlitePool::connect_with(options)
+        .await
+        .map_err(|error| format!("cannot open {}: {error}", db_path.display()))?;
+    sqlx::query(db::migrations::WAL_PRAGMAS)
+        .execute(&pool)
+        .await
+        .map_err(|error| format!("cannot configure {}: {error}", db_path.display()))?;
+    db::migrations::run_app_migrations(&pool)
+        .await
+        .map_err(|error| format!("cannot migrate {}: {error}", db_path.display()))?;
+    Ok(pool)
 }
 
 fn load_vapid_config(settings: &config::Settings) -> Option<Arc<VapidConfig>> {

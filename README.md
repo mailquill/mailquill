@@ -71,6 +71,32 @@ pnpm dev
 cargo run -p api
 ```
 
+## Administration CLI
+
+Reset a local Mailquill account password by piping the new password over stdin.
+The command applies the same Argon2 policy as registration and revokes all
+refresh sessions for the account:
+
+```bash
+read -rsp 'New password: ' mailquill_password
+printf '\n'
+printf '%s' "$mailquill_password" \
+  | cargo run -p api -- reset-password --email user@example.com --password-stdin
+unset mailquill_password
+```
+
+For the Docker Compose deployment, run the same command inside the app
+container and point it at the mounted data volume:
+
+```bash
+read -rsp 'New password: ' mailquill_password
+printf '\n'
+printf '%s' "$mailquill_password" \
+  | docker compose -f deploy/docker-compose.yml exec -T app \
+      mailquill reset-password --email user@example.com --password-stdin --data-dir /data
+unset mailquill_password
+```
+
 ## Environment
 
 | Variable | Required | Purpose |

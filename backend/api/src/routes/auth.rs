@@ -1,5 +1,5 @@
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
 };
 use axum::{
@@ -10,11 +10,15 @@ use axum::{
 };
 use chrono::Utc;
 use mailquill_core::crypto::{generate_token, hash_token};
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{error::AppError, middleware::UserId, state::AppState};
+use crate::{
+    error::AppError,
+    middleware::UserId,
+    passwords::{hash_password, PasswordResetError},
+    state::AppState,
+};
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -32,21 +36,15 @@ pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if req.password.len() < 8 {
-        return Err(AppError::Unprocessable(
-            "password must be at least 8 characters".into(),
-        ));
-    }
     if !req.email.contains('@') {
         return Err(AppError::Unprocessable("invalid email address".into()));
     }
 
     let email = req.email.to_lowercase();
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default()
-        .hash_password(req.password.as_bytes(), &salt)
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .to_string();
+    let hash = hash_password(&req.password).map_err(|error| match error {
+        PasswordResetError::TooShort => AppError::Unprocessable(error.to_string()),
+        _ => AppError::Internal(error.to_string()),
+    })?;
 
     let user_id: String =
         sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES (?, ?) RETURNING id")

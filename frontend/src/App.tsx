@@ -1,15 +1,17 @@
+import { lazy } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { LoginPage } from '@/pages/LoginPage'
 import { RegisterPage } from '@/pages/RegisterPage'
 import { MailLayout } from '@/pages/MailLayout'
-import { MailFolderPage } from '@/pages/MailFolderPage'
-import { SearchPage } from '@/pages/SearchPage'
-import { SettingsPage } from '@/pages/SettingsPage'
-import { ContactsPage } from '@/pages/ContactsPage'
-import { CalendarPage } from '@/pages/CalendarPage'
-import { UnifiedMailboxPage } from '@/pages/UnifiedMailboxPage'
 import { ProtectedRoute } from '@/app/ProtectedRoute'
 import { useAuthStore } from '@/app/store'
+
+const CalendarPage = lazy(() => import('@/pages/CalendarPage').then((module) => ({ default: module.CalendarPage })))
+const ContactsPage = lazy(() => import('@/pages/ContactsPage').then((module) => ({ default: module.ContactsPage })))
+const MailFolderPage = lazy(() => import('@/pages/MailFolderPage').then((module) => ({ default: module.MailFolderPage })))
+const SearchPage = lazy(() => import('@/pages/SearchPage').then((module) => ({ default: module.SearchPage })))
+const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((module) => ({ default: module.SettingsPage })))
+const UnifiedMailboxPage = lazy(() => import('@/pages/UnifiedMailboxPage').then((module) => ({ default: module.UnifiedMailboxPage })))
 
 function RootRedirect() {
   const accessToken = useAuthStore((state) => state.accessToken)

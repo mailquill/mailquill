@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
+import { RefreshCw } from 'lucide-react'
 import { Outlet, useNavigate } from 'react-router-dom'
-import { ComposeDialog } from '@/features/compose'
+import { useTranslation } from 'react-i18next'
 import type { ComposeInitialState } from '@/features/compose'
 import { useOnlineStatus } from '@/shared/hooks/useOnlineStatus'
 import { useSyncActivity } from '@/shared/hooks/useAccounts'
@@ -12,8 +13,21 @@ import { PaneResizer } from '@/shared/components/PaneResizer'
 import { TopBar } from '@/widgets/TopBar'
 import { Sidebar } from '@/widgets/Sidebar'
 
+const ComposeDialog = lazy(() => import('@/features/compose').then((module) => ({ default: module.ComposeDialog })))
+
 export interface MailOutletContext {
   openCompose: (state?: ComposeInitialState) => void
+}
+
+function PageLoadingFallback() {
+  const { t } = useTranslation()
+
+  return (
+    <div className="flex h-full items-center justify-center text-muted-foreground" role="status" aria-live="polite">
+      <RefreshCw className="size-5 motion-safe:animate-spin motion-reduce:animate-none" aria-hidden="true" />
+      <span className="sr-only">{t('messages.loading')}</span>
+    </div>
+  )
 }
 
 export function MailLayout() {
@@ -54,16 +68,22 @@ export function MailLayout() {
         ) : null}
         <TopBar onSettings={() => navigate('/mail/settings')} />
         <div className="min-h-0 flex-1">
-          <Outlet context={{ openCompose } satisfies MailOutletContext} />
+          <Suspense fallback={<PageLoadingFallback />}>
+            <Outlet context={{ openCompose } satisfies MailOutletContext} />
+          </Suspense>
         </div>
       </main>
-      <ComposeDialog
-        key={composeKey}
-        open={isComposeOpen}
-        initialState={composeState}
-        onClose={() => setIsComposeOpen(false)}
-        onSendQueued={showSendQueued}
-      />
+      {isComposeOpen ? (
+        <Suspense fallback={null}>
+          <ComposeDialog
+            key={composeKey}
+            open
+            initialState={composeState}
+            onClose={() => setIsComposeOpen(false)}
+            onSendQueued={showSendQueued}
+          />
+        </Suspense>
+      ) : null}
       <ToastRegion />
     </div>
   )

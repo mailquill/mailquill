@@ -15,6 +15,21 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(version),
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'react-vendor',
+              test: /node_modules[\\/](?:react|react-dom|react-router|react-router-dom|scheduler)[\\/]/,
+              priority: 20,
+            },
+          ],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: true },
@@ -62,6 +77,10 @@ export default defineConfig({
       },
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        // vite-plugin-pwa still passes Rollup's deprecated inlineDynamicImports
+        // option for ES service workers under Vite 8. Its supported IIFE path
+        // produces the same single-file worker without that deprecated option.
+        rollupFormat: 'iife',
       },
       // Register the service worker in dev too, otherwise
       // navigator.serviceWorker.ready never resolves and push can't be enabled.

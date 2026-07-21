@@ -328,4 +328,67 @@ mod tests {
                 .unwrap();
         assert_eq!(cascaded, 0);
     }
+
+    #[tokio::test]
+    async fn unread_count_migration_repairs_and_tracks_folder_badges() {
+        let pool = memory_database().await;
+        sqlx::raw_sql(
+            "CREATE TABLE folders (
+                id TEXT PRIMARY KEY,
+                unread_count INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                folder_id TEXT NOT NULL,
+                is_read INTEGER NOT NULL DEFAULT 0,
+                is_deleted INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO folders VALUES ('spam', 1), ('trash', 7);
+             INSERT INTO messages VALUES
+                ('unread', 'trash', 0, 0),
+                ('read', 'trash', 1, 0),
+                ('deleted', 'spam', 0, 1);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/mail/0039_folder_unread_count.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let repaired: Vec<(String, i64)> =
+            sqlx::query_as("SELECT id, unread_count FROM folders ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(repaired, [("spam".into(), 0), ("trash".into(), 1)]);
+
+        sqlx::query("UPDATE messages SET is_read = 1 WHERE id = 'unread'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE messages SET is_deleted = 0 WHERE id = 'deleted'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE messages SET folder_id = 'trash' WHERE id = 'deleted'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM messages WHERE id = 'deleted'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let tracked: Vec<(String, i64)> =
+            sqlx::query_as("SELECT id, unread_count FROM folders ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tracked, [("spam".into(), 0), ("trash".into(), 0)]);
+    }
 }

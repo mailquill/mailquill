@@ -169,10 +169,6 @@ async fn main() {
         remote_image_proxy_enabled: settings.remote_image_proxy_enabled,
     };
 
-    // Re-start sync tasks for existing accounts (needs the assembled AppState as
-    // the SyncAppState the sync tasks run against).
-    restart_existing_accounts(&state, &data_dir).await;
-
     let auth_routes = Router::new()
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
@@ -474,13 +470,23 @@ async fn main() {
             content_security_policy_header(state.remote_image_proxy_enabled),
         ))
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr: std::net::SocketAddr = format!("{}:{}", settings.server_host, settings.server_port)
         .parse()
         .expect("invalid server_host/server_port");
     tracing::info!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+
+    // Make the HTTP service reachable before account reconciliation and sync
+    // startup. Reconnecting several remote accounts can take tens of seconds;
+    // awaiting it before bind made every frontend request fail with a proxy
+    // 502 during development restarts and deployment rollouts.
+    let startup_state = state.clone();
+    tokio::spawn(async move {
+        restart_existing_accounts(&startup_state, &data_dir).await;
+    });
+
     axum::serve(listener, app).await.unwrap();
 }
 

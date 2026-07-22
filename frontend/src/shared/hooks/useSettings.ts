@@ -6,7 +6,9 @@ export function usePublicConfig() {
   return useQuery({
     queryKey: ['public-config'],
     queryFn: () => apiGet<PublicConfig>('/config/public'),
-    staleTime: Number.POSITIVE_INFINITY,
+    staleTime: 30_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
   })
 }
 

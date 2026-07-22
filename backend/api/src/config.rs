@@ -39,8 +39,9 @@ pub struct Settings {
     #[serde(default = "default_openphish_feed_url")]
     pub openphish_feed_url: String,
     /// Proxy remote email images through the backend after user approval.
-    /// Disabled by default; direct browser image loading is used unless enabled.
-    #[serde(default)]
+    /// Enabled by default so browser cache-bypass and hotlink headers do not
+    /// trigger repeated upstream rate limits. Operators can still opt out.
+    #[serde(default = "default_true")]
     pub remote_image_proxy_enabled: bool,
 }
 
@@ -84,5 +85,21 @@ impl Settings {
             .merge(Env::raw().split("__"))
             .extract()
             .unwrap_or_else(|e| panic!("configuration error: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    #[test]
+    fn remote_image_proxy_is_enabled_by_default() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "credential_encryption_key": "test-key",
+            "jwt_secret": "test-secret"
+        }))
+        .unwrap();
+
+        assert!(settings.remote_image_proxy_enabled);
     }
 }

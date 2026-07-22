@@ -237,18 +237,38 @@ async fn sync_account(
         .list_folders()
         .await
         .map_err(|error| normalize_provider_error(provider_kind, error))?;
-    for folder in &folders {
-        let default_sync_enabled = default_folder_sync_enabled(provider_kind, &folder.folder_type);
-        sqlx::query(
-            "INSERT INTO folders (account_id, name, full_path, folder_type, sync_enabled) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, full_path) DO UPDATE SET name = excluded.name, folder_type = excluded.folder_type",
-        )
-        .bind(account_id)
-        .bind(&folder.name)
-        .bind(&folder.full_path)
-        .bind(&folder.folder_type)
-        .bind(default_sync_enabled as i64)
-        .execute(&db)
-        .await?;
+    let stored_folders: HashMap<String, (String, String)> =
+        sqlx::query_as("SELECT full_path, name, folder_type FROM folders WHERE account_id = ?")
+            .bind(account_id)
+            .fetch_all(&db)
+            .await?
+            .into_iter()
+            .map(|(full_path, name, folder_type)| (full_path, (name, folder_type)))
+            .collect();
+    let changed_folders: Vec<&crate::session::FolderInfo> = folders
+        .iter()
+        .filter(|folder| match stored_folders.get(&folder.full_path) {
+            Some((name, folder_type)) => name != &folder.name || folder_type != &folder.folder_type,
+            None => true,
+        })
+        .collect();
+    if !changed_folders.is_empty() {
+        let mut folder_tx = db.begin().await?;
+        for folder in changed_folders {
+            let default_sync_enabled =
+                default_folder_sync_enabled(provider_kind, &folder.folder_type);
+            sqlx::query(
+                "INSERT INTO folders (account_id, name, full_path, folder_type, sync_enabled) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, full_path) DO UPDATE SET name = excluded.name, folder_type = excluded.folder_type",
+            )
+            .bind(account_id)
+            .bind(&folder.name)
+            .bind(&folder.full_path)
+            .bind(&folder.folder_type)
+            .bind(default_sync_enabled as i64)
+            .execute(&mut *folder_tx)
+            .await?;
+        }
+        folder_tx.commit().await?;
     }
 
     // Only sync folders the user kept enabled (sync_enabled defaults to 1).
@@ -824,10 +844,14 @@ async fn sync_folder(
         .await
         .unwrap_or(0);
 
-        sqlx::query("UPDATE folders SET last_uid = ?, unread_count = ? WHERE id = ?")
+        sqlx::query(
+            "UPDATE folders SET last_uid = ?, unread_count = ? WHERE id = ? AND (last_uid IS NOT ? OR unread_count <> ?)",
+        )
             .bind(max_uid)
             .bind(unread_count)
             .bind(&folder_id)
+            .bind(max_uid)
+            .bind(unread_count)
             .execute(db)
             .await?;
 
@@ -852,10 +876,11 @@ async fn sync_folder(
     Ok(())
 }
 
-/// Persist one fetched chunk atomically. SQLite permits only one writer, so
-/// both the message metadata and lazy FTS rows deliberately share one short
-/// transaction. CPU-heavy MIME parsing happens before the transaction starts;
-/// blob and notification I/O happens after this function returns.
+/// Persist one fetched chunk in short write transactions. SQLite permits only
+/// one writer, so limiting each transaction to a small metadata batch prevents
+/// one busy account from blocking body loads and other account syncs for
+/// seconds. CPU-heavy MIME parsing happens before a transaction starts; blob
+/// and notification I/O happens after this function returns.
 #[allow(clippy::too_many_arguments)]
 async fn persist_message_metadata_chunk(
     account_id: &str,
@@ -904,13 +929,16 @@ async fn persist_message_metadata_chunk(
         })
         .collect();
 
+    const WRITE_BATCH_SIZE: usize = 100;
     let mut imported_messages = Vec::with_capacity(messages.len());
-    let mut metadata_tx = db.begin().await?;
-    for (message_index, (msg, (thread_id, subject_normalized, snippet))) in
-        messages.iter().zip(prepared_metadata.iter()).enumerate()
-    {
-        let is_new_message = !existing_uids.contains(&i64::from(msg.uid));
-        let msg_id: Option<String> = sqlx::query_scalar(
+    for batch_start in (0..messages.len()).step_by(WRITE_BATCH_SIZE) {
+        let batch_end = (batch_start + WRITE_BATCH_SIZE).min(messages.len());
+        let mut metadata_tx = db.begin().await?;
+        for message_index in batch_start..batch_end {
+            let msg = &messages[message_index];
+            let (thread_id, subject_normalized, snippet) = &prepared_metadata[message_index];
+            let is_new_message = !existing_uids.contains(&i64::from(msg.uid));
+            let msg_id: Option<String> = sqlx::query_scalar(
             "INSERT INTO messages (account_id, folder_id, uid, message_id_header, thread_id, in_reply_to, \"references\", list_id, subject, subject_normalized, snippet, from_addr, to_addrs, cc_addrs, date, internal_date, is_read, is_flagged, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(folder_id, uid) DO UPDATE SET thread_id = excluded.thread_id, is_read = excluded.is_read, is_flagged = excluded.is_flagged, is_deleted = MAX(excluded.is_deleted, messages.is_deleted), subject = excluded.subject, subject_normalized = excluded.subject_normalized, snippet = excluded.snippet, from_addr = excluded.from_addr, to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs RETURNING id",
         )
         .bind(account_id)
@@ -936,46 +964,48 @@ async fn persist_message_metadata_chunk(
         .await?
         .flatten();
 
-        let Some(msg_db_id) = msg_id else {
-            continue;
-        };
+            let Some(msg_db_id) = msg_id else {
+                continue;
+            };
 
-        if body_sync_mode == "lazy" {
-            // OR IGNORE keeps any existing row containing a downloaded body.
-            // FTS5 virtual tables do not support ON CONFLICT.
-            sqlx::query(
-                "INSERT OR IGNORE INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, '')",
-            )
-            .bind(&msg_db_id)
-            .bind(&msg.subject)
-            .bind(&msg.from_addr)
-            .execute(&mut *metadata_tx)
-            .await?;
+            if body_sync_mode == "lazy" {
+                // OR IGNORE keeps any existing row containing a downloaded body.
+                // FTS5 virtual tables do not support ON CONFLICT.
+                sqlx::query(
+                    "INSERT OR IGNORE INTO messages_fts(rowid, subject, from_addr, body_text) VALUES ((SELECT rowid FROM messages WHERE id = ?), ?, ?, '')",
+                )
+                .bind(&msg_db_id)
+                .bind(&msg.subject)
+                .bind(&msg.from_addr)
+                .execute(&mut *metadata_tx)
+                .await?;
+            }
+
+            imported_messages.push((message_index, msg_db_id, is_new_message));
         }
 
-        imported_messages.push((message_index, msg_db_id, is_new_message));
+        let remote_mappings: Vec<&crate::session::FetchedMessage> = messages
+            [batch_start..batch_end]
+            .iter()
+            .filter(|message| message.remote_id.is_some())
+            .collect();
+        if !remote_mappings.is_empty() {
+            let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "INSERT INTO remote_message_ids (account_id, folder_path, uid, remote_id) ",
+            );
+            query.push_values(remote_mappings, |mut row, message| {
+                row.push_bind(account_id)
+                    .push_bind(folder_path)
+                    .push_bind(i64::from(message.uid))
+                    .push_bind(message.remote_id.as_deref().expect("filtered remote id"));
+            });
+            query.push(
+                " ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET remote_id = excluded.remote_id WHERE remote_message_ids.remote_id <> excluded.remote_id",
+            );
+            query.build().execute(&mut *metadata_tx).await?;
+        }
+        metadata_tx.commit().await?;
     }
-
-    let remote_mappings: Vec<&crate::session::FetchedMessage> = messages
-        .iter()
-        .filter(|message| message.remote_id.is_some())
-        .collect();
-    if !remote_mappings.is_empty() {
-        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-            "INSERT INTO remote_message_ids (account_id, folder_path, uid, remote_id) ",
-        );
-        query.push_values(remote_mappings, |mut row, message| {
-            row.push_bind(account_id)
-                .push_bind(folder_path)
-                .push_bind(i64::from(message.uid))
-                .push_bind(message.remote_id.as_deref().expect("filtered remote id"));
-        });
-        query.push(
-            " ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET remote_id = excluded.remote_id WHERE remote_message_ids.remote_id <> excluded.remote_id",
-        );
-        query.build().execute(&mut *metadata_tx).await?;
-    }
-    metadata_tx.commit().await?;
     Ok(imported_messages)
 }
 
@@ -1096,8 +1126,31 @@ async fn reconcile_flags(
         let flags = provider
             .fetch_flags(folder_path, &format!("{}:{}", start, end))
             .await?;
+        let stored_flags: HashMap<i64, (bool, bool, bool)> = sqlx::query_as::<
+            _,
+            (i64, bool, bool, bool),
+        >(
+            "SELECT uid, is_read, is_flagged, is_deleted FROM messages WHERE folder_id = ? AND uid BETWEEN ? AND ?",
+        )
+        .bind(folder_id)
+        .bind(i64::from(start))
+        .bind(i64::from(end))
+        .fetch_all(db)
+        .await?
+        .into_iter()
+        .map(|(uid, seen, flagged, deleted)| (uid, (seen, flagged, deleted)))
+        .collect();
+        let changed_flags = changed_message_flags(flags, &stored_flags);
+        if changed_flags.is_empty() {
+            if end >= up_to_uid {
+                break;
+            }
+            start = end + 1;
+            continue;
+        }
+
         let mut tx = db.begin().await?;
-        for (uid, seen, flagged, deleted) in flags {
+        for (uid, seen, flagged, deleted) in changed_flags {
             // Hide messages the server has marked \Deleted (e.g. left behind by a
             // copy-then-flag move) without un-hiding a locally deleted row.
             sqlx::query(
@@ -1120,6 +1173,20 @@ async fn reconcile_flags(
     Ok(())
 }
 
+fn changed_message_flags(
+    server_flags: Vec<(u32, bool, bool, bool)>,
+    stored_flags: &HashMap<i64, (bool, bool, bool)>,
+) -> Vec<(u32, bool, bool, bool)> {
+    server_flags
+        .into_iter()
+        .filter_map(|(uid, seen, flagged, deleted)| {
+            let stored = stored_flags.get(&i64::from(uid))?;
+            let effective_deleted = deleted || stored.2;
+            (stored != &(seen, flagged, effective_deleted)).then_some((uid, seen, flagged, deleted))
+        })
+        .collect()
+}
+
 /// Recompute and persist a folder's unread count.
 async fn update_unread_count(
     folder_id: &str,
@@ -1132,9 +1199,18 @@ async fn update_unread_count(
     .fetch_one(db)
     .await
     .unwrap_or(0);
-    sqlx::query("UPDATE folders SET unread_count = ? WHERE id = ?")
+    let stored_unread: Option<i64> =
+        sqlx::query_scalar("SELECT unread_count FROM folders WHERE id = ?")
+            .bind(folder_id)
+            .fetch_optional(db)
+            .await?;
+    if stored_unread == Some(unread) {
+        return Ok(());
+    }
+    sqlx::query("UPDATE folders SET unread_count = ? WHERE id = ? AND unread_count <> ?")
         .bind(unread)
         .bind(folder_id)
+        .bind(unread)
         .execute(db)
         .await?;
     Ok(())
@@ -1220,9 +1296,9 @@ async fn do_imap_expunge(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_folder_sync_enabled, folder_sync_priority, load_sync_task_context,
-        oauth_reauthentication_error, persist_message_metadata_chunk, ProviderError, ProviderKind,
-        SyncTaskContext,
+        changed_message_flags, default_folder_sync_enabled, folder_sync_priority,
+        load_sync_task_context, oauth_reauthentication_error, persist_message_metadata_chunk,
+        ProviderError, ProviderKind, SyncTaskContext,
     };
     use crate::session::FetchedMessage;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1365,6 +1441,31 @@ mod tests {
         assert_eq!(message_count, 0, "the first row must be rolled back");
         assert_eq!(fts_count, 0, "its FTS row must be rolled back as well");
         assert_eq!(mapping_count, 0, "Gmail ids must share the rollback");
+    }
+
+    #[test]
+    fn flag_reconciliation_skips_unchanged_and_unknown_messages() {
+        let stored = HashMap::from([(1, (true, false, false)), (2, (false, true, false))]);
+
+        let changed = changed_message_flags(
+            vec![
+                (1, true, false, false),
+                (2, true, true, false),
+                (3, false, false, false),
+            ],
+            &stored,
+        );
+
+        assert_eq!(changed, vec![(2, true, true, false)]);
+    }
+
+    #[test]
+    fn flag_reconciliation_never_restores_locally_deleted_messages() {
+        let stored = HashMap::from([(1, (true, false, true))]);
+
+        let changed = changed_message_flags(vec![(1, true, false, false)], &stored);
+
+        assert!(changed.is_empty());
     }
 
     #[test]

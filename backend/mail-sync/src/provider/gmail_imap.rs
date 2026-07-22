@@ -1,10 +1,11 @@
 //! Gmail-over-IMAP hybrid provider.
 //!
 //! Mail sync (list/fetch/flags/status/idle) runs over IMAP+XOAUTH2 — the same
-//! path as any IMAP account — so it reuses [`ImapProvider`]. Only **label
-//! handling** (move/archive/delete) goes through the Gmail API, because Gmail
-//! labels (multi-label messages, "archive" = drop the INBOX label) don't map
-//! cleanly onto IMAP MOVE.
+//! path as any IMAP account — so it reuses [`ImapProvider`]. Label handling
+//! (move/archive/delete) goes through the Gmail API because Gmail labels
+//! (multi-label messages, "archive" = drop the INBOX label) don't map cleanly
+//! onto IMAP MOVE. Raw-body fetches also fall back to the API when a label
+//! change has invalidated the folder-local IMAP UID.
 //!
 //! Bridge: during fetch we pull the Gmail `X-GM-MSGID` extension and store its
 //! hex form (the Gmail API message id) in [`IdMap`] keyed by the IMAP `(folder,
@@ -15,7 +16,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine,
+};
 use serde_json::json;
 use sqlx::SqlitePool;
 
@@ -182,6 +186,24 @@ impl GmailImapProvider {
             .await?;
         Ok(())
     }
+
+    /// Fetch a raw message through Gmail's stable provider id when its
+    /// folder-local IMAP UID is no longer present (for example after a label
+    /// change between metadata sync and the first body request).
+    async fn fetch_raw_by_gmail_id(
+        &mut self,
+        folder: &str,
+        uid: u32,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let remote_id = self.gmail_message_id(folder, uid).await?;
+        let response = self
+            .rest
+            .get_json(&format!(
+                "{BASE}/messages/{remote_id}?format=raw&fields=id,raw"
+            ))
+            .await?;
+        decode_raw_message(&response)
+    }
 }
 
 #[async_trait]
@@ -237,7 +259,22 @@ impl MailProvider for GmailImapProvider {
     }
 
     async fn fetch_raw(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>, ProviderError> {
-        self.imap.fetch_raw(folder, uid).await
+        // X-GM-MSGID is stable across label changes while IMAP UIDs are scoped
+        // to a mailbox. Prefer the API mapping so opening a message never waits
+        // for a known-stale folder UID to fail first.
+        match self.fetch_raw_by_gmail_id(folder, uid).await {
+            Ok(raw) => Ok(raw),
+            Err(api_error) => {
+                tracing::warn!(
+                    account = %self.account_id,
+                    folder,
+                    uid,
+                    error = %api_error,
+                    "gmail API raw fetch failed; retrying through IMAP"
+                );
+                self.imap.fetch_raw(folder, uid).await
+            }
+        }
     }
 
     async fn set_flag(
@@ -301,6 +338,16 @@ impl MailProvider for GmailImapProvider {
     }
 }
 
+fn decode_raw_message(response: &serde_json::Value) -> Result<Vec<u8>, ProviderError> {
+    let encoded = response["raw"]
+        .as_str()
+        .ok_or_else(|| ProviderError::Other("gmail raw response is missing raw data".into()))?;
+    URL_SAFE
+        .decode(encoded)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(encoded))
+        .map_err(|error| ProviderError::Other(format!("gmail raw decode: {error}")))
+}
+
 fn decode_modified_utf7(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut output = String::with_capacity(input.len());
@@ -346,11 +393,24 @@ fn decode_modified_utf7_run(encoded: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_modified_utf7;
+    use super::{decode_modified_utf7, decode_raw_message};
+    use serde_json::json;
 
     #[test]
     fn decodes_custom_label_names_for_api_correlation() {
         assert_eq!(decode_modified_utf7("J&APw-licher"), "Jülicher");
         assert_eq!(decode_modified_utf7("R&D-&-"), "R&D-&");
+    }
+
+    #[test]
+    fn decodes_padded_and_unpadded_gmail_raw_messages() {
+        assert_eq!(
+            decode_raw_message(&json!({ "raw": "SGVsbG8=" })).unwrap(),
+            b"Hello"
+        );
+        assert_eq!(
+            decode_raw_message(&json!({ "raw": "SGVsbG8" })).unwrap(),
+            b"Hello"
+        );
     }
 }

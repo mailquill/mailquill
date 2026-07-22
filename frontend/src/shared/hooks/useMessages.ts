@@ -70,6 +70,15 @@ export function useMessage(id: string) {
   })
 }
 
+/** Warm the detail cache before a message is opened in the reading pane. */
+export function prefetchMessage(queryClient: QueryClient, id: string) {
+  return queryClient.prefetchQuery({
+    queryKey: ['message', id],
+    queryFn: () => apiGet<Message>(`/messages/${id}`),
+    staleTime: 30_000,
+  })
+}
+
 export function useThread(threadId: string) {
   return useQuery({
     queryKey: ['thread', threadId],

@@ -379,11 +379,21 @@ function MessageCard({
   const [showRemoteOnce, setShowRemoteOnce] = useState(false)
   const [contactOpen, setContactOpen] = useState(false)
   const [cidUrls, setCidUrls] = useState<Record<string, string>>({})
+  const [bodySpinnerExpired, setBodySpinnerExpired] = useState(false)
   const displayed = detail ?? message
   const { data: senderMatches = [] } = useContactSearch(contactOpen ? sender.email : '')
   const senderContact = senderMatches.find((contact) =>
     contact.emails.some((email) => email.value.toLowerCase() === sender.email.toLowerCase()),
   )
+
+  // Never leave the entire reading surface behind an unbounded network
+  // spinner. After a short grace period render the list's safe snippet while
+  // the real body request continues and replaces it from the query cache.
+  useEffect(() => {
+    if (!expanded || detail) return
+    const timeout = window.setTimeout(() => setBodySpinnerExpired(true), 750)
+    return () => window.clearTimeout(timeout)
+  }, [detail, expanded, message.id])
 
   // Resolve inline attachments: the HTML references them as cid:<Content-ID>,
   // which the browser can't load — fetch each one (authenticated) and swap in
@@ -636,7 +646,7 @@ function MessageCard({
                 </span>
               </div>
             )}
-            {isLoading ? (
+            {isLoading && !bodySpinnerExpired ? (
               <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
                 {t('mail.loadingBody')}
               </div>

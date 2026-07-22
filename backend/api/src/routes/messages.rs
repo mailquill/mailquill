@@ -111,16 +111,7 @@ pub async fn get_message(
                     )
                     .await
                     {
-                        Ok((html, text)) => {
-                            // Mark as read after successful body load (task 4.11)
-                            let _ = sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
-                                .bind(&message_id)
-                                .execute(&user_db)
-                                .await;
-                            queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", true)
-                                .await;
-                            (html, text, true)
-                        }
+                        Ok((html, text)) => (html, text, true),
                         Err(_) => (None, None, false),
                     }
                 }
@@ -138,15 +129,7 @@ pub async fn get_message(
             )
             .await
             {
-                Ok((html, text)) => {
-                    // Mark as read after successful body load
-                    let _ = sqlx::query("UPDATE messages SET is_read = 1 WHERE id = ?")
-                        .bind(&message_id)
-                        .execute(&user_db)
-                        .await;
-                    queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", true).await;
-                    (html, text, true)
-                }
+                Ok((html, text)) => (html, text, true),
                 Err(_) => (None, None, false),
             }
         };

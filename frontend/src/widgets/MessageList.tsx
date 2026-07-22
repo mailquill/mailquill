@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from '@/shared/lib/utils'
 import { formatDate, parseFromAddr, listIdToName } from '@/shared/lib/format'
@@ -12,6 +13,7 @@ import {
   useDeleteThread,
   useToggleFlag,
   useBulkAction,
+  prefetchMessage,
   type BulkScope,
 } from '@/shared/hooks/useMessages'
 import { Star, Check, MailOpen, Archive, Trash2, ShieldAlert } from 'lucide-react'
@@ -28,7 +30,7 @@ interface MessageRowProps {
   onToggleFlag: (message: Message) => void
   onContextMenu: (event: React.MouseEvent, message: Message) => void
   onRowMouseDown: (index: number, id: string) => void
-  onRowMouseEnter: (index: number) => void
+  onRowWarm: (index: number, id: string) => void
 }
 
 const DENSITY_PAD: Record<string, string> = {
@@ -60,7 +62,7 @@ export function MessageRow({
   onToggleFlag,
   onContextMenu,
   onRowMouseDown,
-  onRowMouseEnter,
+  onRowWarm,
 }: MessageRowProps) {
   const { t } = useTranslation()
   const density = useUiPrefs((s) => s.density)
@@ -90,7 +92,8 @@ export function MessageRow({
         e.dataTransfer.setData('application/x-mailtastic-message', message.id)
         e.dataTransfer.setData('text/plain', message.id)
       }}
-      onMouseEnter={() => onRowMouseEnter(index)}
+      onMouseEnter={() => onRowWarm(index, message.id)}
+      onFocus={() => onRowWarm(index, message.id)}
       className={cn(
         'relative flex w-full select-none items-start gap-2.5 border-b border-secondary pl-4 pr-3 text-left transition-colors',
         DENSITY_PAD[density],
@@ -282,6 +285,7 @@ export function MessageList({
   // True once the user opts into "select all N matching" (beyond the loaded page).
   const [selectAllMatching, setSelectAllMatching] = useState(false)
   const density = useUiPrefs((s) => s.density)
+  const queryClient = useQueryClient()
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const virtualizer = useVirtualizer({
@@ -294,6 +298,13 @@ export function MessageList({
 
   const virtualItems = virtualizer.getVirtualItems()
   const lastVisibleIndex = virtualItems.at(-1)?.index ?? 0
+
+  // The newest message is the most likely next click. Start its body request
+  // as soon as the list appears so the reader normally hits a warm cache.
+  const firstMessageId = messages[0]?.id
+  useEffect(() => {
+    if (firstMessageId) void prefetchMessage(queryClient, firstMessageId)
+  }, [firstMessageId, queryClient])
 
   useEffect(() => {
     if (hasMore && !loadingMore && onLoadMore && lastVisibleIndex >= messages.length - 15) {
@@ -356,7 +367,8 @@ export function MessageList({
     applyRange(index)
   }
 
-  function onRowMouseEnter(index: number) {
+  function onRowWarm(index: number, id: string) {
+    void prefetchMessage(queryClient, id)
     if (drag.current.active) applyRange(index)
   }
 
@@ -494,7 +506,7 @@ export function MessageList({
                   onToggleFlag={(m) => toggleFlag.mutate({ id: m.id, is_flagged: !m.is_flagged })}
                   onContextMenu={openMenu}
                   onRowMouseDown={onRowMouseDown}
-                  onRowMouseEnter={onRowMouseEnter}
+                  onRowWarm={onRowWarm}
                 />
               </div>
             )

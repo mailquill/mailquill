@@ -37,6 +37,7 @@ import {
 } from '@/shared/lib/messageSource'
 import { apiGetBlob, getAccessToken } from '@/shared/api'
 import { blockRemoteContent, proxyRemoteContent } from '@/shared/lib/remoteContent'
+import { prepareEmailHtml } from '@/shared/lib/emailHtml'
 import {
   useArchiveThread,
   useDeleteThread,
@@ -413,7 +414,7 @@ function MessageCard({
     if (!expanded || !inlineAttachments.length) return
     let cancelled = false
     const urls: string[] = []
-    Promise.all(
+    Promise.allSettled(
       inlineAttachments.map(async (att) => {
         const blob = await apiGetBlob(`/attachments/${att.id}`)
         const url = URL.createObjectURL(blob)
@@ -421,10 +422,10 @@ function MessageCard({
         return [att.content_id as string, url] as const
       }),
     )
-      .then((entries) => {
+      .then((results) => {
+        const entries = results.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []))
         if (!cancelled) setCidUrls(Object.fromEntries(entries))
       })
-      .catch(() => {})
     return () => {
       cancelled = true
       urls.forEach((url) => URL.revokeObjectURL(url))
@@ -451,10 +452,7 @@ function MessageCard({
     (imageAllowlist ?? []).some((entry) => entry.sender === senderEmail)
   const htmlContent = useMemo(() => {
     if (!expanded || view !== 'html') return { html: '', blocked: false }
-    let rawHtml = displayed.body_html ?? messageHtml(displayed)
-    for (const [cid, url] of Object.entries(cidUrls)) {
-      rawHtml = rawHtml.split(`cid:${cid}`).join(url)
-    }
+    const rawHtml = prepareEmailHtml(displayed.body_html ?? messageHtml(displayed), cidUrls)
     const content = allowRemote
       ? {
           html: publicConfig?.remote_image_proxy_enabled

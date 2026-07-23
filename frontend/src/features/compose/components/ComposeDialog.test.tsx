@@ -2,12 +2,36 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Account } from '@/shared/types'
+import type { Account, Message } from '@/shared/types'
 import { ComposeDialog } from './ComposeDialog'
 
 let accounts: Account[] = []
 const mutateSend = vi.fn()
 const mutateSave = vi.fn()
+
+const sourceMessage: Message = {
+  id: 'message-1',
+  account_id: 'mailbox-1',
+  folder_id: 'folder-1',
+  uid: 1,
+  message_id_header: '<message-1@example.test>',
+  thread_id: 'thread-1',
+  in_reply_to: null,
+  references: null,
+  list_id: null,
+  subject: 'Reservation confirmation',
+  from_addr: 'Reservations <reservations@example.test>',
+  to_addrs: 'sender@example.test',
+  cc_addrs: '',
+  snippet: 'Thank you for your reservation.',
+  date: '2026-07-22T10:00:00Z',
+  internal_date: '2026-07-22T10:00:00Z',
+  is_read: true,
+  is_flagged: false,
+  is_deleted: false,
+  body_text: 'Thank you for your reservation.',
+  draft_to: [],
+}
 
 vi.mock('@/shared/hooks/useAccounts', () => ({
   useAccounts: () => ({ data: accounts }),
@@ -47,6 +71,21 @@ describe('ComposeDialog account bootstrap', () => {
 
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+  })
+
+  it('uses the sender as reply recipient when non-draft details contain an empty draft recipient list', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ComposeDialog
+          open
+          initialState={{ mode: 'reply', sourceMessage }}
+          onClose={vi.fn()}
+        />
+      </QueryClientProvider>,
+    )
+
+    expect(screen.getByText('reservations@example.test')).toBeInTheDocument()
   })
 
   it('reports queue acceptance before closing the composer', async () => {

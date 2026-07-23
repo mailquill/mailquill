@@ -83,7 +83,7 @@ export function ComposeDialog({ open, initialState, onClose, onSendQueued }: Com
 
   const initialTo =
     initialState.to ??
-    sourceMessage?.draft_to ??
+    (initialState.mode === 'draft' ? sourceMessage?.draft_to : undefined) ??
     (initialState.mode === 'reply' && sourceMessage ? parseAddressList(sourceMessage.from_addr) : [])
   const initialBody = buildBody(initialState.mode, sourceMessage, t)
   const draftIdRef = useRef(initialState.mode === 'draft' ? sourceMessage?.id : undefined)

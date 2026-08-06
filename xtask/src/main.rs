@@ -89,14 +89,15 @@ fn ensure_frontend_dist(root: &Path) -> Result<(), String> {
     } else {
         println!("==> Building frontend (release)…");
         if !frontend.join("node_modules").is_dir() {
-            let mut install = pnpm();
+            let mut install = bun();
             install
                 .current_dir(&frontend)
                 .args(["install", "--frozen-lockfile"]);
             run(install)?;
         }
-        let mut build = pnpm();
-        build.current_dir(&frontend).args(["run", "build"]);
+        let mut build = bun();
+        // --bun shims `node` invocations inside the build script to bun.
+        build.current_dir(&frontend).args(["run", "--bun", "build"]);
         run(build)?;
     }
 
@@ -120,15 +121,9 @@ fn cargo() -> Command {
     Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
 }
 
-fn pnpm() -> Command {
-    // On Windows pnpm is a .cmd shim that CreateProcess cannot launch directly.
-    if cfg!(windows) {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "pnpm"]);
-        cmd
-    } else {
-        Command::new("pnpm")
-    }
+fn bun() -> Command {
+    // Bun ships a native bun.exe on Windows, so no cmd.exe shim is needed.
+    Command::new("bun")
 }
 
 fn run(mut cmd: Command) -> Result<(), String> {

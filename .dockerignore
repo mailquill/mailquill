@@ -13,7 +13,11 @@ target/
 *.log*
 .env
 .env.*
-frontend/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+data/
+tauri-app/
 deploy/
 docs/
 infra/

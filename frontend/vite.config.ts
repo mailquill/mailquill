@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
-import { version } from './package.json'
+import { version } from './package.json' with { type: 'json' }
 
 // In dev the Vite server (default :5173) must forward API calls to the Rust
 // backend. The repo-local .env uses :8765 to avoid the common :8080 collision;
@@ -92,7 +92,7 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
 })

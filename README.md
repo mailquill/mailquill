@@ -45,9 +45,6 @@ every GitHub release. No toolchain required on the host.
 ```bash
 mkdir mailquill && cd mailquill
 
-# Data directory — the container runs as UID 1000
-mkdir data && sudo chown 1000:1000 data
-
 # Generate the two required secrets into .env
 docker run --rm ghcr.io/mailquill/mailquill:latest secrets > .env
 ```
@@ -62,7 +59,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/data
+      - mailquill-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
       interval: 30s
@@ -70,12 +67,28 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+
+volumes:
+  mailquill-data:
 ```
 
 ```bash
 docker compose up -d
 curl http://localhost:8080/api/health   # → {"status":"ok"}
 ```
+
+To keep the data in a host directory instead of a named volume, replace the
+volume with a bind mount (`./data:/data`) and make it writable for the
+container user first — the container runs as UID 1000:
+
+```bash
+mkdir data && sudo chown 1000:1000 data
+```
+
+Skipping the `chown` is the most common quickstart failure: the app crashes
+in a restart loop with `open app.db: ... "unable to open database file"` and
+`could not seed ./data/brands.json: Permission denied`. Fix with
+`sudo chown -R 1000:1000 data`.
 
 Open `http://localhost:8080` and register the first account. If the GHCR
 package is not public, authenticate first with `docker login ghcr.io`.
@@ -152,6 +165,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mailquill
 curl http://localhost:8080/api/health   # → {"status":"ok"}
 ```
+
+To serve Mailquill behind nginx, Caddy, Traefik, HAProxy, or Envoy with TLS,
+see [docs/reverse-proxy.md](docs/reverse-proxy.md).
 
 ## Build from source
 

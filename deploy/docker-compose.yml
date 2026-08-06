@@ -9,6 +9,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
+      # Container runs as UID 1000: create the directory with
+      # `mkdir data && sudo chown 1000:1000 data` before first start.
       - ./data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]

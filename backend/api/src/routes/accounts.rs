@@ -447,58 +447,68 @@ pub async fn update_account(
         .encrypt(&new_creds_bytes)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // Re-test IMAP if credentials or host changed
-    let test_imap_host: Option<String> = if let Some(h) = req.imap_host.clone() {
-        Some(h)
-    } else {
-        sqlx::query_scalar::<_, String>("SELECT imap_host FROM email_accounts WHERE id = ?")
-            .bind(&account_id)
-            .fetch_optional(&user_db)
-            .await?
-    };
+    // Re-test the IMAP connection only when connection-relevant fields
+    // actually change. The settings form always sends host/port along, so a
+    // pure colour or sync-mode edit must not fail on an unreachable mailbox.
+    // OAuth (xoauth2) accounts are skipped entirely: a meaningful test needs
+    // a fresh access token, which only the sync task can mint.
+    let stored: Option<(String, i64, String)> = sqlx::query_as(
+        "SELECT imap_host, imap_port, imap_auth_scheme FROM email_accounts WHERE id = ?",
+    )
+    .bind(&account_id)
+    .fetch_optional(&user_db)
+    .await?;
+    let (stored_host, stored_port, stored_scheme) = stored.ok_or(AppError::NotFound)?;
+
+    let test_host = req.imap_host.clone().unwrap_or_else(|| stored_host.clone());
+    let test_port = req.imap_port.unwrap_or(stored_port as u16);
+    let scheme = req
+        .imap_auth_scheme
+        .clone()
+        .unwrap_or_else(|| stored_scheme.clone());
+    let connection_changed = test_host != stored_host
+        || i64::from(test_port) != stored_port
+        || scheme != stored_scheme
+        || req.imap_username.is_some()
+        || req.imap_password.is_some();
+
     let imap_user = creds["imap_username"].as_str().unwrap_or("").to_owned();
     let imap_pass = creds["imap_password"].as_str().unwrap_or("").to_owned();
 
-    if let Some(host) = &test_imap_host {
-        if let Some(port) = req.imap_port {
-            let scheme = req
-                .imap_auth_scheme
-                .clone()
-                .unwrap_or_else(|| "plain".into());
-            let stored_tls_cert: Option<String> =
-                sqlx::query_scalar("SELECT imap_tls_cert FROM email_accounts WHERE id = ?")
-                    .bind(&account_id)
-                    .fetch_one(&user_db)
-                    .await?;
-            let stored_trusted =
-                mail_sync::session::decode_trusted_cert(stored_tls_cert.as_deref());
-            let retry_permitted = req
-                .tls_decision
-                .map(TlsDecision::permits_retry)
-                .unwrap_or(request_imap_cert_der.is_some());
-            let trusted = if retry_permitted {
-                request_imap_cert_der
-                    .as_deref()
-                    .or(stored_trusted.as_deref())
-            } else {
-                stored_trusted.as_deref()
-            };
-            if let Err(error) = mail_sync::test_imap_connection(
-                host, port, &imap_user, &imap_pass, &scheme, trusted,
-            )
-            .await
-            {
-                if matches!(error, mail_sync::SessionError::Tls(_)) {
-                    if let Some(der) = crate::routes::discover::fetch_peer_cert(host, port).await {
-                        return Ok((
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            Json(tls_untrusted_json(&error.to_string(), host, port, &der)),
-                        )
-                            .into_response());
-                    }
+    if connection_changed && scheme != "xoauth2" {
+        let host = &test_host;
+        let port = test_port;
+        let stored_tls_cert: Option<String> =
+            sqlx::query_scalar("SELECT imap_tls_cert FROM email_accounts WHERE id = ?")
+                .bind(&account_id)
+                .fetch_one(&user_db)
+                .await?;
+        let stored_trusted = mail_sync::session::decode_trusted_cert(stored_tls_cert.as_deref());
+        let retry_permitted = req
+            .tls_decision
+            .map(TlsDecision::permits_retry)
+            .unwrap_or(request_imap_cert_der.is_some());
+        let trusted = if retry_permitted {
+            request_imap_cert_der
+                .as_deref()
+                .or(stored_trusted.as_deref())
+        } else {
+            stored_trusted.as_deref()
+        };
+        if let Err(error) =
+            mail_sync::test_imap_connection(host, port, &imap_user, &imap_pass, &scheme, trusted)
+                .await
+        {
+            if matches!(error, mail_sync::SessionError::Tls(_)) {
+                if let Some(der) = crate::routes::discover::fetch_peer_cert(host, port).await {
+                    return Ok((
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(tls_untrusted_json(&error.to_string(), host, port, &der)),
+                    )
+                        .into_response());
                 }
-                return Err(AppError::Unprocessable(error.to_string()));
             }
+            return Err(AppError::Unprocessable(error.to_string()));
         }
     }
 

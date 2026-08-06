@@ -1136,7 +1136,7 @@ fn extract_carddav_contacts(xml: &str, base: &str) -> Vec<CardDavContact> {
                 }
             }
             Ok(Event::Text(e)) => {
-                if let Ok(text) = e.unescape() {
+                if let Ok(text) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     if in_href {
                         href.push_str(&text);
                     } else if in_etag {
@@ -1197,7 +1197,7 @@ fn extract_texts(xml: &str, target: &[u8]) -> Vec<String> {
                 }
             }
             Ok(Event::Text(e)) if depth > 0 => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     buf.push_str(&t);
                 }
             }
@@ -1235,7 +1235,7 @@ fn first_href_in_elem(xml: &str, target: &[u8]) -> Option<String> {
                 }
             }
             Ok(Event::Text(e)) if in_href => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     buf.push_str(&t);
                 }
             }
@@ -1284,7 +1284,7 @@ fn first_href_with_resourcetype(xml: &str, rtype: &[u8]) -> Option<String> {
                 matched = true;
             }
             Ok(Event::Text(e)) if in_href => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     buf.push_str(&t);
                 }
             }

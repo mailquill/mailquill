@@ -147,7 +147,7 @@ impl S3BlobStore {
 #[async_trait]
 impl BlobStore for S3BlobStore {
     async fn put(&self, key: &str, data: Bytes) -> Result<()> {
-        use object_store::ObjectStore;
+        use object_store::ObjectStoreExt;
         let path = object_store::path::Path::from(key);
         self.store
             .put(&path, data.into())
@@ -157,7 +157,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn get(&self, key: &str) -> Result<Bytes> {
-        use object_store::ObjectStore;
+        use object_store::ObjectStoreExt;
         let path = object_store::path::Path::from(key);
         match self.store.get(&path).await {
             Ok(result) => {
@@ -173,7 +173,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        use object_store::ObjectStore;
+        use object_store::ObjectStoreExt;
         let path = object_store::path::Path::from(key);
         match self.store.delete(&path).await {
             Ok(()) => Ok(()),
@@ -183,7 +183,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {
-        use object_store::ObjectStore;
+        use object_store::ObjectStoreExt;
         let path = object_store::path::Path::from(key);
         match self.store.head(&path).await {
             Ok(_) => Ok(true),
@@ -213,17 +213,15 @@ impl EncryptingBlobStore {
 #[async_trait]
 impl BlobStore for EncryptingBlobStore {
     async fn put(&self, key: &str, data: Bytes) -> Result<()> {
-        use aes_gcm::{AeadInPlace, KeyInit, Nonce};
-        use rand::RngCore;
+        use aes_gcm::{aead::AeadInOut, KeyInit, Nonce};
 
         let cipher = aes_gcm::Aes256Gcm::new(&self.key);
-        let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce_bytes: [u8; 12] = rand::random();
         let nonce = Nonce::from(nonce_bytes);
 
         let mut buf = data.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(&nonce, b"", &mut buf)
+            .encrypt_inout_detached(&nonce, b"", buf.as_mut_slice().into())
             .map_err(|e| BlobError::Encryption(e.to_string()))?;
 
         // Format: [nonce (12 B)][ciphertext][tag (16 B)]
@@ -236,7 +234,7 @@ impl BlobStore for EncryptingBlobStore {
     }
 
     async fn get(&self, key: &str) -> Result<Bytes> {
-        use aes_gcm::{AeadInPlace, KeyInit, Nonce, Tag};
+        use aes_gcm::{aead::AeadInOut, KeyInit, Nonce, Tag};
 
         let raw = self.inner.get(key).await?;
         if raw.len() < 28 {
@@ -254,7 +252,7 @@ impl BlobStore for EncryptingBlobStore {
 
         let mut buf = ciphertext.to_vec();
         cipher
-            .decrypt_in_place_detached(&nonce, b"", &mut buf, &tag)
+            .decrypt_inout_detached(&nonce, b"", buf.as_mut_slice().into(), &tag)
             .map_err(|e| BlobError::Encryption(e.to_string()))?;
 
         Ok(Bytes::from(buf))

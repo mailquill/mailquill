@@ -1267,9 +1267,9 @@ async fn require_account(db: &sqlx::SqlitePool, id: &str) -> Result<(), AppError
 }
 
 async fn fetch_contact(db: &sqlx::SqlitePool, id: &str) -> Result<Contact, AppError> {
-    let row: ContactRow = sqlx::query_as(&format!(
+    let row: ContactRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_CONTACT} FROM contacts WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(db)
     .await?
@@ -1282,9 +1282,9 @@ async fn fetch_contact_by_remote_id(
     account_id: &str,
     remote_id: &str,
 ) -> Result<Contact, AppError> {
-    let row: ContactRow = sqlx::query_as(&format!(
+    let row: ContactRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_CONTACT} FROM contacts WHERE account_id = ? AND uid = ?"
-    ))
+    )))
     .bind(account_id)
     .bind(remote_id)
     .fetch_optional(db)
@@ -1333,7 +1333,7 @@ async fn contact_page(
            c.display_name COLLATE NOCASE ASC, c.id ASC
          LIMIT ? OFFSET ?"
     );
-    let rows: Vec<ContactRow> = sqlx::query_as(&sql)
+    let rows: Vec<ContactRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(query.account_id.as_deref())
         .bind(query.account_id.as_deref())
         .bind(query.mailbox_id.as_deref())
@@ -1367,7 +1367,7 @@ async fn contact_page(
          JOIN contact_accounts AS ca ON ca.id = c.account_id
          WHERE {where_clause}"
     );
-    let total: i64 = sqlx::query_scalar(&count_sql)
+    let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(count_sql.as_str()))
         .bind(query.account_id.as_deref())
         .bind(query.account_id.as_deref())
         .bind(query.mailbox_id.as_deref())

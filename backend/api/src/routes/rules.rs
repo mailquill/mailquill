@@ -65,9 +65,9 @@ pub async fn list_rules(
     Extension(user): Extension<UserId>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
-    let rows: Vec<RuleRow> = sqlx::query_as(&format!(
+    let rows: Vec<RuleRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLS} FROM inbox_rules ORDER BY created_at DESC"
-    ))
+    )))
     .fetch_all(&user_db)
     .await?;
     Ok(Json(rows.into_iter().map(Rule::from).collect::<Vec<_>>()))
@@ -139,7 +139,10 @@ fn json_text(value: &Option<Value>) -> String {
 }
 
 async fn fetch_one(db: &sqlx::SqlitePool, id: &str) -> Result<Json<Rule>, AppError> {
-    let row: RuleRow = sqlx::query_as(&format!("SELECT {COLS} FROM inbox_rules WHERE id = ?"))
+    let row: RuleRow =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {COLS} FROM inbox_rules WHERE id = ?"
+        )))
         .bind(id)
         .fetch_one(db)
         .await?;

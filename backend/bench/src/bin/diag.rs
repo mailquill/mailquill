@@ -38,7 +38,7 @@ async fn enrich(db: &SqlitePool, ids: &[String], indexed_by: bool) {
     let sql_c = format!(
         "SELECT thread_id, COUNT(*), SUM(CASE WHEN is_read=0 THEN 1 ELSE 0 END) FROM messages {hint} WHERE thread_id IN ({ph}) AND is_deleted=0 GROUP BY thread_id",
     );
-    let mut q = sqlx::query_as::<_, (String, i64, i64)>(&sql_c);
+    let mut q = sqlx::query_as::<_, (String, i64, i64)>(sqlx::AssertSqlSafe(sql_c.as_str()));
     for id in ids {
         q = q.bind(id);
     }
@@ -47,7 +47,7 @@ async fn enrich(db: &SqlitePool, ids: &[String], indexed_by: bool) {
     let sql_p = format!(
         "SELECT thread_id, from_addr FROM messages {hint} WHERE thread_id IN ({ph}) AND is_deleted=0 ORDER BY internal_date ASC",
     );
-    let mut qp = sqlx::query_as::<_, (String, String)>(&sql_p);
+    let mut qp = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(sql_p.as_str()));
     for id in ids {
         qp = qp.bind(id);
     }

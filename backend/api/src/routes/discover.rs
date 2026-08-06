@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use axum::{extract::Query, response::IntoResponse, Json};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::TcpStream;
@@ -135,7 +135,7 @@ pub fn parse_ispdb(xml: &str) -> IspdbConfig {
                 }
             }
             Ok(Event::Text(t)) => {
-                let text = t.unescape().unwrap_or_default().into_owned();
+                let text = t.xml_content(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned();
                 if in_display_name && cfg.provider.is_none() {
                     cfg.provider = Some(text);
                 } else if server.is_some() {
@@ -222,7 +222,7 @@ pub fn candidate_hosts(prefix: &str, domain: &str, mx: &[String]) -> Vec<String>
 }
 
 async fn srv_endpoint(
-    resolver: &TokioAsyncResolver,
+    resolver: &TokioResolver,
     domain: &str,
     services: &[(&str, &'static str)],
 ) -> Option<Endpoint> {
@@ -233,14 +233,19 @@ async fn srv_endpoint(
         // A single record with target "." means "service decidedly absent"
         // (RFC 2782); skip those.
         let best = lookup
+            .answers()
             .iter()
-            .filter(|r| r.target().to_utf8() != ".")
-            .min_by_key(|r| (r.priority(), u16::MAX - r.weight()))?;
-        let host = best.target().to_utf8().trim_end_matches('.').to_string();
-        if validate::host("host", &host).is_ok() && validate::port("port", best.port()).is_ok() {
+            .filter_map(|rec| match &rec.data {
+                hickory_resolver::proto::rr::RData::SRV(srv) => Some(srv),
+                _ => None,
+            })
+            .filter(|r| r.target.to_utf8() != ".")
+            .min_by_key(|r| (r.priority, u16::MAX - r.weight))?;
+        let host = best.target.to_utf8().trim_end_matches('.').to_string();
+        if validate::host("host", &host).is_ok() && validate::port("port", best.port).is_ok() {
             return Some(Endpoint {
                 host,
-                port: best.port(),
+                port: best.port,
                 security,
                 source: "srv",
             });
@@ -386,16 +391,21 @@ async fn probe_endpoint(hosts: &[String], ports: &[(u16, &'static str)]) -> Opti
     None
 }
 
-async fn mx_targets(resolver: &TokioAsyncResolver, domain: &str) -> Vec<String> {
+async fn mx_targets(resolver: &TokioResolver, domain: &str) -> Vec<String> {
     let Ok(lookup) = resolver.mx_lookup(domain).await else {
         return Vec::new();
     };
     let mut records: Vec<(u16, String)> = lookup
+        .answers()
         .iter()
+        .filter_map(|rec| match &rec.data {
+            hickory_resolver::proto::rr::RData::MX(mx) => Some(mx),
+            _ => None,
+        })
         .map(|r| {
             (
-                r.preference(),
-                r.exchange().to_utf8().trim_end_matches('.').to_string(),
+                r.preference,
+                r.exchange.to_utf8().trim_end_matches('.').to_string(),
             )
         })
         .filter(|(_, h)| !h.is_empty() && validate::host("host", h).is_ok())
@@ -413,7 +423,9 @@ pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoRespons
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    let resolver = TokioAsyncResolver::tokio_from_system_conf()
+    let resolver = TokioResolver::builder_tokio()
+        .map_err(|e| AppError::Internal(format!("dns resolver: {e}")))?
+        .build()
         .map_err(|e| AppError::Internal(format!("dns resolver: {e}")))?;
 
     let imap_srv = srv_endpoint(

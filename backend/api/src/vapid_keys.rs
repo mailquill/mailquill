@@ -6,7 +6,8 @@
 //! `npx web-push generate-vapid-keys`, but built in: `mailquill vapid-keys`.
 
 use base64::Engine;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
+use p256::elliptic_curve::Generate;
 use p256::SecretKey;
 
 pub struct VapidKeyPair {
@@ -16,10 +17,10 @@ pub struct VapidKeyPair {
 
 pub fn generate() -> VapidKeyPair {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let secret = SecretKey::random(&mut rand::rngs::OsRng);
+    let secret = SecretKey::try_generate().expect("system RNG unavailable");
     VapidKeyPair {
         private_key: b64.encode(secret.to_bytes()),
-        public_key: b64.encode(secret.public_key().to_encoded_point(false).as_bytes()),
+        public_key: b64.encode(secret.public_key().to_sec1_point(false).as_bytes()),
     }
 }
 

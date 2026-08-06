@@ -1261,7 +1261,7 @@ fn parse_calendar_responses(xml: &str) -> Vec<(String, Option<String>, String)> 
                 _ => {}
             },
             Ok(Event::Text(e)) if cur.is_some() => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     buf.push_str(&t);
                 }
             }
@@ -1322,7 +1322,7 @@ fn first_href_in_elem(xml: &str, target: &[u8]) -> Option<String> {
                 }
             }
             Ok(Event::Text(e)) if in_href => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     buf.push_str(&t);
                 }
             }
@@ -1354,7 +1354,7 @@ fn first_text_in_elem(xml: &str, target: &[u8]) -> Option<String> {
                 buf.clear();
             }
             Ok(Event::Text(e)) if in_target => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     buf.push_str(&t);
                 }
             }
@@ -1414,7 +1414,7 @@ fn calendars_with_resourcetype(xml: &str, rtype: &[u8]) -> Vec<DiscoveredCalenda
                 matched = true;
             }
             Ok(Event::Text(e)) if in_href || text_prop.is_some() => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
                     buf.push_str(&t);
                 }
             }

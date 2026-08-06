@@ -116,7 +116,17 @@ fn mail_provider_kind(provider: &str) -> Result<&'static str, AppError> {
     }
 }
 
-fn build_client(provider: &str, state: &AppState) -> Result<oauth2::basic::BasicClient, AppError> {
+/// Fully configured client type produced by `build_client` (oauth2 5 encodes
+/// the set endpoints in the type: auth URI + token URI + redirect set).
+type ConfiguredClient = oauth2::basic::BasicClient<
+    oauth2::EndpointSet,
+    oauth2::EndpointNotSet,
+    oauth2::EndpointNotSet,
+    oauth2::EndpointNotSet,
+    oauth2::EndpointSet,
+>;
+
+fn build_client(provider: &str, state: &AppState) -> Result<ConfiguredClient, AppError> {
     let (auth_url, token_url) = provider_config(provider)?;
     let env_prefix = match provider {
         PROVIDER_GOOGLE => "GOOGLE",
@@ -135,13 +145,11 @@ fn build_client(provider: &str, state: &AppState) -> Result<oauth2::basic::Basic
     .map_err(|e| AppError::Internal(e.to_string()))?;
     let _ = state; // state not needed here but kept for extensibility
 
-    Ok(oauth2::basic::BasicClient::new(
-        ClientId::new(client_id),
-        Some(ClientSecret::new(client_secret)),
-        auth_url,
-        Some(token_url),
-    )
-    .set_redirect_uri(redirect_url))
+    Ok(oauth2::basic::BasicClient::new(ClientId::new(client_id))
+        .set_client_secret(ClientSecret::new(client_secret))
+        .set_auth_uri(auth_url)
+        .set_token_uri(token_url)
+        .set_redirect_uri(redirect_url))
 }
 
 pub async fn oauth_start(
@@ -233,10 +241,16 @@ pub async fn oauth_callback(
     }
 
     let client = build_client(&provider, &state)?;
+    // oauth2 5 requires an explicit HTTP client; redirects stay disabled to
+    // prevent SSRF via the token endpoint.
+    let http_client = oauth2::reqwest::ClientBuilder::new()
+        .redirect(oauth2::reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     let token_result = client
         .exchange_code(AuthorizationCode::new(params.code))
         .set_pkce_verifier(pkce_verifier)
-        .request_async(oauth2::reqwest::async_http_client)
+        .request_async(&http_client)
         .await
         .map_err(|e| AppError::BadGateway(format!("oauth token exchange: {e}")))?;
 

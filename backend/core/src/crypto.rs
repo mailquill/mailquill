@@ -1,5 +1,4 @@
-use aes_gcm::{AeadInPlace, Aes256Gcm, Key, KeyInit, Nonce, Tag};
-use rand::RngCore;
+use aes_gcm::{aead::AeadInOut, Aes256Gcm, Key, KeyInit, Nonce, Tag};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
@@ -43,13 +42,12 @@ impl CredentialKey {
         let key = Key::<Aes256Gcm>::from(self.0);
         let cipher = Aes256Gcm::new(&key);
 
-        let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce_bytes: [u8; 12] = rand::random();
         let nonce = Nonce::from(nonce_bytes);
 
         let mut buf = plaintext.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(&nonce, b"", &mut buf)
+            .encrypt_inout_detached(&nonce, b"", buf.as_mut_slice().into())
             .map_err(|e| CryptoError::Encrypt(e.to_string()))?;
 
         let mut out = Vec::with_capacity(12 + buf.len() + 16);
@@ -75,7 +73,7 @@ impl CredentialKey {
 
         let mut buf = ct.to_vec();
         cipher
-            .decrypt_in_place_detached(&nonce, b"", &mut buf, &tag)
+            .decrypt_inout_detached(&nonce, b"", buf.as_mut_slice().into(), &tag)
             .map_err(|e| CryptoError::Decrypt(e.to_string()))?;
         Ok(buf)
     }
@@ -91,7 +89,6 @@ pub fn hash_token(token: &str) -> String {
 
 /// Generate a random URL-safe base64 token (256 bits).
 pub fn generate_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    let bytes: [u8; 32] = rand::random();
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
 }

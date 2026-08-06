@@ -166,7 +166,7 @@ pub async fn bulk_action(
     let sql = format!(
         "UPDATE messages SET {set_sql} WHERE {where_sql} RETURNING account_id, uid, folder_id"
     );
-    let mut q = sqlx::query_as::<_, (String, i64, String)>(&sql);
+    let mut q = sqlx::query_as::<_, (String, i64, String)>(sqlx::AssertSqlSafe(sql.as_str()));
     for b in &binds {
         q = q.bind(b);
     }

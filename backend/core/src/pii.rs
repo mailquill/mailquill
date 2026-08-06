@@ -59,16 +59,14 @@ impl<T: fmt::Display> fmt::Display for Pii<'_, T> {
                 write!(f, "pii:sha256:{}", hex::encode(&result[..8]))
             }
             MODE_ENCRYPT => {
-                use aes_gcm::{AeadInPlace, KeyInit, Nonce};
-                use rand::RngCore;
+                use aes_gcm::{aead::AeadInOut, KeyInit, Nonce};
                 if let Some(key) = PII_ENCRYPT_KEY.get() {
                     let cipher = aes_gcm::Aes256Gcm::new_from_slice(key.as_slice()).unwrap();
-                    let mut nonce_bytes = [0u8; 12];
-                    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                    let nonce_bytes: [u8; 12] = rand::random();
                     let nonce = Nonce::from(nonce_bytes);
                     let mut buf = self.0.to_string().into_bytes();
                     let tag = cipher
-                        .encrypt_in_place_detached(&nonce, b"", &mut buf)
+                        .encrypt_inout_detached(&nonce, b"", buf.as_mut_slice().into())
                         .unwrap();
                     let mut out = Vec::with_capacity(12 + buf.len() + 16);
                     out.extend_from_slice(&nonce_bytes);

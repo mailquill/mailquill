@@ -4,11 +4,8 @@
 //! - `CREDENTIAL_ENCRYPTION_KEY`: AES-256-GCM key — 32 bytes, 64 hex chars.
 //! - `JWT_SECRET`: JWT signing secret — 32 random bytes, hex-encoded.
 
-use rand::RngCore;
-
 fn random_hex_32() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let bytes: [u8; 32] = rand::random();
     hex::encode(bytes)
 }
 

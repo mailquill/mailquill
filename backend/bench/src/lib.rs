@@ -77,7 +77,7 @@ pub async fn generate(
         }
         let inbox_id = folders[0].0.clone();
 
-        let n = rng.gen_range(min_msgs..=max_msgs);
+        let n = rng.random_range(min_msgs..=max_msgs);
         total_messages += n;
 
         let mut recent_threads: Vec<String> = Vec::new();
@@ -86,7 +86,7 @@ pub async fn generate(
         let mut tx = pool.begin().await?;
         for i in 0..n {
             // Most mail lives in the inbox (the hot view); the rest is spread.
-            let folder_id = if rng.gen_bool(0.75) {
+            let folder_id = if rng.random_bool(0.75) {
                 inbox_id.clone()
             } else {
                 folders.choose(&mut rng).unwrap().0.clone()
@@ -98,7 +98,7 @@ pub async fn generate(
             };
 
             // 30% of messages continue a recent thread; the rest start a new one.
-            let thread_id = if !recent_threads.is_empty() && rng.gen_bool(0.30) {
+            let thread_id = if !recent_threads.is_empty() && rng.random_bool(0.30) {
                 recent_threads.choose(&mut rng).unwrap().clone()
             } else {
                 let t = format!("thread-{a}-{i}");
@@ -110,13 +110,13 @@ pub async fn generate(
             };
 
             // Sortable ISO-8601 dates spread across three years.
-            let year = 2023 + rng.gen_range(0..3);
-            let month = rng.gen_range(1..=12);
-            let day = rng.gen_range(1..=28);
+            let year = 2023 + rng.random_range(0..3);
+            let month = rng.random_range(1..=12);
+            let day = rng.random_range(1..=28);
             let (hh, mm, ss) = (
-                rng.gen_range(0..24),
-                rng.gen_range(0..60),
-                rng.gen_range(0..60),
+                rng.random_range(0..24),
+                rng.random_range(0..60),
+                rng.random_range(0..60),
             );
             let internal_date =
                 format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}.000Z");
@@ -134,8 +134,8 @@ pub async fn generate(
             .bind("This is a representative snippet of the message body content.")
             .bind(from)
             .bind(&internal_date)
-            .bind(rng.gen_bool(0.8) as i64)
-            .bind(rng.gen_bool(0.05) as i64)
+            .bind(rng.random_bool(0.8) as i64)
+            .bind(rng.random_bool(0.05) as i64)
             .execute(&mut *tx)
             .await?;
         }

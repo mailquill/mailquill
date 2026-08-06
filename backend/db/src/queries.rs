@@ -114,7 +114,7 @@ pub async fn unified_page(
     let sql = format!(
         "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0 {unread_clause} {account_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
     );
-    let mut q = sqlx::query_as::<_, RawRow>(&sql);
+    let mut q = sqlx::query_as::<_, RawRow>(sqlx::AssertSqlSafe(sql.as_str()));
     if let Some(a) = account_id {
         q = q.bind(a);
     }
@@ -158,7 +158,7 @@ async fn view_total(
     let unread_clause = if unread { "AND is_read = 0" } else { "" };
     if view == Some("starred") {
         let sql = format!("{STARRED_COUNT_SQL} {unread_clause} {account_clause}");
-        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(a) = account_id {
             q = q.bind(a);
         }
@@ -175,7 +175,7 @@ async fn view_total(
     };
 
     let folders_sql = format!("SELECT id FROM folders WHERE folder_type = ? {account_clause}");
-    let mut fq = sqlx::query_scalar::<_, String>(&folders_sql).bind(folder_type);
+    let mut fq = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(folders_sql.as_str())).bind(folder_type);
     if let Some(a) = account_id {
         fq = fq.bind(a);
     }
@@ -186,7 +186,7 @@ async fn view_total(
         "SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_deleted = 0 {unread_clause}",
     );
     for fid in folder_ids {
-        total += sqlx::query_scalar::<_, i64>(&count_sql)
+        total += sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql.as_str()))
             .bind(&fid)
             .fetch_one(db)
             .await
@@ -212,7 +212,7 @@ pub async fn folder_page(
     let sql = format!(
         "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id = ? AND m.is_deleted = 0 {unread_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
     );
-    let mut q = sqlx::query_as::<_, RawRow>(&sql).bind(folder_id);
+    let mut q = sqlx::query_as::<_, RawRow>(sqlx::AssertSqlSafe(sql.as_str())).bind(folder_id);
     if let Some(c) = cursor {
         q = q.bind(c);
     }
@@ -222,9 +222,9 @@ pub async fn folder_page(
     let has_more = rows.len() as i64 == limit;
 
     let total_unread_clause = if unread { "AND is_read = 0" } else { "" };
-    let total: i64 = sqlx::query_scalar(&format!(
+    let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_deleted = 0 {total_unread_clause}",
-    ))
+    )))
     .bind(folder_id)
     .fetch_one(db)
     .await
@@ -266,7 +266,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
         let sql = format!(
             "SELECT thread_id, folder_id, COUNT(DISTINCT COALESCE(message_id_header, id)), SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 GROUP BY thread_id, folder_id",
         );
-        let mut q = sqlx::query_as::<_, (String, String, i64, i64)>(&sql);
+        let mut q = sqlx::query_as::<_, (String, String, i64, i64)>(sqlx::AssertSqlSafe(sql.as_str()));
         for id in &thread_ids {
             q = q.bind(id);
         }
@@ -277,7 +277,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
         let sql_p = format!(
             "SELECT thread_id, folder_id, from_addr FROM messages INDEXED BY idx_msg_thread WHERE thread_id IN ({placeholders}) AND is_deleted = 0 ORDER BY internal_date ASC",
         );
-        let mut qp = sqlx::query_as::<_, (String, String, String)>(&sql_p);
+        let mut qp = sqlx::query_as::<_, (String, String, String)>(sqlx::AssertSqlSafe(sql_p.as_str()));
         for id in &thread_ids {
             qp = qp.bind(id);
         }
@@ -453,7 +453,7 @@ mod tests {
     async fn starred_count_forces_the_partial_flagged_index() {
         let db = test_db().await;
         let plan: Vec<(i64, i64, i64, String)> =
-            sqlx::query_as(&format!("EXPLAIN QUERY PLAN {STARRED_COUNT_SQL}"))
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {STARRED_COUNT_SQL}")))
                 .fetch_all(&db)
                 .await
                 .unwrap();
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(count, 1);
 
         let plan: Vec<(i64, i64, i64, String)> =
-            sqlx::query_as(&format!("EXPLAIN QUERY PLAN {SYNCED_MESSAGE_COUNT_SQL}"))
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {SYNCED_MESSAGE_COUNT_SQL}")))
                 .bind("account-a")
                 .fetch_all(&db)
                 .await

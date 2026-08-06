@@ -150,7 +150,7 @@ pub async fn search(
             Option<String>,
             Option<String>,
         ),
-    >(&sql);
+    >(sqlx::AssertSqlSafe(sql.as_str()));
     for b in &binds {
         query = query.bind(b);
     }

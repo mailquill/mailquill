@@ -115,7 +115,7 @@ pub async fn connect_imap(
 
     let mut client = async_imap::Client::new(tls_stream);
     // consume server greeting
-    client.read_response().await;
+    let _ = client.read_response().await;
 
     let session = match auth_scheme {
         "xoauth2" => {
@@ -297,8 +297,7 @@ pub async fn fetch_gmail_msgids(
         .run_command(format!("UID FETCH {uid_set} (UID X-GM-MSGID)"))
         .await?;
     let mut out = Vec::new();
-    while let Some(resp) = session.read_response().await {
-        let resp = resp?;
+    while let Some(resp) = session.read_response().await? {
         match resp.parsed() {
             Response::Fetch(_, attrs) => {
                 let mut uid = None;

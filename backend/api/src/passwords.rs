@@ -2,7 +2,7 @@ use argon2::{
     password_hash::{PasswordHasher, SaltString},
     Argon2,
 };
-use rand::rngs::OsRng;
+use argon2::password_hash::rand_core::OsRng;
 use sqlx::SqlitePool;
 
 pub const MIN_PASSWORD_LENGTH: usize = 8;

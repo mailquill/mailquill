@@ -19,6 +19,10 @@ name: Release
 on:
   release:
     types: [published]
+  # Manual fallback when GitHub drops the release event: dispatch on the tag
+  # ref (gh workflow run release.yml --ref vX.Y.Z) so semver image tags and
+  # the checkout still resolve from the tag.
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -183,7 +187,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "${{ github.event.release.tag_name || github.ref_name }}" \
             "mailquill-linux-${{ matrix.arch }}.tar.gz" \
             --clobber --repo "${{ github.repository }}"
 
@@ -248,6 +252,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "${{ github.event.release.tag_name || github.ref_name }}" \
             "${{ matrix.asset }}" \
             --clobber --repo "${{ github.repository }}"

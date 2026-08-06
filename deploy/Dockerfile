@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # Stage 1: Build frontend
 FROM oven/bun:1-alpine AS frontend-builder
 WORKDIR /app/frontend
@@ -30,7 +32,14 @@ COPY xtask/ ./xtask/
 COPY backend/ ./backend/
 COPY --from=frontend-builder /app/frontend/dist/ ./frontend/dist/
 
-RUN RUST_TARGET="$(cat /target.txt)" && \
+# Cache mounts keep the crate registry and compiled artefacts across builds,
+# so a source change only recompiles the workspace crates, not every
+# dependency. The binary is copied out because the mount vanishes after RUN.
+# target/ is keyed per architecture; parallel multi-arch builds must not mix
+# object files.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target-${TARGETARCH}${TARGETVARIANT},target=/app/target \
+    RUST_TARGET="$(cat /target.txt)" && \
     cargo build --release --locked --target "$RUST_TARGET" -p api && \
     cp "target/$RUST_TARGET/release/mailquill" /mailquill
 

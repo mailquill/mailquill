@@ -53,3 +53,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 quick-xml = "0.37"
 sha2 = "0.10"
 sha1 = "0.10"
+# Only used to forward the `vendored` feature to the transitive OpenSSL
+# dependency (web-push → ece/isahc) for targets without system OpenSSL.
+openssl = { version = "0.10", optional = true }
+
+[features]
+# Compile OpenSSL from source instead of linking the system library.
+# Used by the release workflow for the macOS and Windows binaries.
+vendored-openssl = ["dep:openssl", "openssl/vendored"]

@@ -1,0 +1,257 @@
+name: Release
+
+# Builds the multi-arch container image (deploy/Dockerfile) when a GitHub
+# release is published and pushes it to ghcr.io/<owner>/<repo>.
+#
+# Each platform builds in a parallel matrix job (arm64 runs under QEMU
+# emulation, which is slow — the GitHub Actions cache softens repeat builds).
+# A final job stitches the per-platform digests into one manifest list, tagged
+# with the release semver (1.2.3 / 1.2 / 1), the raw tag, and `latest`.
+#
+# The static musl binary is then extracted from each per-platform image and
+# attached to the GitHub release as mailquill-linux-<arch>.tar.gz (binary +
+# brands.json), so native installs need no local toolchain.
+#
+# macOS and Windows binaries are built natively on their runners (frontend via
+# Bun, OpenSSL vendored) and attached the same way.
+
+on:
+  release:
+    types: [published]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Derive platform slug
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_SLUG=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.PLATFORM_SLUG }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_SLUG }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_SLUG }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge and push manifest
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf -- "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s " *)
+
+      - name: Inspect pushed image
+        run: |
+          docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+
+  binaries:
+    name: Attach ${{ matrix.arch }} binary to release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_slug: linux-amd64
+            arch: x86_64
+          - platform: linux/arm64
+            platform_slug: linux-arm64
+            arch: aarch64
+    steps:
+      - name: Download digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digests-${{ matrix.platform_slug }}
+          path: /tmp/digests
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract binary from image
+        run: |
+          digest="$(ls /tmp/digests)"
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:${digest}"
+          docker create --platform "${{ matrix.platform }}" --name extract "$image"
+          mkdir -p /tmp/pkg
+          docker cp extract:/usr/local/bin/mailquill /tmp/pkg/mailquill
+          docker cp extract:/usr/local/share/mailquill/brands.json /tmp/pkg/brands.json
+          docker rm extract
+          tar -C /tmp/pkg -czf "mailquill-linux-${{ matrix.arch }}.tar.gz" mailquill brands.json
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "mailquill-linux-${{ matrix.arch }}.tar.gz" \
+            --clobber --repo "${{ github.repository }}"
+
+  native-binaries:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: mailquill-macos-aarch64.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: mailquill-macos-x86_64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: mailquill-windows-x86_64.zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build frontend
+        working-directory: frontend
+        shell: bash
+        run: |
+          bun install --frozen-lockfile
+          bun run --bun build
+
+      - name: Set up NASM (vendored OpenSSL asm)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p api --features vendored-openssl
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir pkg
+          cp backend/phishing/brands.json pkg/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/mailquill.exe" pkg/
+            (cd pkg && 7z a "../${{ matrix.asset }}" mailquill.exe brands.json)
+          else
+            cp "target/${{ matrix.target }}/release/mailquill" pkg/
+            tar -C pkg -czf "${{ matrix.asset }}" mailquill brands.json
+          fi
+
+      - name: Upload release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "${{ matrix.asset }}" \
+            --clobber --repo "${{ github.repository }}"

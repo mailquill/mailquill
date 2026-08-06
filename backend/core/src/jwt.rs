@@ -58,3 +58,26 @@ impl JwtKey {
         Ok(data.claims.sub)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Also guards against jsonwebtoken being built without a crypto backend,
+    // which panics on the first encode() at runtime instead of failing to
+    // compile.
+    #[test]
+    fn roundtrip_access_token() {
+        let key = JwtKey::from_secret(b"test-secret");
+        let token = key.issue_access_token("user-1").expect("encode");
+        assert_eq!(key.validate(&token).expect("decode"), "user-1");
+    }
+
+    #[test]
+    fn validate_rejects_wrong_secret() {
+        let token = JwtKey::from_secret(b"secret-a")
+            .issue_access_token("user-1")
+            .expect("encode");
+        assert!(JwtKey::from_secret(b"secret-b").validate(&token).is_err());
+    }
+}

@@ -271,6 +271,25 @@ async fn sync_account(
         folder_tx.commit().await?;
     }
 
+    // Drop folders the server no longer advertises — including ones that
+    // stopped being listed because they are \Noselect containers (e.g.
+    // "[Gmail]") — but never ones that still hold local messages.
+    let discovered: std::collections::HashSet<&str> =
+        folders.iter().map(|f| f.full_path.as_str()).collect();
+    for stale_path in stored_folders
+        .keys()
+        .filter(|path| !discovered.contains(path.as_str()))
+    {
+        sqlx::query(
+            "DELETE FROM folders WHERE account_id = ? AND full_path = ?
+             AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.folder_id = folders.id)",
+        )
+        .bind(account_id)
+        .bind(stale_path)
+        .execute(&db)
+        .await?;
+    }
+
     // Only sync folders the user kept enabled (sync_enabled defaults to 1).
     let enabled: std::collections::HashSet<String> = sqlx::query_scalar(
         "SELECT full_path FROM folders WHERE account_id = ? AND sync_enabled = 1",

@@ -159,6 +159,15 @@ pub async fn list_folders(session: &mut ImapSession) -> Result<Vec<FolderInfo>, 
     let mailboxes: Vec<_> = session.list(None, Some("*")).await?.try_collect().await?;
     let mut folders = Vec::new();
     for mb in &mailboxes {
+        // \Noselect marks namespace containers (e.g. Gmail's "[Gmail]") that
+        // cannot be SELECTed; syncing them fails with NONEXISTENT.
+        if mb
+            .attributes()
+            .iter()
+            .any(|a| matches!(a, async_imap::types::NameAttribute::NoSelect))
+        {
+            continue;
+        }
         let name = mb.name().to_string();
         // Prefer the server's RFC 6154 SPECIAL-USE attributes (\Trash, \Junk,
         // \Archive, …) so localized folders like "Papierkorb" still classify

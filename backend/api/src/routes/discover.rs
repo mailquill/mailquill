@@ -311,20 +311,14 @@ pub async fn fetch_peer_cert(host: &str, port: u16) -> Option<Vec<u8>> {
             143 | 587 => starttls_upgrade(stream, port).await?,
             _ => stream,
         };
-        let tls = native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-            .ok()?;
-        let tls = tokio_native_tls::TlsConnector::from(tls);
-        let stream = tls.connect(host, stream).await.ok()?;
-        stream
-            .get_ref()
-            .peer_certificate()
-            .ok()
-            .flatten()?
-            .to_der()
-            .ok()
+        let config = mailquill_core::tls::insecure_probe_client_config();
+        let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+        let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).ok()?;
+        let stream = tls.connect(server_name, stream).await.ok()?;
+        let (_, conn) = stream.get_ref();
+        conn.peer_certificates()?
+            .first()
+            .map(|cert| cert.as_ref().to_vec())
     };
     timeout(PROBE_TIMEOUT, attempt).await.ok().flatten()
 }
@@ -345,14 +339,15 @@ pub fn cert_fingerprint_sha256(der: &[u8]) -> String {
 async fn endpoint_usable(host: String, port: u16, security: &'static str) -> bool {
     let attempt = async {
         let stream = TcpStream::connect((host.as_str(), port)).await.ok()?;
-        let tls = native_tls::TlsConnector::new().ok()?;
-        let tls = tokio_native_tls::TlsConnector::from(tls);
+        let config = mailquill_core::tls::webpki_client_config();
+        let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
         let stream = match security {
             "ssl" => stream,
             "starttls" => starttls_upgrade(stream, port).await?,
             _ => return Some(()),
         };
-        tls.connect(&host, stream).await.ok().map(|_| ())
+        let server_name = rustls::pki_types::ServerName::try_from(host.clone()).ok()?;
+        tls.connect(server_name, stream).await.ok().map(|_| ())
     };
     matches!(timeout(PROBE_TIMEOUT, attempt).await, Ok(Some(())))
 }

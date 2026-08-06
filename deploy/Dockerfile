@@ -9,10 +9,7 @@ RUN bun run --bun build
 
 # Stage 2: Build Rust binary
 FROM rust:1-alpine AS rust-builder
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
-
-# Link OpenSSL statically so the musl binary stays self-contained.
-ENV OPENSSL_STATIC=1
+RUN apk add --no-cache musl-dev
 
 ARG TARGETARCH
 ARG TARGETVARIANT

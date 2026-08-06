@@ -139,12 +139,12 @@ pub async fn upload_script(
         .map_err(|e| e.to_string())?;
     read_status(&mut tcp).await?;
 
-    let connector = native_tls::TlsConnector::builder()
-        .build()
+    let config = mailquill_core::tls::webpki_client_config();
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|e| e.to_string())?;
-    let connector = tokio_native_tls::TlsConnector::from(connector);
     let mut tls = connector
-        .connect(host, tcp)
+        .connect(server_name, tcp)
         .await
         .map_err(|e| e.to_string())?;
     read_status(&mut tls).await?; // post-TLS capabilities

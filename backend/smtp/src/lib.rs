@@ -280,7 +280,7 @@ fn build_transport(req: &SendRequest) -> Result<AsyncSmtpTransport<Tokio1Executo
             .dangerous_accept_invalid_hostnames(true);
     }
     let tls_params = tls_builder
-        .build_native()
+        .build()
         .map_err(|e| SmtpError::Build(e.to_string()))?;
 
     let tls = if uses_implicit_tls(req.smtp_port) {

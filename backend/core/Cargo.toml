@@ -21,3 +21,5 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 jsonwebtoken = "11"
 mailparse = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }

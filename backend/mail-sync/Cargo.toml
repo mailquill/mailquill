@@ -10,8 +10,8 @@ db = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
-tokio-native-tls = { workspace = true }
-native-tls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
 mailparse = { workspace = true }
 phishing = { workspace = true }
 calendar-sync = { workspace = true }

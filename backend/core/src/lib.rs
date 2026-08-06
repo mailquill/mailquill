@@ -5,3 +5,4 @@ pub mod header;
 pub mod jwt;
 pub mod pii;
 pub mod services;
+pub mod tls;

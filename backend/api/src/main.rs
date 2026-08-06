@@ -20,7 +20,6 @@ use std::{
     sync::Arc,
 };
 use tower_http::{set_header::SetResponseHeaderLayer, trace::TraceLayer};
-use web_push::HyperWebPushClient;
 
 use api::state::{AppState, VapidConfig};
 
@@ -116,7 +115,7 @@ async fn main() {
     let log_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
             "info,api=debug,mail_sync=debug,smtp=debug,async_imap=warn,imap_proto=warn,\
-             async_native_tls=warn,rustls=warn,hyper=warn,hyper_util=warn,h2=warn,sqlx=warn,\
+             rustls=warn,hyper=warn,hyper_util=warn,h2=warn,sqlx=warn,\
              tower_http=info,mio=warn,want=warn",
         )
     });
@@ -142,9 +141,7 @@ async fn main() {
     let sync_manager = Arc::new(SyncManager::new());
     let contact_sync_manager = Arc::new(contact_sync::ContactSyncManager::new());
     let vapid = load_vapid_config(&settings);
-    let web_push_client = vapid
-        .as_ref()
-        .map(|_| Arc::new(HyperWebPushClient::new()));
+    let web_push_client = vapid.as_ref().map(|_| reqwest::Client::new());
 
     let pkce_store = Arc::new(routes::oauth::new_pkce_store());
     let (events, _) = tokio::sync::broadcast::channel(256);

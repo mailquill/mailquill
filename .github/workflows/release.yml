@@ -13,7 +13,8 @@ name: Release
 # brands.json), so native installs need no local toolchain.
 #
 # macOS and Windows binaries are built natively on their runners (frontend via
-# Bun, OpenSSL vendored) and attached the same way.
+# Bun; TLS comes from the OS frameworks, no OpenSSL involved) and attached the
+# same way.
 
 on:
   release:
@@ -218,10 +219,6 @@ jobs:
           bun install --frozen-lockfile
           bun run --bun build
 
-      - name: Set up NASM (vendored OpenSSL asm)
-        if: runner.os == 'Windows'
-        uses: ilammy/setup-nasm@v1
-
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -231,7 +228,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build binary
-        run: cargo build --release --locked --target ${{ matrix.target }} -p api --features vendored-openssl
+        run: cargo build --release --locked --target ${{ matrix.target }} -p api
 
       - name: Package
         shell: bash

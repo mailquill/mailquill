@@ -2,9 +2,10 @@ use async_imap::{error::Error as ImapError, Authenticator, Session};
 use base64::Engine;
 use futures::TryStreamExt;
 use mailquill_core::header::decode_header_words;
-use native_tls::TlsConnector;
+use rustls::pki_types::ServerName;
+use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio_native_tls::TlsStream;
+use tokio_rustls::client::TlsStream;
 
 pub type ImapSession = Session<TlsStream<TcpStream>>;
 
@@ -54,12 +55,6 @@ pub enum SessionError {
     Other(String),
 }
 
-impl From<tokio_native_tls::native_tls::Error> for SessionError {
-    fn from(e: tokio_native_tls::native_tls::Error) -> Self {
-        SessionError::Tls(e.to_string())
-    }
-}
-
 struct XOAuth2Authenticator {
     sasl: String,
 }
@@ -84,9 +79,9 @@ pub fn decode_trusted_cert(b64: Option<&str>) -> Option<Vec<u8>> {
 /// Open TLS IMAP session.
 ///
 /// `trusted_cert_der` is a user-approved trust exception (DER certificate
-/// accepted in the account wizard): it is added as a trust anchor and
-/// hostname verification is skipped, mirroring Thunderbird's security
-/// exceptions. `None` keeps strict WebPKI verification.
+/// accepted in the account wizard): the connection is pinned to exactly that
+/// certificate, mirroring Thunderbird's security exceptions. `None` keeps
+/// strict WebPKI verification against the bundled Mozilla roots.
 pub async fn connect_imap(
     host: &str,
     port: u16,
@@ -96,22 +91,17 @@ pub async fn connect_imap(
     auth_scheme: &str,
     trusted_cert_der: Option<&[u8]>,
 ) -> Result<ImapSession, SessionError> {
-    let mut builder = TlsConnector::builder();
-    if let Some(der) = trusted_cert_der {
-        let cert = native_tls::Certificate::from_der(der)
-            .map_err(|e| SessionError::Tls(format!("trusted certificate invalid: {e}")))?;
-        builder
-            .add_root_certificate(cert)
-            .danger_accept_invalid_hostnames(true);
-    }
-    let tls = builder
-        .build()
-        .map_err(|e| SessionError::Tls(e.to_string()))?;
-    let tls = tokio_native_tls::TlsConnector::from(tls);
+    let config = match trusted_cert_der {
+        Some(der) => mailquill_core::tls::pinned_client_config(der.to_vec()),
+        None => mailquill_core::tls::webpki_client_config(),
+    };
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config));
 
     let addr = format!("{host}:{port}");
     let stream = TcpStream::connect(&addr).await?;
-    let tls_stream = tls.connect(host, stream).await?;
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|e| SessionError::Tls(format!("invalid server name: {e}")))?;
+    let tls_stream = tls.connect(server_name, stream).await?;
 
     let mut client = async_imap::Client::new(tls_stream);
     // consume server greeting

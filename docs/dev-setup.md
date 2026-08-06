@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Rust (stable, via rustup)
-- Node.js 20+ and pnpm
+- Bun 1.2+
 - Docker (for integration tests)
 
 ## Rust Musl Targets
@@ -44,9 +44,9 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 ```sh
 cd frontend
-pnpm install
-pnpm dev            # dev server (Vite HMR)
-pnpm build          # production build into frontend/dist/
+bun install
+bun run dev         # dev server (Vite HMR)
+bun run build       # production build into frontend/dist/
 ```
 
 ## Environment

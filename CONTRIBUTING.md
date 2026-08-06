@@ -40,7 +40,7 @@ See [docs/dev-setup.md](docs/dev-setup.md) for getting the stack running and
 
 Before opening a PR:
 
-- **Build:** `cargo build` (backend) and `pnpm build` (frontend) succeed.
+- **Build:** `cargo build` (backend) and `bun run build` (frontend) succeed.
 - **Tests:** `cargo test` passes. Rust tests live in `tests/` integration files,
   not inline `#[cfg(test)]` modules.
 - **Validation:** validate every API input server-side (see the backend

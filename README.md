@@ -32,10 +32,148 @@ not with a third party.
 - **Frontend:** React + TypeScript, Vite, TanStack Query, React Router,
   i18next, served from the binary via rust-embed.
 
+## Quickstart
+
+Two supported ways to run Mailquill in production: the prebuilt container
+image via Docker Compose, or a native install managed by systemd.
+
+### Docker Compose (prebuilt image)
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR for
+every GitHub release. No toolchain required on the host.
+
+```bash
+mkdir mailquill && cd mailquill
+
+# Data directory — the container runs as UID 1000
+mkdir data && sudo chown 1000:1000 data
+
+# Generate the two required secrets into .env
+docker run --rm ghcr.io/mailquill/mailquill:latest secrets > .env
+```
+
+Create `docker-compose.yml`:
+
+```yaml
+services:
+  app:
+    image: ghcr.io/mailquill/mailquill:latest
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+curl http://localhost:8080/api/health   # → {"status":"ok"}
+```
+
+Open `http://localhost:8080` and register the first account. If the GHCR
+package is not public, authenticate first with `docker login ghcr.io`.
+When serving behind a reverse proxy, set `APP_BASE_URL` in `.env` to the
+public URL (required for OAuth redirects).
+
+### Direct install with systemd
+
+Every GitHub release ships prebuilt static Linux binaries (`x86_64` and
+`aarch64`). Download the tarball for your architecture and install the binary
+and the shipped phishing brand list — no toolchain required:
+
+```bash
+curl -LO https://github.com/mailquill/mailquill/releases/latest/download/mailquill-linux-x86_64.tar.gz
+tar -xzf mailquill-linux-x86_64.tar.gz mailquill brands.json
+
+sudo install -Dm755 mailquill /usr/local/bin/mailquill
+sudo install -Dm644 brands.json /usr/local/share/mailquill/brands.json
+```
+
+While the repository is private, download the asset with
+`gh release download --pattern 'mailquill-linux-x86_64.tar.gz'` instead.
+To compile the binary yourself, see [Build from source](#build-from-source).
+
+Releases also ship native binaries for macOS (`mailquill-macos-aarch64.tar.gz`,
+`mailquill-macos-x86_64.tar.gz`) and Windows (`mailquill-windows-x86_64.zip`)
+for running Mailquill outside of Linux servers.
+
+Create a system user and the configuration:
+
+```bash
+sudo useradd --system --home-dir /var/lib/mailquill --no-create-home mailquill
+
+sudo mkdir -p /etc/mailquill
+mailquill secrets | sudo tee /etc/mailquill/mailquill.env >/dev/null
+sudo tee -a /etc/mailquill/mailquill.env >/dev/null <<'EOF'
+DATA_DIR=/var/lib/mailquill
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8080
+# Public URL when behind a reverse proxy (required for OAuth redirects):
+# APP_BASE_URL=https://mail.example.com
+MAILQUILL_BRANDS_FILE=/usr/local/share/mailquill/brands.json
+EOF
+sudo chmod 600 /etc/mailquill/mailquill.env
+```
+
+Create `/etc/systemd/system/mailquill.service`:
+
+```ini
+[Unit]
+Description=Mailquill web mail server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=mailquill
+Group=mailquill
+EnvironmentFile=/etc/mailquill/mailquill.env
+ExecStart=/usr/local/bin/mailquill serve
+StateDirectory=mailquill
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`StateDirectory=mailquill` lets systemd create `/var/lib/mailquill` with the
+correct ownership; with `ProtectSystem=strict` it is the only writable path.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now mailquill
+curl http://localhost:8080/api/health   # → {"status":"ok"}
+```
+
+## Build from source
+
+Requires Rust stable and Bun. `cargo xtask build` builds the frontend and the
+release binary with the UI embedded via rust-embed:
+
+```bash
+cargo xtask build
+
+sudo install -Dm755 target/release/mailquill /usr/local/bin/mailquill
+sudo install -Dm644 backend/phishing/brands.json /usr/local/share/mailquill/brands.json
+```
+
+Continue with the service setup from
+[Direct install with systemd](#direct-install-with-systemd).
+
 ## Requirements
 
 - Rust stable
-- pnpm
+- Bun
 - A 64-character hex `CREDENTIAL_ENCRYPTION_KEY`
 - A `JWT_SECRET` value for signing application access tokens
 
@@ -62,10 +200,10 @@ already-built `frontend/dist` and skip the frontend build, run
 
 ```bash
 # install frontend dependencies once
-cd frontend && pnpm install
+cd frontend && bun install
 
 # frontend dev server with hot reload (proxies the API)
-pnpm dev
+bun run dev
 
 # backend in debug mode (rust-embed serves frontend/dist from disk)
 cargo run -p api
@@ -140,9 +278,9 @@ The frontend starts OAuth through `/api/auth/oauth/:provider/start`; the backend
 cargo check
 
 cd frontend
-pnpm test
-pnpm lint
-pnpm build
+bun run test
+bun run lint
+bun run build
 ```
 
 ## Live E2E Checks

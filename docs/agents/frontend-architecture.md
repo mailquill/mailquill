@@ -33,7 +33,7 @@ These rules apply when generating, modifying, or reviewing code in the faultmana
 - **Internationalization**: i18next + react-i18next + i18next-browser-languagedetector.
 - **Observability**: OpenTelemetry browser tracing with centralized bootstrap in `src/shared/lib/telemetry`.
 - **Build Tooling**: Vite.
-- **Package Manager**: pnpm, managed via `packageManager` in `package.json`. Use pnpm commands for installs and scripts, and commit `pnpm-lock.yaml` instead of `package-lock.json`.
+- **Package Manager & Runtime**: Bun. Use `bun install` for installs and `bun run <script>` for scripts (not `bun test`, which would invoke Bun's own test runner instead of Vitest), and commit `bun.lock` instead of `package-lock.json`.
 
 ## Additional Rules
 

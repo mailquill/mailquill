@@ -205,7 +205,7 @@ impl EncryptingBlobStore {
         use aes_gcm::Key;
         Self {
             inner,
-            key: *Key::<aes_gcm::Aes256Gcm>::from_slice(key_bytes),
+            key: Key::<aes_gcm::Aes256Gcm>::from(*key_bytes),
         }
     }
 }
@@ -219,11 +219,11 @@ impl BlobStore for EncryptingBlobStore {
         let cipher = aes_gcm::Aes256Gcm::new(&self.key);
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let mut buf = data.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(nonce, b"", &mut buf)
+            .encrypt_in_place_detached(&nonce, b"", &mut buf)
             .map_err(|e| BlobError::Encryption(e.to_string()))?;
 
         // Format: [nonce (12 B)][ciphertext][tag (16 B)]
@@ -247,12 +247,14 @@ impl BlobStore for EncryptingBlobStore {
         let (ciphertext, tag_bytes) = rest.split_at(rest.len() - 16);
 
         let cipher = aes_gcm::Aes256Gcm::new(&self.key);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let tag = Tag::from_slice(tag_bytes);
+        let nonce_arr: [u8; 12] = nonce_bytes.try_into().expect("split_at yields 12 bytes");
+        let tag_arr: [u8; 16] = tag_bytes.try_into().expect("split_at yields 16 bytes");
+        let nonce = Nonce::from(nonce_arr);
+        let tag = Tag::from(tag_arr);
 
         let mut buf = ciphertext.to_vec();
         cipher
-            .decrypt_in_place_detached(nonce, b"", &mut buf, tag)
+            .decrypt_in_place_detached(&nonce, b"", &mut buf, &tag)
             .map_err(|e| BlobError::Encryption(e.to_string()))?;
 
         Ok(Bytes::from(buf))

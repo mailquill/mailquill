@@ -40,16 +40,16 @@ impl CredentialKey {
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let key = Key::<Aes256Gcm>::from_slice(&self.0);
-        let cipher = Aes256Gcm::new(key);
+        let key = Key::<Aes256Gcm>::from(self.0);
+        let cipher = Aes256Gcm::new(&key);
 
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let mut buf = plaintext.to_vec();
         let tag = cipher
-            .encrypt_in_place_detached(nonce, b"", &mut buf)
+            .encrypt_in_place_detached(&nonce, b"", &mut buf)
             .map_err(|e| CryptoError::Encrypt(e.to_string()))?;
 
         let mut out = Vec::with_capacity(12 + buf.len() + 16);
@@ -66,14 +66,16 @@ impl CredentialKey {
         let (nonce_bytes, rest) = ciphertext.split_at(12);
         let (ct, tag_bytes) = rest.split_at(rest.len() - 16);
 
-        let key = Key::<Aes256Gcm>::from_slice(&self.0);
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let tag = Tag::from_slice(tag_bytes);
+        let key = Key::<Aes256Gcm>::from(self.0);
+        let cipher = Aes256Gcm::new(&key);
+        let nonce_arr: [u8; 12] = nonce_bytes.try_into().expect("split_at yields 12 bytes");
+        let tag_arr: [u8; 16] = tag_bytes.try_into().expect("split_at yields 16 bytes");
+        let nonce = Nonce::from(nonce_arr);
+        let tag = Tag::from(tag_arr);
 
         let mut buf = ct.to_vec();
         cipher
-            .decrypt_in_place_detached(nonce, b"", &mut buf, tag)
+            .decrypt_in_place_detached(&nonce, b"", &mut buf, &tag)
             .map_err(|e| CryptoError::Decrypt(e.to_string()))?;
         Ok(buf)
     }

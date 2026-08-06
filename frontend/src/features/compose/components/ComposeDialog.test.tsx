@@ -94,7 +94,7 @@ describe('ComposeDialog account bootstrap', () => {
       imap_host: 'imap.example.test', imap_port: 993, imap_auth_scheme: 'password',
       smtp_host: 'smtp.example.test', smtp_port: 465, smtp_auth_scheme: 'password',
       body_sync_mode: 'full', sync_interval_secs: 60, sync_mode: 'poll', provider_kind: 'imap',
-      created_at: '2026-07-18T00:00:00Z', sign_by_default: false, contacts: null,
+      created_at: '2026-07-18T00:00:00Z', sign_by_default: false, sort_order: 0, contacts: null,
     }]
     const onClose = vi.fn()
     const onSendQueued = vi.fn()
@@ -128,7 +128,7 @@ describe('ComposeDialog account bootstrap', () => {
       imap_host: 'imap.example.test', imap_port: 993, imap_auth_scheme: 'password',
       smtp_host: 'smtp.example.test', smtp_port: 465, smtp_auth_scheme: 'password',
       body_sync_mode: 'full', sync_interval_secs: 60, sync_mode: 'poll', provider_kind: 'imap',
-      created_at: '2026-07-18T00:00:00Z', sign_by_default: false, contacts: null,
+      created_at: '2026-07-18T00:00:00Z', sign_by_default: false, sort_order: 0, contacts: null,
     }]
     mutateSave.mockResolvedValue({ id: 'draft-1' })
     const onClose = vi.fn()

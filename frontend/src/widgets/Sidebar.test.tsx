@@ -76,6 +76,7 @@ describe('Sidebar', () => {
         provider_kind: 'imap',
         created_at: '2026-01-01T00:00:00Z',
         sign_by_default: false,
+        sort_order: 0,
         contacts: null,
       },
     ]

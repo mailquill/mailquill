@@ -357,6 +357,8 @@ export const en = {
     syncModeIdle: 'Push (IMAP IDLE)',
     syncModeInterval: 'Interval (polling)',
     syncedFolders: 'Synced folders',
+    selectAllFolders: 'All',
+    selectNoFolders: 'None',
     syncedFoldersDesc: 'Only selected folders are synced. Folders appear after the first sync.',
     imapHost: 'IMAP host',
     imapPort: 'IMAP port',

@@ -157,6 +157,27 @@ export function useSetFolderSync(accountId: string) {
   })
 }
 
+/** All/none quick selection: set sync_enabled on every folder of the account. */
+export function useSetAllFoldersSync(accountId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (syncEnabled: boolean) =>
+      apiPut(`/accounts/${accountId}/folders/sync`, { sync_enabled: syncEnabled }),
+    onMutate: async (syncEnabled) => {
+      await qc.cancelQueries({ queryKey: ['folders', accountId] })
+      const prev = qc.getQueryData<Folder[]>(['folders', accountId])
+      qc.setQueryData<Folder[]>(['folders', accountId], (old) =>
+        old?.map((f) => ({ ...f, sync_enabled: syncEnabled })),
+      )
+      return prev
+    },
+    onError: (_e, _vars, prev) => {
+      if (prev) qc.setQueryData(['folders', accountId], prev)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['folders', accountId] }),
+  })
+}
+
 export function useTriggerSync() {
   return useMutation({
     mutationFn: (accountId: string) => apiPost(`/accounts/${accountId}/sync`),

@@ -47,6 +47,7 @@ import {
   useUpdateAccount,
   useFolders,
   useSetFolderSync,
+  useSetAllFoldersSync,
   useEnableMailboxContacts,
   useDisableMailboxContacts,
   useDiscoverMailboxContacts,
@@ -697,14 +698,25 @@ function FolderSyncList({ accountId }: { accountId: string }) {
   const { t } = useTranslation()
   const { data: folders = [] } = useFolders(accountId)
   const setSync = useSetFolderSync(accountId)
+  const setAllSync = useSetAllFoldersSync(accountId)
 
   if (!folders.length) return null
 
   return (
     <div className="mt-4 border-t border-border pt-4">
-      <span className="text-[12px] font-bold uppercase tracking-wide text-muted-foreground">
-        {t('settings.syncedFolders')}
-      </span>
+      <div className="flex items-center justify-between">
+        <span className="text-[12px] font-bold uppercase tracking-wide text-muted-foreground">
+          {t('settings.syncedFolders')}
+        </span>
+        <div className="flex gap-1.5">
+          <Button type="button" variant="outline" size="sm" disabled={setAllSync.isPending} onClick={() => setAllSync.mutate(true)}>
+            {t('settings.selectAllFolders')}
+          </Button>
+          <Button type="button" variant="outline" size="sm" disabled={setAllSync.isPending} onClick={() => setAllSync.mutate(false)}>
+            {t('settings.selectNoFolders')}
+          </Button>
+        </div>
+      </div>
       <p className="mb-3 mt-1 text-[12px] text-muted-foreground">{t('settings.syncedFoldersDesc')}</p>
       <div className="grid gap-1.5 sm:grid-cols-2">
         {folders.map((folder) => {

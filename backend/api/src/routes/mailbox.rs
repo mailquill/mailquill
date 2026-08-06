@@ -375,6 +375,29 @@ pub async fn set_folder_sync(
     Ok(Json(json!({ "sync_enabled": req.sync_enabled })))
 }
 
+/// Enable or disable syncing for every folder of the account at once (the
+/// all/none quick selection in settings). Same semantics as the per-folder
+/// toggle: enabling triggers an immediate poll.
+pub async fn set_all_folders_sync(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Path(account_id): Path<String>,
+    Json(req): Json<FolderSyncRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    sqlx::query("UPDATE folders SET sync_enabled = ? WHERE account_id = ?")
+        .bind(req.sync_enabled as i64)
+        .bind(&account_id)
+        .execute(&user_db)
+        .await?;
+
+    if req.sync_enabled {
+        state.sync_manager.force_poll(&account_id).await;
+    }
+
+    Ok(Json(json!({ "sync_enabled": req.sync_enabled })))
+}
+
 pub async fn list_folder_messages(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

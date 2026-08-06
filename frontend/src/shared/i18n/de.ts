@@ -357,6 +357,8 @@ export const de = {
     syncModeIdle: 'Push (IMAP IDLE)',
     syncModeInterval: 'Intervall (Abruf)',
     syncedFolders: 'Synchronisierte Ordner',
+    selectAllFolders: 'Alle',
+    selectNoFolders: 'Keine',
     syncedFoldersDesc: 'Nur ausgewählte Ordner werden synchronisiert. Ordner erscheinen nach dem ersten Sync.',
     imapHost: 'IMAP-Host',
     imapPort: 'IMAP-Port',

@@ -241,6 +241,10 @@ async fn main() {
         )
         .route("/accounts/{id}/folders", get(routes::mailbox::list_folders))
         .route(
+            "/accounts/{id}/folders/sync",
+            put(routes::mailbox::set_all_folders_sync),
+        )
+        .route(
             "/accounts/{id}/folders/{folder}/sync",
             patch(routes::mailbox::set_folder_sync),
         )

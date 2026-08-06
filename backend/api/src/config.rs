@@ -43,6 +43,11 @@ pub struct Settings {
     /// trigger repeated upstream rate limits. Operators can still opt out.
     #[serde(default = "default_true")]
     pub remote_image_proxy_enabled: bool,
+    /// Allow new user sign-ups via /api/auth/register. Operators of
+    /// single-user or invite-only instances set this to false after creating
+    /// their accounts; existing users keep logging in normally.
+    #[serde(default = "default_true")]
+    pub registration_enabled: bool,
 }
 
 fn default_data_dir() -> String {
@@ -101,5 +106,16 @@ mod tests {
         .unwrap();
 
         assert!(settings.remote_image_proxy_enabled);
+    }
+
+    #[test]
+    fn registration_is_enabled_by_default() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "credential_encryption_key": "test-key",
+            "jwt_secret": "test-secret"
+        }))
+        .unwrap();
+
+        assert!(settings.registration_enabled);
     }
 }

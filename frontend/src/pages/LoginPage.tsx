@@ -9,6 +9,7 @@ import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
 import { useAuthStore } from '@/app/store'
 import { apiPost, ApiError } from '@/shared/api'
+import { usePublicConfig } from '@/shared/hooks/useSettings'
 
 const schema = z.object({
   email: z.string().email('auth.emailInvalid'),
@@ -20,6 +21,7 @@ export function LoginPage() {
   const navigate = useNavigate()
   const { t } = useTranslation()
   const setAuth = useAuthStore((s) => s.setAuth)
+  const { data: publicConfig } = usePublicConfig()
 
   const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
     resolver: zodResolver(schema),
@@ -68,12 +70,14 @@ export function LoginPage() {
           </Button>
         </form>
 
-        <p className="text-center text-sm text-muted-foreground">
-          {t('auth.noAccount')}{' '}
-          <Link to="/register" className="text-primary underline underline-offset-4">
-            {t('auth.register')}
-          </Link>
-        </p>
+        {publicConfig?.registration_enabled !== false && (
+          <p className="text-center text-sm text-muted-foreground">
+            {t('auth.noAccount')}{' '}
+            <Link to="/register" className="text-primary underline underline-offset-4">
+              {t('auth.register')}
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   )

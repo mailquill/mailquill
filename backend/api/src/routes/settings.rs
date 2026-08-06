@@ -19,6 +19,7 @@ pub struct UserSettingsResponse {
 #[derive(Serialize)]
 pub struct PublicConfigResponse {
     remote_image_proxy_enabled: bool,
+    registration_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +53,7 @@ pub async fn get_settings(
 pub async fn public_config(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     Ok(Json(PublicConfigResponse {
         remote_image_proxy_enabled: state.remote_image_proxy_enabled,
+        registration_enabled: state.registration_enabled,
     }))
 }
 

@@ -38,6 +38,7 @@ export const en = {
     createAccount: 'Create account',
     creatingAccount: 'Creating account…',
     haveAccount: 'Already have an account?',
+    registrationDisabled: 'Sign-ups are disabled on this server.',
     registerFailed: 'Registration failed. Email may already be in use.',
     passwordMin: 'Password must be at least 8 characters',
     passwordsNoMatch: 'Passwords do not match',

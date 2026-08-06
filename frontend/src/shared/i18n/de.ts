@@ -38,6 +38,7 @@ export const de = {
     createAccount: 'Konto erstellen',
     creatingAccount: 'Konto wird erstellt…',
     haveAccount: 'Bereits ein Konto?',
+    registrationDisabled: 'Die Registrierung neuer Konten ist auf diesem Server deaktiviert.',
     registerFailed: 'Registrierung fehlgeschlagen. Die E-Mail wird evtl. bereits verwendet.',
     passwordMin: 'Passwort muss mindestens 8 Zeichen haben',
     passwordsNoMatch: 'Passwörter stimmen nicht überein',

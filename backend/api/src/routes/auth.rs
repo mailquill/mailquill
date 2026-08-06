@@ -36,6 +36,9 @@ pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if !state.registration_enabled {
+        return Err(AppError::Forbidden);
+    }
     if !req.email.contains('@') {
         return Err(AppError::Unprocessable("invalid email address".into()));
     }

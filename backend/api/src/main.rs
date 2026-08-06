@@ -158,6 +158,7 @@ async fn main() {
         web_push_client,
         events,
         remote_image_proxy_enabled: settings.remote_image_proxy_enabled,
+        registration_enabled: settings.registration_enabled,
     };
 
     let auth_routes = Router::new()

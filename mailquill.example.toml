@@ -22,6 +22,10 @@ server_host = "0.0.0.0"
 server_port = 8080
 app_base_url = "http://localhost:8080"
 
+# Allow new user sign-ups via the register page. Set to false on single-user
+# or invite-only instances after creating your account(s).
+# registration_enabled = true
+
 # ── Phishing detection ───────────────────────────────────────────────────────
 
 # Brand list for spoofing/lookalike checks. The shipped default lives next to

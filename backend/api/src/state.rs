@@ -49,4 +49,6 @@ pub struct AppState {
     pub events: broadcast::Sender<UserEvent>,
     /// Whether approved remote email images should be fetched through the backend.
     pub remote_image_proxy_enabled: bool,
+    /// Whether /api/auth/register accepts new sign-ups.
+    pub registration_enabled: bool,
 }

@@ -150,6 +150,7 @@ export interface Settings {
 
 export interface PublicConfig {
   remote_image_proxy_enabled: boolean
+  registration_enabled: boolean
 }
 
 export interface AllowedImageSender {

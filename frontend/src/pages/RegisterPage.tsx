@@ -8,7 +8,8 @@ import { Button } from '@/shared/components/ui/button'
 import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
 import { useAuthStore } from '@/app/store'
-import { apiPost } from '@/shared/api'
+import { apiPost, ApiError } from '@/shared/api'
+import { usePublicConfig } from '@/shared/hooks/useSettings'
 
 const schema = z.object({
   email: z.string().email(),
@@ -24,6 +25,8 @@ export function RegisterPage() {
   const navigate = useNavigate()
   const { t } = useTranslation()
   const setAuth = useAuthStore((s) => s.setAuth)
+  const { data: publicConfig } = usePublicConfig()
+  const registrationDisabled = publicConfig?.registration_enabled === false
 
   const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
     resolver: zodResolver(schema),
@@ -49,6 +52,13 @@ export function RegisterPage() {
           <p className="text-sm text-muted-foreground">{t('auth.createTitle')}</p>
         </div>
 
+        {registrationDisabled && (
+          <p className="rounded-md border border-border bg-secondary p-3 text-center text-sm text-secondary-foreground">
+            {t('auth.registrationDisabled')}
+          </p>
+        )}
+
+        {!registrationDisabled && (
         <form onSubmit={handleSubmit((d) => registerMutation.mutate(d))} className="space-y-4">
           <div className="space-y-1">
             <Label htmlFor="email">{t('auth.email')}</Label>
@@ -69,13 +79,18 @@ export function RegisterPage() {
           </div>
 
           {registerMutation.error && (
-            <p className="text-xs text-destructive">{t('auth.registerFailed')}</p>
+            <p className="text-xs text-destructive">
+              {registerMutation.error instanceof ApiError && registerMutation.error.status === 403
+                ? t('auth.registrationDisabled')
+                : t('auth.registerFailed')}
+            </p>
           )}
 
           <Button type="submit" className="w-full" disabled={registerMutation.isPending}>
             {registerMutation.isPending ? t('auth.creatingAccount') : t('auth.createAccount')}
           </Button>
         </form>
+        )}
 
         <p className="text-center text-sm text-muted-foreground">
           {t('auth.haveAccount')}{' '}

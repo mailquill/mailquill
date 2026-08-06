@@ -4,7 +4,7 @@ import { RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { useClickOutside } from '@/shared/hooks/useClickOutside'
 import { useSyncStatuses, useTriggerSync } from '@/shared/hooks/useAccounts'
-import { accountColor, accountInitials } from '@/shared/lib/avatar'
+import { accountInitials, resolveAccountColor } from '@/shared/lib/avatar'
 import { relativeFromNow } from '@/shared/lib/format'
 import { startOAuthRedirect } from '@/shared/lib/oauth'
 import type { SyncStatus } from '@/shared/types'
@@ -159,7 +159,7 @@ export function SyncStatusMenu() {
                 const synced = status?.synced ?? 0
                 const total = status?.total ?? 0
                 const phase = visualPhase(phaseOf(status), synced, total)
-                const color = accountColor(account.id)
+                const color = resolveAccountColor(account)
                 const reauthProvider = oauthProviderFromStatus(status)
                 return (
                   <div key={account.id} className="flex items-start gap-3">

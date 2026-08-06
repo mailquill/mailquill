@@ -26,7 +26,7 @@ import {
 } from 'lucide-react'
 import { ApiError } from '@/shared/api'
 import { cn } from '@/shared/lib/utils'
-import { accountColor, accountInitials } from '@/shared/lib/avatar'
+import { accountInitials, resolveAccountColor } from '@/shared/lib/avatar'
 import { Input } from '@/shared/components/ui/input'
 import { Label } from '@/shared/components/ui/label'
 import { Select } from '@/shared/components/ui/select'
@@ -37,7 +37,7 @@ import {
   tlsCertificateFromError,
   type TlsDecision,
 } from '@/shared/components'
-import { AddAccountForm } from '@/features/accounts'
+import { AddAccountForm, Swatches } from '@/features/accounts'
 import { RulesSection } from '@/widgets/RulesSection'
 import { PgpKeyManagement } from '@/widgets/PgpKeyManagement'
 import { davDefaults } from '@/shared/lib/dav'
@@ -273,6 +273,7 @@ const accountEditSchema = z.object({
   sync_mode: z.enum(['idle', 'interval']),
   carddav_url: z.string().optional(),
   caldav_url: z.string().optional(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
 })
 type AccountEditInput = z.input<typeof accountEditSchema>
 type AccountEditData = z.output<typeof accountEditSchema>
@@ -283,12 +284,13 @@ function AccountCard({ account }: { account: Account }) {
   const [tlsRetryData, setTlsRetryData] = useState<AccountEditData | null>(null)
   const updateAccount = useUpdateAccount()
   const deleteAccount = useDeleteAccount()
-  const color = accountColor(account.id)
+  const color = resolveAccountColor(account)
   const {
     register,
     handleSubmit,
     reset,
     setValue,
+    watch,
     formState: { errors },
   } = useForm<AccountEditInput, unknown, AccountEditData>({
     resolver: zodResolver(accountEditSchema),
@@ -399,6 +401,16 @@ function AccountCard({ account }: { account: Account }) {
                 <option value="full">{t('settings.downloadDuringSync')}</option>
               </Select>
             </Field>
+          </div>
+
+          <div className="mt-4 border-t border-border pt-4">
+            <div className="mb-2 text-[12px] font-bold uppercase tracking-wide text-muted-foreground">
+              {t('settings.accountColor')}
+            </div>
+            <Swatches
+              value={watch('color') ?? color}
+              onChange={(v) => setValue('color', v, { shouldDirty: true })}
+            />
           </div>
 
           {/* CalDAV stays part of the normal mailbox settings. Contact server
@@ -677,6 +689,7 @@ function accountToForm(account: Account): AccountEditInput {
     sync_mode: account.sync_mode === 'interval' ? 'interval' : 'idle',
     carddav_url: account.carddav_url ?? '',
     caldav_url: account.caldav_url ?? '',
+    color: account.color ?? undefined,
   }
 }
 

@@ -305,6 +305,7 @@ export const en = {
     addAccount: 'Add account',
     adding: 'Adding…',
     addFailed: 'Account setup failed. Check the server details and credentials.',
+    accountExists: 'An account with this email address already exists.',
     tlsUntrusted: 'Server certificate not trusted',
     tlsUntrustedSub:
       'The certificate of {{host}}:{{port}} could not be verified (e.g. self-signed or issued for a different hostname). Only trust it if you trust this server — the exception is stored permanently for this account.',

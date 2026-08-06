@@ -5,7 +5,8 @@ import { Bell, Check, X } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { useClickOutside } from '@/shared/hooks/useClickOutside'
 import { useUnifiedInbox } from '@/shared/hooks/useMessages'
-import { accountColor, accountInitials } from '@/shared/lib/avatar'
+import { useAccountColorLookup } from '@/shared/hooks/useAccounts'
+import { accountInitials } from '@/shared/lib/avatar'
 import { parseFromAddr } from '@/shared/lib/format'
 import type { Message } from '@/shared/types'
 
@@ -33,7 +34,10 @@ interface Notification {
   initials: string
 }
 
-function buildNotifications(messages: Message[]): Notification[] {
+function buildNotifications(
+  messages: Message[],
+  colorFor: (accountId: string) => string,
+): Notification[] {
   return messages
     .filter((m) => !m.is_read)
     .map((m) => {
@@ -45,7 +49,7 @@ function buildNotifications(messages: Message[]): Notification[] {
         subject: m.subject || '(no subject)',
         snippet: m.snippet,
         date: m.internal_date,
-        accent: accountColor(m.account_id),
+        accent: colorFor(m.account_id),
         initials: accountInitials(name),
       }
     })
@@ -62,9 +66,10 @@ export function NotificationMenu() {
   const ref = useClickOutside<HTMLDivElement>(() => setOpen(false), open)
 
   const { data } = useUnifiedInbox()
+  const colorFor = useAccountColorLookup()
   const all = useMemo(
-    () => buildNotifications(data?.messages ?? []).filter((n) => !dismissed.has(n.id)),
-    [data?.messages, dismissed],
+    () => buildNotifications(data?.messages ?? [], colorFor).filter((n) => !dismissed.has(n.id)),
+    [data?.messages, dismissed, colorFor],
   )
   const unreadCount = all.filter((n) => !readIds.has(n.id)).length
   const shown = tab === 'unread' ? all.filter((n) => !readIds.has(n.id)) : all

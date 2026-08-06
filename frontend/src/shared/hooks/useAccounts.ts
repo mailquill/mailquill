@@ -1,5 +1,7 @@
+import { useMemo } from 'react'
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from '@/shared/api'
+import { accountColor, resolveAccountColor } from '@/shared/lib/avatar'
 import type { Account, AccountAlias, DiscoveredContactBook, Folder, SyncStatus } from '@/shared/types'
 
 export function useAccounts() {
@@ -7,6 +9,18 @@ export function useAccounts() {
     queryKey: ['accounts'],
     queryFn: () => apiGet<Account[]>('/accounts'),
   })
+}
+
+/**
+ * Resolve an account id to its display colour (user-chosen, else hash-derived).
+ * For components that only hold an account id, not the full account.
+ */
+export function useAccountColorLookup(): (accountId: string) => string {
+  const { data: accounts = [] } = useAccounts()
+  return useMemo(() => {
+    const byId = new Map(accounts.map((a) => [a.id, resolveAccountColor(a)]))
+    return (accountId: string) => byId.get(accountId) ?? accountColor(accountId)
+  }, [accounts])
 }
 
 export function useFolders(accountId: string) {
@@ -71,6 +85,29 @@ export function useAliases(accountId: string) {
     queryKey: ['aliases', accountId],
     queryFn: () => apiGet<AccountAlias[]>(`/accounts/${accountId}/aliases`),
     enabled: !!accountId,
+  })
+}
+
+export function useReorderAccounts() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (accountIds: string[]) => apiPut('/accounts/order', { account_ids: accountIds }),
+    onMutate: async (accountIds) => {
+      await qc.cancelQueries({ queryKey: ['accounts'] })
+      const prev = qc.getQueryData<Account[]>(['accounts'])
+      qc.setQueryData<Account[]>(['accounts'], (old) => {
+        if (!old) return old
+        const byId = new Map(old.map((a) => [a.id, a]))
+        return accountIds
+          .map((id) => byId.get(id))
+          .filter((a): a is Account => Boolean(a))
+      })
+      return prev
+    },
+    onError: (_e, _ids, prev) => {
+      if (prev) qc.setQueryData(['accounts'], prev)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['accounts'] }),
   })
 }
 

@@ -40,6 +40,8 @@ pub struct AddAccountRequest {
     sign_by_default: Option<bool>,
     /// Contact synchronization is optional and never blocks mailbox creation.
     contacts_enabled: Option<bool>,
+    /// Account colour (`#RRGGBB`); NULL lets the client derive one from the id.
+    color: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +69,13 @@ pub struct UpdateAccountRequest {
     pgp_key_id: Option<String>,
     sign_by_default: Option<bool>,
     contacts_enabled: Option<bool>,
+    color: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ReorderAccountsRequest {
+    /// Every account id of the user, in the desired sidebar order.
+    account_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +110,8 @@ pub struct AccountResponse {
     caldav_accept_invalid_tls: bool,
     pgp_key_id: Option<String>,
     sign_by_default: bool,
+    color: Option<String>,
+    sort_order: i64,
     #[sqlx(skip)]
     contacts: Option<ContactCapabilitySummary>,
 }
@@ -169,6 +180,25 @@ pub async fn add_account(
     let sync_mode = req.sync_mode.as_deref().unwrap_or("idle");
     validate::one_of("sync_mode", sync_mode, validate::SYNC_MODES)?;
 
+    if let Some(c) = &req.color {
+        validate::hex_color("color", c)?;
+    }
+
+    // Reject duplicates before the (slow) IMAP connection test; re-adding an
+    // existing mailbox would otherwise silently create a second account.
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let duplicate: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM email_accounts WHERE lower(primary_email) = lower(?)",
+    )
+    .bind(&req.primary_email)
+    .fetch_one(&user_db)
+    .await?;
+    if duplicate > 0 {
+        return Err(AppError::Conflict(
+            "an account with this email address already exists".into(),
+        ));
+    }
+
     // Encode credentials as JSON then encrypt
     let creds = serde_json::json!({
         "imap_username": req.imap_username,
@@ -232,9 +262,8 @@ pub async fn add_account(
         return Err(AppError::Unprocessable(e.to_string()));
     }
 
-    let user_db = state.user_db_pool.get(&user.0).await?;
     let account_id: String = sqlx::query_scalar(
-        "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, sync_interval_secs, sync_mode, carddav_url, caldav_url, caldav_accept_invalid_tls, imap_tls_cert, smtp_tls_cert, provider_kind, pgp_key_id, sign_by_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO email_accounts (display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted, body_sync_mode, sync_interval_secs, sync_mode, carddav_url, caldav_url, caldav_accept_invalid_tls, imap_tls_cert, smtp_tls_cert, provider_kind, pgp_key_id, sign_by_default, color, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order) + 1, 0) FROM email_accounts)) RETURNING id",
     )
     .bind(&req.display_name)
     .bind(&req.primary_email)
@@ -256,6 +285,7 @@ pub async fn add_account(
     .bind(provider_kind)
     .bind(&req.pgp_key_id)
     .bind(req.sign_by_default.unwrap_or(false))
+    .bind(&req.color)
     .fetch_one(&user_db)
     .await?;
 
@@ -284,7 +314,7 @@ pub async fn list_accounts(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(&user.0).await?;
     let mut rows: Vec<AccountResponse> = sqlx::query_as(
-        "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts ORDER BY created_at",
+        "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default, color, sort_order FROM email_accounts ORDER BY sort_order, created_at",
     )
     .fetch_all(&user_db)
     .await
@@ -354,6 +384,9 @@ pub async fn update_account(
     }
     if let Some(m) = &req.sync_mode {
         validate::one_of("sync_mode", m, validate::SYNC_MODES)?;
+    }
+    if let Some(c) = &req.color {
+        validate::hex_color("color", c)?;
     }
     let request_imap_cert = req
         .imap_tls_cert
@@ -475,7 +508,7 @@ pub async fn update_account(
         .unwrap_or(request_imap_cert.is_some());
 
     sqlx::query(
-        "UPDATE email_accounts SET display_name = COALESCE(?, display_name), imap_host = COALESCE(?, imap_host), imap_port = COALESCE(?, imap_port), imap_auth_scheme = COALESCE(?, imap_auth_scheme), smtp_host = COALESCE(?, smtp_host), smtp_port = COALESCE(?, smtp_port), smtp_auth_scheme = COALESCE(?, smtp_auth_scheme), credentials_encrypted = ?, body_sync_mode = COALESCE(?, body_sync_mode), sync_interval_secs = COALESCE(?, sync_interval_secs), sync_mode = COALESCE(?, sync_mode), carddav_url = COALESCE(?, carddav_url), caldav_url = COALESCE(?, caldav_url), caldav_accept_invalid_tls = COALESCE(?, caldav_accept_invalid_tls), imap_tls_cert = COALESCE(?, imap_tls_cert), smtp_tls_cert = COALESCE(?, smtp_tls_cert), pgp_key_id = COALESCE(?, pgp_key_id), sign_by_default = COALESCE(?, sign_by_default) WHERE id = ?",
+        "UPDATE email_accounts SET display_name = COALESCE(?, display_name), imap_host = COALESCE(?, imap_host), imap_port = COALESCE(?, imap_port), imap_auth_scheme = COALESCE(?, imap_auth_scheme), smtp_host = COALESCE(?, smtp_host), smtp_port = COALESCE(?, smtp_port), smtp_auth_scheme = COALESCE(?, smtp_auth_scheme), credentials_encrypted = ?, body_sync_mode = COALESCE(?, body_sync_mode), sync_interval_secs = COALESCE(?, sync_interval_secs), sync_mode = COALESCE(?, sync_mode), carddav_url = COALESCE(?, carddav_url), caldav_url = COALESCE(?, caldav_url), caldav_accept_invalid_tls = COALESCE(?, caldav_accept_invalid_tls), imap_tls_cert = COALESCE(?, imap_tls_cert), smtp_tls_cert = COALESCE(?, smtp_tls_cert), pgp_key_id = COALESCE(?, pgp_key_id), sign_by_default = COALESCE(?, sign_by_default), color = COALESCE(?, color) WHERE id = ?",
     )
     .bind(req.display_name.as_deref())
     .bind(req.imap_host.as_deref())
@@ -495,6 +528,7 @@ pub async fn update_account(
     .bind(persist_tls_exception.then_some(request_smtp_cert).flatten())
     .bind(req.pgp_key_id.as_deref())
     .bind(req.sign_by_default)
+    .bind(req.color.as_deref())
     .bind(&account_id)
     .execute(&user_db)
     .await?;
@@ -815,6 +849,40 @@ pub async fn delete_alias(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Persist a new sidebar order. The request must list every account exactly
+/// once; sort_order becomes the position in the list.
+pub async fn reorder_accounts(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserId>,
+    Json(req): Json<ReorderAccountsRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_db = state.user_db_pool.get(&user.0).await?;
+    let existing: Vec<String> = sqlx::query_scalar("SELECT id FROM email_accounts")
+        .fetch_all(&user_db)
+        .await?;
+    let requested: std::collections::HashSet<&str> =
+        req.account_ids.iter().map(String::as_str).collect();
+    if requested.len() != req.account_ids.len()
+        || existing.len() != req.account_ids.len()
+        || !existing.iter().all(|id| requested.contains(id.as_str()))
+    {
+        return Err(AppError::Unprocessable(
+            "account_ids must list every account exactly once".into(),
+        ));
+    }
+
+    let mut tx = user_db.begin().await?;
+    for (position, id) in req.account_ids.iter().enumerate() {
+        sqlx::query("UPDATE email_accounts SET sort_order = ? WHERE id = ?")
+            .bind(position as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 use std::sync::Arc;
@@ -825,7 +893,7 @@ async fn get_account_row(
 ) -> Result<AccountResponse, AppError> {
     let mut row: AccountResponse =
         sqlx::query_as(
-            "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default FROM email_accounts WHERE id = ?",
+            "SELECT id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme, smtp_host, smtp_port, smtp_auth_scheme, body_sync_mode, sync_interval_secs, sync_mode, provider_kind, created_at, carddav_url, caldav_url, caldav_accept_invalid_tls, pgp_key_id, sign_by_default, color, sort_order FROM email_accounts WHERE id = ?",
         )
         .bind(account_id)
         .fetch_optional(db)

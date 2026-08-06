@@ -34,6 +34,11 @@ export function accountColor(id: string): string {
   return ACCOUNT_PALETTE[hashName(id) % ACCOUNT_PALETTE.length]
 }
 
+// User-chosen account colour when set, else the stable hash-derived one.
+export function resolveAccountColor(account: { id: string; color?: string | null }): string {
+  return account.color ?? accountColor(account.id)
+}
+
 // Up to two initials for an account badge (first letters of the first two
 // words, else the first two characters).
 export function accountInitials(name: string): string {

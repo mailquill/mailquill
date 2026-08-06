@@ -45,6 +45,17 @@ pub fn opt_text(field: &str, value: &str, max: usize) -> Result<(), AppError> {
     no_control(field, value)
 }
 
+/// Hex colour in `#RRGGBB` form.
+pub fn hex_color(field: &str, value: &str) -> Result<(), AppError> {
+    let rest = value
+        .strip_prefix('#')
+        .filter(|rest| rest.len() == 6 && rest.chars().all(|c| c.is_ascii_hexdigit()));
+    if rest.is_none() {
+        return Err(reject(field, "must be a hex colour like #2563EB"));
+    }
+    Ok(())
+}
+
 /// Email address. Conservative structural check on the raw value: no surrounding
 /// or embedded whitespace, exactly one `@`, non-empty local part, a dotted domain
 /// using a restricted character set.

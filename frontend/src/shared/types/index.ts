@@ -18,6 +18,8 @@ export interface Account {
   caldav_accept_invalid_tls?: boolean
   pgp_key_id?: string | null
   sign_by_default: boolean
+  color?: string | null
+  sort_order: number
   contacts: ContactCapability | null
 }
 

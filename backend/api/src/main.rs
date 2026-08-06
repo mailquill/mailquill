@@ -200,6 +200,10 @@ async fn main() {
             post(routes::accounts::add_account).get(routes::accounts::list_accounts),
         )
         .route(
+            "/accounts/order",
+            put(routes::accounts::reorder_accounts),
+        )
+        .route(
             "/accounts/{id}",
             get(routes::accounts::get_account)
                 .put(routes::accounts::update_account)

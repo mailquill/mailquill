@@ -22,8 +22,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { formatDate } from '@/shared/lib/format'
-import { accountColor, accountInitials } from '@/shared/lib/avatar'
-import { useAccounts, useFolders, useSyncStatus } from '@/shared/hooks/useAccounts'
+import { accountInitials, resolveAccountColor } from '@/shared/lib/avatar'
+import { useAccounts, useFolders, useReorderAccounts, useSyncStatus } from '@/shared/hooks/useAccounts'
 import { useMoveMessage, useUnifiedCounts } from '@/shared/hooks/useMessages'
 import { useContactAccounts, useContactGroups, useContacts } from '@/shared/hooks/useContacts'
 import { useCalendars, useUpdateCalendar, useDeleteCalendar } from '@/shared/hooks/useCalendar'
@@ -187,13 +187,31 @@ function AccountStarredItem({ account }: { account: Account }) {
   )
 }
 
-function AccountSection({ account }: { account: Account }) {
+interface AccountSectionProps {
+  account: Account
+  dragging: boolean
+  dropTarget: boolean
+  onDragStart: () => void
+  onDragEnd: () => void
+  onDragOver: () => void
+  onDrop: () => void
+}
+
+function AccountSection({
+  account,
+  dragging,
+  dropTarget,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDrop,
+}: AccountSectionProps) {
   const { t } = useTranslation()
   const expanded = useUiPrefs((state) => !state.collapsedMailboxIds.includes(account.id))
   const toggleMailboxCollapsed = useUiPrefs((state) => state.toggleMailboxCollapsed)
   const { data: folders } = useFolders(account.id)
   const { data: syncStatus } = useSyncStatus(account.id)
-  const color = accountColor(account.id)
+  const color = resolveAccountColor(account)
   const inboxUnread =
     folders?.find((f) => f.folder_type === 'INBOX')?.unread_count ??
     folders?.reduce((s, f) => s + f.unread_count, 0) ??
@@ -203,7 +221,24 @@ function AccountSection({ account }: { account: Account }) {
     : t('syncMenu.never')
 
   return (
-    <div>
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={(event) => {
+        event.preventDefault()
+        onDragOver()
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        onDrop()
+      }}
+      className={cn(
+        'rounded-md transition-opacity',
+        dragging && 'opacity-40',
+        dropTarget && 'outline outline-1 outline-[#475569]',
+      )}
+    >
       <button
         onClick={() => toggleMailboxCollapsed(account.id)}
         title={t('sidebar.lastSync', { time: lastSynced })}
@@ -578,7 +613,21 @@ export function Sidebar({ onCompose }: SidebarProps) {
   const { t } = useTranslation()
   const { pathname } = useLocation()
   const { data: accounts } = useAccounts()
+  const reorderAccounts = useReorderAccounts()
+  const [draggedAccountId, setDraggedAccountId] = useState<string | null>(null)
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const sidebarWidth = useUiPrefs((s) => s.sidebarWidth)
+
+  function dropOnAccount(targetId: string) {
+    setDropTargetId(null)
+    if (!draggedAccountId || !accounts || draggedAccountId === targetId) return
+    const ids = accounts.map((a) => a.id)
+    const from = ids.indexOf(draggedAccountId)
+    const to = ids.indexOf(targetId)
+    if (from < 0 || to < 0) return
+    ids.splice(to, 0, ...ids.splice(from, 1))
+    reorderAccounts.mutate(ids)
+  }
   const module: Module = pathname.startsWith('/mail/contacts')
     ? 'contacts'
     : pathname.startsWith('/mail/calendar')
@@ -604,7 +653,19 @@ export function Sidebar({ onCompose }: SidebarProps) {
           <nav className="flex-1 space-y-0.5 overflow-y-auto border-t border-[#1e293b] px-2 pb-3 pt-1">
             <div className={CAP}>{t('sidebar.accounts')}</div>
             {accounts?.map((account) => (
-              <AccountSection key={account.id} account={account} />
+              <AccountSection
+                key={account.id}
+                account={account}
+                dragging={draggedAccountId === account.id}
+                dropTarget={dropTargetId === account.id && draggedAccountId !== account.id}
+                onDragStart={() => setDraggedAccountId(account.id)}
+                onDragEnd={() => {
+                  setDraggedAccountId(null)
+                  setDropTargetId(null)
+                }}
+                onDragOver={() => setDropTargetId(account.id)}
+                onDrop={() => dropOnAccount(account.id)}
+              />
             ))}
             {!accounts?.length && <p className="px-3 py-2 text-xs text-[#64748b]">{t('sidebar.noAccounts')}</p>}
           </nav>

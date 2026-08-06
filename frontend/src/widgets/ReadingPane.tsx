@@ -28,6 +28,7 @@ import { cn } from '@/shared/lib/utils'
 import { Button } from '@/shared/components/ui/button'
 import { formatDate, parseFromAddr } from '@/shared/lib/format'
 import { accountColor, accountInitials } from '@/shared/lib/avatar'
+import { useAccountColorLookup } from '@/shared/hooks/useAccounts'
 import {
   messageHeaders,
   messageHtml,
@@ -108,6 +109,7 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   const markThreadRead = useMarkThreadRead()
   const notSpam = useNotSpamMessage()
   const { openCompose } = useOutletContext<MailOutletContext>()
+  const colorFor = useAccountColorLookup()
   const messages = useMemo(() => data?.messages ?? [], [data?.messages])
   const lastMessageId = messages.at(-1)?.id ?? ''
   const { data: lastMessageDetail, isLoading: isLastMessageLoading } = useMessage(lastMessageId)
@@ -135,7 +137,7 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   }
 
   const fromEmail = parseFromAddr(firstMessage.from_addr).email
-  const color = accountColor(firstMessage.account_id)
+  const color = colorFor(firstMessage.account_id)
   const lastMessage = messages.at(-1)!
   const lastMessageSource = lastMessageDetail ?? lastMessage
   const lastMessageBodyReady = hasCompleteBody(lastMessageDetail)
@@ -363,6 +365,7 @@ function MessageCard({
 }) {
   const { t } = useTranslation()
   const { openCompose } = useOutletContext<MailOutletContext>()
+  const colorFor = useAccountColorLookup()
   const [expanded, setExpanded] = useState(defaultExpanded)
   const [view, setView] = useState<SourceView>('html')
   const sender = parseFromAddr(message.from_addr)
@@ -433,7 +436,7 @@ function MessageCard({
   }, [expanded, inlineAttachments])
   const bodyLoaded = Boolean(displayed.body_html || displayed.body_text || displayed.snippet)
   const offlineMissing = !navigator.onLine && displayed.body_available === false
-  const color = accountColor(message.account_id)
+  const color = colorFor(message.account_id)
   const isSpam = isSpamMessage(displayed)
 
   useEffect(() => {

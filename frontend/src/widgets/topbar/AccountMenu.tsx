@@ -7,7 +7,7 @@ import { useClickOutside } from '@/shared/hooks/useClickOutside'
 import { useAccounts } from '@/shared/hooks/useAccounts'
 import { useAuthStore } from '@/app/store'
 import { apiPost } from '@/shared/api'
-import { accountColor, accountInitials } from '@/shared/lib/avatar'
+import { accountInitials, resolveAccountColor } from '@/shared/lib/avatar'
 import type { Account } from '@/shared/types'
 
 const QUOTA_GB = 15
@@ -104,7 +104,7 @@ export function AccountMenu({ onSettings }: AccountMenuProps) {
             <div className="flex max-h-[232px] flex-col gap-3 overflow-y-auto">
               {accounts.map((a) => {
                 const s = storageFor(a)
-                const color = accountColor(a.id)
+                const color = resolveAccountColor(a)
                 return (
                   <div key={a.id} className="flex items-center gap-3">
                     <span

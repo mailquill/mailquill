@@ -305,6 +305,7 @@ export const de = {
     addAccount: 'Konto hinzufügen',
     adding: 'Wird hinzugefügt…',
     addFailed: 'Konto-Einrichtung fehlgeschlagen. Server-Daten und Zugangsdaten prüfen.',
+    accountExists: 'Für diese E-Mail-Adresse existiert bereits ein Konto.',
     tlsUntrusted: 'Server-Zertifikat nicht vertrauenswürdig',
     tlsUntrustedSub:
       'Das Zertifikat von {{host}}:{{port}} konnte nicht verifiziert werden (z.B. selbst-signiert oder für einen anderen Hostnamen ausgestellt). Nur vertrauen, wenn du diesem Server vertraust — die Ausnahme gilt dauerhaft für dieses Konto.',

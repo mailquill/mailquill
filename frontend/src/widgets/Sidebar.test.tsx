@@ -16,6 +16,7 @@ vi.mock('@/shared/hooks/useAccounts', () => ({
   useAccounts: () => ({ data: sidebarMocks.accounts }),
   useFolders: (accountId: string) => ({ data: sidebarMocks.folders[accountId] ?? [] }),
   useSyncStatus: () => ({ data: undefined }),
+  useReorderAccounts: () => ({ mutate: vi.fn() }),
 }))
 
 vi.mock('@/shared/hooks/useMessages', () => ({

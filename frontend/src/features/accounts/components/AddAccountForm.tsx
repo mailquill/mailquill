@@ -156,6 +156,7 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
         smtp_tls_cert: trustCert && smtpHost === trustCert.host ? trustCert.der_base64 : undefined,
         tls_decision: tlsDecision,
         contacts_enabled: contactsEnabled,
+        color: data.color,
       },
       { onSuccess: setCreated },
     )
@@ -465,10 +466,16 @@ export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
 
           {createAccount.error && !tlsCert ? (
             <p className="mt-3 text-[12.5px] text-destructive">
-              {t('settings.addFailed')}
-              {createAccount.error instanceof ApiError && createAccount.error.detail ? (
-                <span className="mt-1 block font-mono text-[11.5px] opacity-80">{createAccount.error.detail}</span>
-              ) : null}
+              {createAccount.error instanceof ApiError && createAccount.error.status === 409 ? (
+                t('settings.accountExists')
+              ) : (
+                <>
+                  {t('settings.addFailed')}
+                  {createAccount.error instanceof ApiError && createAccount.error.detail ? (
+                    <span className="mt-1 block font-mono text-[11.5px] opacity-80">{createAccount.error.detail}</span>
+                  ) : null}
+                </>
+              )}
             </p>
           ) : null}
 

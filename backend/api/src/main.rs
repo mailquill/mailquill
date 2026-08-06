@@ -20,7 +20,7 @@ use std::{
     sync::Arc,
 };
 use tower_http::{set_header::SetResponseHeaderLayer, trace::TraceLayer};
-use web_push::IsahcWebPushClient;
+use web_push::HyperWebPushClient;
 
 use api::state::{AppState, VapidConfig};
 
@@ -144,13 +144,7 @@ async fn main() {
     let vapid = load_vapid_config(&settings);
     let web_push_client = vapid
         .as_ref()
-        .and_then(|_| match IsahcWebPushClient::new() {
-            Ok(client) => Some(Arc::new(client)),
-            Err(e) => {
-                tracing::warn!("web push client disabled: {e}");
-                None
-            }
-        });
+        .map(|_| Arc::new(HyperWebPushClient::new()));
 
     let pkce_store = Arc::new(routes::oauth::new_pkce_store());
     let (events, _) = tokio::sync::broadcast::channel(256);

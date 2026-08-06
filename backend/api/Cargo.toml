@@ -9,55 +9,57 @@ name = "mailquill"
 path = "src/main.rs"
 
 [dependencies]
-mailquill-core = { path = "../core" }
-db = { path = "../db" }
+mailquill-core = { workspace = true }
+db = { workspace = true }
 mail-sync = { path = "../mail-sync" }
-phishing = { path = "../phishing" }
+phishing = { workspace = true }
 smtp = { path = "../smtp" }
 contact-sync = { path = "../contact-sync" }
-calendar-sync = { path = "../calendar-sync" }
+calendar-sync = { workspace = true }
 axum = { version = "0.8", features = ["macros"] }
 rust-embed = { version = "8", features = ["axum-ex"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "set-header"] }
-jsonwebtoken = "9"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
+tower-http = { version = "0.7", features = ["cors", "trace", "set-header"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true }
 mime_guess = "2"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "chrono", "uuid"] }
+sqlx = { workspace = true, features = ["macros", "migrate", "chrono", "uuid"] }
 argon2 = "0.5"
-chrono = { version = "0.4", features = ["serde"] }
-oauth2 = "4"
-rand = "0.8"
-hex = "0.4"
+chrono = { workspace = true }
+oauth2 = "5"
+rand = { workspace = true }
+hex = { workspace = true }
 strsim = "0.11"
-thiserror = "2"
-async-trait = "0.1"
-urlencoding = "2"
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+urlencoding = { workspace = true }
 figment = { version = "0.10", features = ["toml", "yaml", "env"] }
-web-push = "0.11"
-p256 = "0.13"
+web-push = { version = "0.11", default-features = false, features = ["hyper-client"] }
+p256 = "0.14"
 clap = { version = "4", features = ["derive"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-futures = "0.3"
-tokio-native-tls = "0.3"
-native-tls = "0.2"
-base64 = "0.22"
-bytes = "1"
-hickory-resolver = "0.24"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-quick-xml = "0.37"
-sha2 = "0.10"
-sha1 = "0.10"
+futures = { workspace = true }
+tokio-native-tls = { workspace = true }
+native-tls = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+hickory-resolver = "0.26"
+reqwest = { workspace = true, features = ["json", "form"] }
+quick-xml = { workspace = true }
+sha2 = { workspace = true }
+sha1 = "0.11"
 # Only used to forward the `vendored` feature to the transitive OpenSSL
-# dependency (web-push → ece/isahc) for targets without system OpenSSL.
+# dependency (web-push → ece) for targets without system OpenSSL.
 openssl = { version = "0.10", optional = true }
 
 [features]
 # Compile OpenSSL from source instead of linking the system library.
 # Used by the release workflow for the macOS and Windows binaries.
 vendored-openssl = ["dep:openssl", "openssl/vendored"]
+
+[package.metadata.cargo-machete]
+ignored = ["openssl"]

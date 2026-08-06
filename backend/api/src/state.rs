@@ -5,7 +5,7 @@ use mailquill_core::{blob::BlobStore, crypto::CredentialKey, jwt::JwtKey};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use web_push::IsahcWebPushClient;
+use web_push::HyperWebPushClient;
 
 #[derive(Clone)]
 pub struct VapidConfig {
@@ -44,7 +44,7 @@ pub struct AppState {
     /// Web Push VAPID configuration, present only when env vars are configured.
     pub vapid: Option<Arc<VapidConfig>>,
     /// Reusable Web Push HTTP client.
-    pub web_push_client: Option<Arc<IsahcWebPushClient>>,
+    pub web_push_client: Option<Arc<HyperWebPushClient>>,
     /// Broadcast of new-message events to connected SSE clients.
     pub events: broadcast::Sender<UserEvent>,
     /// Whether approved remote email images should be fetched through the backend.

@@ -5,29 +5,19 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.8", features = ["sqlite", "postgres", "any", "runtime-tokio", "macros", "uuid", "chrono"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
-tracing = "0.1"
-argon2 = "0.5"
-lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
-oauth2 = "4"
-icalendar = "0.15"
-object_store = { version = "0.11", features = ["aws"] }
-aes-gcm = "0.10"
+tokio = { workspace = true }
+sqlx = { workspace = true, features = ["postgres", "any", "macros", "uuid", "chrono"] }
+serde = { workspace = true }
+object_store = { version = "0.14", features = ["aws"] }
+aes-gcm = "0.11"
 zstd = "0.13"
-sha2 = "0.10"
-async-trait = "0.1"
-bytes = "1"
-chrono = { version = "0.4", features = ["serde"] }
-hex = "0.4"
-rand = "0.8"
-base64 = "0.22"
-thiserror = "2"
-jsonwebtoken = "9"
-mailparse = "0.15"
-strsim = "0.11"
-idna = "1"
-scraper = "0.22"
+sha2 = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+jsonwebtoken = "11"
+mailparse = { workspace = true }

@@ -5,15 +5,6 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-mailquill-core = { path = "../core" }
-db = { path = "../db" }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls", "builder"] }
-mailparse = "0.15"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros"] }
-serde = { version = "1", features = ["derive"] }
-thiserror = "2"
-base64 = "0.22"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
+lettre = { workspace = true, features = ["builder"] }
+thiserror = { workspace = true }
+base64 = { workspace = true }

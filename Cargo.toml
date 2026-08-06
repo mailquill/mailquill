@@ -15,6 +15,51 @@ resolver = "2"
 
 default-members = ["backend/api"]
 
+# Single source of truth for versions and base features of dependencies used
+# by more than one workspace crate. Members inherit via `workspace = true` and
+# may add (but not remove) features.
+[workspace.dependencies]
+# Internal crates
+mailquill-core = { path = "backend/core" }
+db = { path = "backend/db" }
+phishing = { path = "backend/phishing" }
+calendar-sync = { path = "backend/calendar-sync" }
+
+# Async runtime — the union of features actually used across the workspace.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "sync", "time", "io-util"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Database
+sqlx = { version = "0.9", features = ["sqlite", "runtime-tokio"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots"] }
+quick-xml = "0.41"
+url = "2"
+urlencoding = "2"
+
+# Mail
+mailparse = "0.16"
+lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+
+# Misc shared
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tracing = "0.1"
+base64 = "0.23"
+sha2 = "0.11"
+rand = "0.10"
+hex = "0.4"
+bytes = "1"
+
 [profile.release]
 strip = true
 lto = true

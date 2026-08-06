@@ -6,14 +6,14 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [dependencies]
-db = { path = "../db" }
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros"] }
-tokio = { version = "1", features = ["full"] }
-rand = "0.8"
+db = { workspace = true }
+sqlx = { workspace = true, features = ["macros"] }
+tokio = { workspace = true }
+rand = { workspace = true }
 anyhow = "1"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "mail_list"

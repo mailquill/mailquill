@@ -96,8 +96,6 @@ sudo install -Dm755 mailquill /usr/local/bin/mailquill
 sudo install -Dm644 brands.json /usr/local/share/mailquill/brands.json
 ```
 
-While the repository is private, download the asset with
-`gh release download --pattern 'mailquill-linux-x86_64.tar.gz'` instead.
 To compile the binary yourself, see [Build from source](#build-from-source).
 
 Releases also ship native binaries for macOS (`mailquill-macos-aarch64.tar.gz`,

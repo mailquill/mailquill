@@ -3,8 +3,8 @@ name: Release
 # Builds the multi-arch container image (deploy/Dockerfile) when a GitHub
 # release is published and pushes it to ghcr.io/<owner>/<repo>.
 #
-# Each platform builds in a parallel matrix job (arm64 runs under QEMU
-# emulation, which is slow — the GitHub Actions cache softens repeat builds).
+# Each platform builds in a parallel matrix job on its native runner
+# (ubuntu-24.04-arm for arm64 — free for public repositories).
 # A final job stitches the per-platform digests into one manifest list, tagged
 # with the release semver (1.2.3 / 1.2 / 1), the raw tag, and `latest`.
 #
@@ -26,16 +26,18 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.platform }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - linux/amd64
-          - linux/arm64
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Derive platform slug
         run: |
@@ -44,9 +46,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

@@ -95,6 +95,39 @@ package is not public, authenticate first with `docker login ghcr.io`.
 When serving behind a reverse proxy, set `APP_BASE_URL` in `.env` to the
 public URL (required for OAuth redirects).
 
+### Docker Compose (build locally)
+
+If you prefer building the image yourself — unreleased changes, a fork, or an
+architecture without a prebuilt image — the repository ships a compose file
+with the build context already wired up (`deploy/docker-compose.yml`):
+
+```bash
+git clone https://github.com/mailquill/mailquill.git
+cd mailquill/deploy
+
+# Build the image (multi-stage: frontend via Bun, static musl binary via Rust)
+docker compose build
+
+# Generate the two required secrets into .env using the image you just built
+docker run --rm ghcr.io/mailquill/mailquill:latest secrets > .env
+
+# Data directory — the container runs as UID 1000
+mkdir data && sudo chown 1000:1000 data
+
+docker compose up -d
+curl http://localhost:8080/api/health   # → {"status":"ok"}
+```
+
+To update, rebuild from the current checkout and restart:
+
+```bash
+git pull && docker compose build && docker compose up -d
+```
+
+No local toolchain is needed — Bun and the Rust cross-toolchain live inside
+the build stages. The first build takes a while (release-compiles the whole
+workspace); later builds reuse Docker layer caching.
+
 ### Direct install with systemd
 
 Every GitHub release ships prebuilt static Linux binaries (`x86_64` and

@@ -499,7 +499,7 @@ export function MessageList({
                 <MessageRow
                   message={msg}
                   index={item.index}
-                  isActive={msg.id === activeId}
+                  isActive={!!activeId && (msg.id === activeId || msg.thread_id === activeId)}
                   checked={checked.has(msg.id)}
                   onClick={() => onSelect(msg)}
                   onToggleCheck={toggleCheck}

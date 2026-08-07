@@ -1,22 +1,26 @@
 import { useMemo } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { MessageList } from '@/widgets/MessageList'
+import { ThreadDetail } from '@/widgets/ReadingPane'
 import { useSearchMessages } from '@/shared/hooks/useMessages'
 import type { Message } from '@/shared/types'
 
 export function SearchPage() {
   const { t } = useTranslation()
-  const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const query = searchParams.get('q') ?? ''
+  // The opened thread lives in the URL alongside the search, so selecting a
+  // result keeps the query and filters intact (and back/forward works).
+  const threadId = searchParams.get('thread') ?? ''
 
-  // All query params except the free-text `q` are passed through as filters,
-  // so structured filters set from the top-bar funnel flow into the results.
+  // All query params except the free-text `q` and the opened `thread` are
+  // passed through as filters, so structured filters set from the top-bar
+  // funnel flow into the results.
   const filters = useMemo(() => {
     const out: Record<string, string> = {}
     searchParams.forEach((value, key) => {
-      if (key !== 'q' && value.trim()) out[key] = value
+      if (key !== 'q' && key !== 'thread' && value.trim()) out[key] = value
     })
     return out
   }, [searchParams])
@@ -25,11 +29,16 @@ export function SearchPage() {
   const messages = data?.messages ?? []
 
   function handleSelect(message: Message) {
-    // The folder view resolves by full_path, not the internal folder id.
-    const folder = message.folder_path
-    if (message.thread_id && folder) {
-      navigate(`/mail/${message.account_id}/${encodeURIComponent(folder)}/${message.thread_id}`)
-    }
+    if (!message.thread_id) return
+    const next = new URLSearchParams(searchParams)
+    next.set('thread', message.thread_id)
+    setSearchParams(next)
+  }
+
+  function closeThread() {
+    const next = new URLSearchParams(searchParams)
+    next.delete('thread')
+    setSearchParams(next)
   }
 
   return (
@@ -41,6 +50,7 @@ export function SearchPage() {
         </header>
         <MessageList
           messages={messages}
+          activeId={threadId}
           onSelect={handleSelect}
           loading={isLoading}
           onLoadMore={fetchNextPage}
@@ -48,9 +58,15 @@ export function SearchPage() {
           loadingMore={isFetchingNextPage}
         />
       </div>
-      <div className="flex h-full items-center justify-center bg-background p-8 text-center text-sm text-muted-foreground">
-        {t('filter.selectResult')}
-      </div>
+      {threadId ? (
+        <div className="min-w-0">
+          <ThreadDetail threadId={threadId} onThreadGone={closeThread} />
+        </div>
+      ) : (
+        <div className="flex h-full items-center justify-center bg-background p-8 text-center text-sm text-muted-foreground">
+          {t('filter.selectResult')}
+        </div>
+      )}
     </section>
   )
 }

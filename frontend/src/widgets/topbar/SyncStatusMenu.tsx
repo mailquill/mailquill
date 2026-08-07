@@ -119,10 +119,15 @@ export function SyncStatusMenu() {
             <span className="text-[15px] font-bold tracking-tight text-foreground">{t('syncMenu.title')}</span>
             <button
               onClick={refreshAll}
-              disabled={triggerSync.isPending || anySyncing}
+              disabled={triggerSync.isPending || overallPhase === 'syncing'}
               className="ml-auto inline-flex items-center gap-1.5 text-[12px] font-semibold text-[#2563eb] disabled:text-muted-foreground"
             >
-              <RefreshCw className={cn('size-3.5', (triggerSync.isPending || anySyncing) && 'animate-spin')} />
+              <RefreshCw
+                className={cn(
+                  'size-3.5',
+                  (triggerSync.isPending || overallPhase === 'syncing') && 'animate-spin',
+                )}
+              />
               {t('syncMenu.refreshNow')}
             </button>
           </div>

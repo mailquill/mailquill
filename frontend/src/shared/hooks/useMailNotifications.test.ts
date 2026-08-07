@@ -15,13 +15,16 @@ vi.mock('@/shared/hooks/usePushNotifications', () => ({
 
 class FakeEventSource {
   static latest: FakeEventSource | null = null
+  static created = 0
   private readonly listeners = new Map<string, EventListener>()
   readonly url: string
   onerror: (() => void) | null = null
+  onopen: (() => void) | null = null
 
   constructor(url: string) {
     this.url = url
     FakeEventSource.latest = this
+    FakeEventSource.created += 1
   }
 
   addEventListener(type: string, listener: EventListener) {
@@ -46,6 +49,7 @@ function Wrapper({ children }: PropsWithChildren) {
 
 beforeEach(() => {
   FakeEventSource.latest = null
+  FakeEventSource.created = 0
   vi.stubGlobal('EventSource', FakeEventSource)
 })
 
@@ -107,5 +111,64 @@ describe('parseSendStatus', () => {
     expect(onSendStatus).toHaveBeenCalledWith(
       expect.objectContaining({ send_id: 'send-3', status: 'sent', subject: 'Invoice' }),
     )
+  })
+})
+
+describe('useMailNotifications connection lifecycle', () => {
+  it('keeps one connection across rerenders with changing callbacks', async () => {
+    const { rerender } = renderHook(({ cb }) => useMailNotifications(false, cb), {
+      wrapper: Wrapper,
+      initialProps: { cb: vi.fn() },
+    })
+
+    await waitFor(() => expect(FakeEventSource.latest).not.toBeNull())
+    const first = FakeEventSource.latest
+    rerender({ cb: vi.fn() })
+    rerender({ cb: vi.fn() })
+
+    expect(FakeEventSource.created).toBe(1)
+    expect(FakeEventSource.latest).toBe(first)
+  })
+
+  it('refreshes mail lists after a reconnect', async () => {
+    vi.useFakeTimers()
+    try {
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+      const wrapper = ({ children }: PropsWithChildren) =>
+        createElement(
+          MemoryRouter,
+          null,
+          createElement(QueryClientProvider, { client: queryClient }, children),
+        )
+      renderHook(() => useMailNotifications(false), { wrapper })
+
+      // Flush the async connect(), then the first open — no catch-up refresh.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(FakeEventSource.latest).not.toBeNull()
+      act(() => FakeEventSource.latest?.onopen?.())
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600)
+      })
+      expect(invalidate).not.toHaveBeenCalled()
+
+      // Drop the connection; the retry reconnects after 5s and the reopen
+      // reconciles the mail lists once the 500ms debounce elapses.
+      act(() => FakeEventSource.latest?.onerror?.())
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+      expect(FakeEventSource.created).toBe(2)
+      act(() => FakeEventSource.latest?.onopen?.())
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600)
+      })
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['unified'] })
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['folder-messages'] })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

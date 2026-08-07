@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { ensureFreshAccessToken } from '@/shared/api'
@@ -52,6 +52,19 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
+  // The listeners read these through refs so the connection effect never
+  // re-runs for them: `navigate` gets a new identity on every route change,
+  // and tearing the EventSource down per navigation silently drops any events
+  // broadcast during the reconnect window — the channel has no replay.
+  const enabledRef = useRef(enabled)
+  const navigateRef = useRef(navigate)
+  const onSendStatusRef = useRef(onSendStatus)
+  useEffect(() => {
+    enabledRef.current = enabled
+    navigateRef.current = navigate
+    onSendStatusRef.current = onSendStatus
+  })
+
   useEffect(() => {
     if (typeof EventSource === 'undefined') return
 
@@ -59,6 +72,7 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
     let retry: ReturnType<typeof setTimeout> | undefined
     let refresh: ReturnType<typeof setTimeout> | undefined
     let closed = false
+    let hadConnection = false
 
     const scheduleMailRefresh = () => {
       if (refresh) clearTimeout(refresh)
@@ -80,11 +94,21 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
       }
       source = new EventSource(`/api/events?token=${encodeURIComponent(token)}`)
 
+      source.onopen = () => {
+        // Anything broadcast while the connection was down is lost for good,
+        // so reconcile the mail lists and sync states once per reconnect.
+        if (hadConnection) {
+          scheduleMailRefresh()
+          queryClient.invalidateQueries({ queryKey: ['sync-status'] })
+        }
+        hadConnection = true
+      }
+
       source.addEventListener('message', (event) => {
         scheduleMailRefresh()
 
         // The SW already notifies when web push is active; avoid duplicates.
-        if (!enabled) return
+        if (!enabledRef.current) return
         if (getStoredPushSubscriptionId()) return
         if (document.visibilityState === 'visible') return
         if (Notification.permission !== 'granted') return
@@ -102,7 +126,7 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
         })
         n.onclick = () => {
           window.focus()
-          if (data.message_url) navigate(data.message_url)
+          if (data.message_url) navigateRef.current(data.message_url)
           n.close()
         }
       })
@@ -135,7 +159,7 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
       source.addEventListener('send', (event) => {
         const status = parseSendStatus((event as MessageEvent).data)
         if (!status) return
-        onSendStatus?.(status)
+        onSendStatusRef.current?.(status)
         if (status.status === 'sent') scheduleMailRefresh()
       })
 
@@ -156,5 +180,5 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
       if (refresh) clearTimeout(refresh)
       source?.close()
     }
-  }, [enabled, navigate, onSendStatus, queryClient])
+  }, [queryClient])
 }

@@ -1159,8 +1159,9 @@ async fn reconcile_flags(
         .into_iter()
         .map(|(uid, seen, flagged, deleted)| (uid, (seen, flagged, deleted)))
         .collect();
+        let expunged = expunged_uids(&flags, &stored_flags);
         let changed_flags = changed_message_flags(flags, &stored_flags);
-        if changed_flags.is_empty() {
+        if changed_flags.is_empty() && expunged.is_empty() {
             if end >= up_to_uid {
                 break;
             }
@@ -1183,6 +1184,13 @@ async fn reconcile_flags(
             .execute(&mut *tx)
             .await?;
         }
+        for uid in expunged {
+            sqlx::query("UPDATE messages SET is_deleted = 1 WHERE folder_id = ? AND uid = ?")
+                .bind(folder_id)
+                .bind(uid)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         if end >= up_to_uid {
             break;
@@ -1190,6 +1198,26 @@ async fn reconcile_flags(
         start = end + 1;
     }
     Ok(())
+}
+
+/// Locally live uids the server no longer returned for a fully fetched range.
+///
+/// A successful flag fetch is authoritative for its uid range: IMAP omits
+/// expunged uids from the response, the API providers report vanished messages
+/// as deleted. A live local row the server did not return is therefore gone
+/// remotely and would otherwise stay live forever (it also skews the
+/// synced/total progress counters).
+fn expunged_uids(
+    server_flags: &[(u32, bool, bool, bool)],
+    stored_flags: &HashMap<i64, (bool, bool, bool)>,
+) -> Vec<i64> {
+    let server_uids: std::collections::HashSet<i64> =
+        server_flags.iter().map(|(uid, ..)| i64::from(*uid)).collect();
+    stored_flags
+        .iter()
+        .filter(|(uid, (_, _, deleted))| !deleted && !server_uids.contains(uid))
+        .map(|(uid, _)| *uid)
+        .collect()
 }
 
 fn changed_message_flags(
@@ -1485,6 +1513,19 @@ mod tests {
         let changed = changed_message_flags(vec![(1, true, false, false)], &stored);
 
         assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn expunge_detection_marks_only_live_rows_missing_from_the_response() {
+        let stored = HashMap::from([
+            (1, (true, false, false)),  // still on the server
+            (2, (false, false, false)), // expunged remotely
+            (3, (true, false, true)),   // already deleted locally — leave alone
+        ]);
+
+        let expunged = super::expunged_uids(&[(1, true, false, false)], &stored);
+
+        assert_eq!(expunged, vec![2]);
     }
 
     #[test]

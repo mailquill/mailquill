@@ -199,8 +199,15 @@ impl MailProvider for OutlookProvider {
                     // API providers move atomically; no IMAP-style \Deleted ghost.
                     out.push((uid, seen, flagged, false));
                 }
-                // Message gone (deleted/moved on the server) — drop the mapping.
-                Err(_) => self.ids.remove(folder, uid).await?,
+                // Message gone (deleted/moved on the server) — report it deleted
+                // and drop the mapping.
+                Err(ProviderError::Http { status: 404, .. }) => {
+                    out.push((uid, false, false, true));
+                    self.ids.remove(folder, uid).await?;
+                }
+                // Authentication, transport, and provider failures are not
+                // evidence that the message was deleted.
+                Err(error) => return Err(error),
             }
         }
         Ok(out)

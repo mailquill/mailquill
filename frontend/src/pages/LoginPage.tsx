@@ -14,6 +14,7 @@ import { usePublicConfig } from '@/shared/hooks/useSettings'
 const schema = z.object({
   email: z.string().email('auth.emailInvalid'),
   password: z.string().min(1, 'auth.passwordRequired'),
+  remember: z.boolean(),
 })
 type FormData = z.infer<typeof schema>
 
@@ -25,6 +26,7 @@ export function LoginPage() {
 
   const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
     resolver: zodResolver(schema),
+    defaultValues: { remember: false },
   })
 
   const loginMutation = useMutation({
@@ -56,6 +58,11 @@ export function LoginPage() {
             <Input id="password" type="password" autoComplete="current-password" {...register('password')} />
             {errors.password && <p className="text-xs text-destructive">{t(errors.password.message ?? '')}</p>}
           </div>
+
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-secondary-foreground">
+            <input type="checkbox" className="size-4 accent-primary" {...register('remember')} />
+            {t('auth.rememberMe')}
+          </label>
 
           {loginMutation.error && (
             <p className="text-xs text-destructive">

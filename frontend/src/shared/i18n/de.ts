@@ -30,6 +30,7 @@ export const de = {
     email: 'E-Mail-Adresse',
     password: 'Passwort',
     confirmPassword: 'Passwort bestätigen',
+    rememberMe: 'Angemeldet bleiben',
     invalidCredentials: 'Ungültige E-Mail oder falsches Passwort',
     loginFailed: 'Anmeldung fehlgeschlagen. Bitte erneut versuchen.',
     noAccount: 'Kein Konto?',

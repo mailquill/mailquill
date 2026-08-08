@@ -26,6 +26,17 @@ pub struct RegisterRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    email: String,
+    password: String,
+    /// "Remember me": issues a long-lived, browser-persistent refresh cookie
+    /// instead of a session-scoped one. Defaults to false so an unchecked box
+    /// doesn't outlive the browser session.
+    #[serde(default)]
+    remember: bool,
+}
+
 #[derive(Serialize)]
 pub struct AuthResponse {
     access_token: String,
@@ -75,7 +86,9 @@ pub async fn register(
         .issue_access_token(&user_id)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let (_rt, cookie) = issue_refresh_token(&state, &user_id).await?;
+    // No "remember me" checkbox at registration — a brand new account starts
+    // out remembered, same as before this option existed.
+    let (_rt, cookie) = issue_refresh_token(&state, &user_id, true).await?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Set-Cookie", cookie.parse().unwrap());
@@ -91,7 +104,7 @@ pub async fn register(
 
 pub async fn login(
     State(state): State<AppState>,
-    Json(req): Json<RegisterRequest>,
+    Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let email = req.email.to_lowercase();
 
@@ -113,7 +126,7 @@ pub async fn login(
         .issue_access_token(&user_id)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let (_rt, cookie) = issue_refresh_token(&state, &user_id).await?;
+    let (_rt, cookie) = issue_refresh_token(&state, &user_id, req.remember).await?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Set-Cookie", cookie.parse().unwrap());
@@ -133,14 +146,15 @@ pub async fn refresh(
     let raw = cookie_from_request(&req, "refresh_token").ok_or(AppError::Unauthorized)?;
     let token_hash = hash_token(&raw);
 
-    let row: Option<(String, String, bool, bool)> = sqlx::query_as(
-        "SELECT id, user_id, (revoked = 1), (replaced_at IS NOT NULL AND replaced_at > datetime('now', '-60 seconds')) FROM refresh_tokens WHERE token_hash = ? AND expires_at > datetime('now')",
+    let row: Option<(String, String, bool, bool, bool)> = sqlx::query_as(
+        "SELECT id, user_id, (revoked = 1), (replaced_at IS NOT NULL AND replaced_at > datetime('now', '-60 seconds')), remember FROM refresh_tokens WHERE token_hash = ? AND expires_at > datetime('now')",
     )
     .bind(&token_hash)
     .fetch_optional(&state.app_db)
     .await?;
 
-    let (token_id, user_id, revoked, recently_replaced) = row.ok_or(AppError::Unauthorized)?;
+    let (token_id, user_id, revoked, recently_replaced, remember) =
+        row.ok_or(AppError::Unauthorized)?;
 
     if revoked {
         // Reuse grace: a token rotated moments ago is a benign concurrent or
@@ -166,7 +180,11 @@ pub async fn refresh(
         .issue_access_token(&user_id)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let (_rt, cookie) = issue_refresh_token(&state, &user_id).await?;
+    // Sliding window: rotation carries the original login's remember choice
+    // forward, so a remembered session keeps renewing at the long TTL for as
+    // long as the user stays active, and an unremembered one keeps renewing
+    // at the short one.
+    let (_rt, cookie) = issue_refresh_token(&state, &user_id, remember).await?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Set-Cookie", cookie.parse().unwrap());
@@ -233,24 +251,66 @@ fn cookie_from_request(req: &Request, name: &str) -> Option<String> {
         })
 }
 
+/// Sliding-window lifetime for a "remember me" session. Comfortably above the
+/// 7-day minimum so an active user is never forced to re-authenticate.
+const REMEMBER_TTL: chrono::Duration = chrono::Duration::days(30);
+/// Lifetime for a session that wasn't remembered. The cookie itself is
+/// browser-session-scoped (no Max-Age) and disappears on browser close; this
+/// is a server-side backstop for browsers that restore session cookies
+/// across restarts.
+const SESSION_TTL: chrono::Duration = chrono::Duration::hours(24);
+
 async fn issue_refresh_token(
     state: &AppState,
     user_id: &str,
+    remember: bool,
 ) -> Result<(String, String), AppError> {
     let token = generate_token();
     let token_hash = hash_token(&token);
-    let expires_at = (Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+    let ttl = if remember { REMEMBER_TTL } else { SESSION_TTL };
+    let expires_at = (Utc::now() + ttl).to_rfc3339();
 
-    sqlx::query("INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)")
-        .bind(user_id)
-        .bind(&token_hash)
-        .bind(&expires_at)
-        .execute(&state.app_db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, remember) VALUES (?, ?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(&token_hash)
+    .bind(&expires_at)
+    .bind(remember)
+    .execute(&state.app_db)
+    .await?;
 
-    let cookie = format!(
-        "refresh_token={}; HttpOnly; SameSite=Strict; Path=/api/auth/refresh; Max-Age=2592000",
-        token
-    );
+    let cookie = refresh_cookie(&token, remember);
     Ok((token, cookie))
+}
+
+/// Build the `Set-Cookie` value for a refresh token. Remembered sessions get
+/// an explicit `Max-Age` so the cookie survives a browser restart;
+/// unremembered ones omit it so the browser drops the cookie on close.
+fn refresh_cookie(token: &str, remember: bool) -> String {
+    let base = format!("refresh_token={token}; HttpOnly; SameSite=Strict; Path=/api/auth/refresh");
+    if remember {
+        format!("{base}; Max-Age={}", REMEMBER_TTL.num_seconds())
+    } else {
+        base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remembered_sessions_get_a_persistent_min_seven_day_max_age() {
+        let cookie = refresh_cookie("tok", true);
+        assert!(cookie.contains("Max-Age=2592000"));
+        assert!(REMEMBER_TTL >= chrono::Duration::days(7));
+    }
+
+    #[test]
+    fn unremembered_sessions_get_a_browser_session_cookie() {
+        let cookie = refresh_cookie("tok", false);
+        assert!(!cookie.contains("Max-Age"));
+        assert!(cookie.starts_with("refresh_token=tok;"));
+    }
 }

@@ -30,6 +30,7 @@ export const en = {
     email: 'Email',
     password: 'Password',
     confirmPassword: 'Confirm password',
+    rememberMe: 'Remember me',
     invalidCredentials: 'Invalid email or password',
     loginFailed: 'Login failed. Please try again.',
     noAccount: 'No account?',

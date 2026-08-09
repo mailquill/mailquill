@@ -23,6 +23,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   FilePenLine,
+  RefreshCw,
 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { Button } from '@/shared/components/ui/button'
@@ -124,7 +125,12 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
   if (!threadId) return <ReadingPaneEmpty />
   if (isLoading) {
     return (
-      <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
+      <div
+        className="flex h-full items-center justify-center gap-2 bg-background text-sm text-muted-foreground"
+        role="status"
+        aria-live="polite"
+      >
+        <RefreshCw className="size-4 motion-safe:animate-spin motion-reduce:animate-none" aria-hidden="true" />
         {t('mail.loadingThread')}
       </div>
     )
@@ -666,8 +672,23 @@ function MessageCard({
                 </span>
               </div>
             )}
+            {isLoading && bodySpinnerExpired && (
+              <div
+                className="mb-3 flex items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-[12.5px] text-muted-foreground"
+                role="status"
+                aria-live="polite"
+              >
+                <RefreshCw className="size-4 shrink-0 motion-safe:animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                <span>{t('mail.loadingBody')}</span>
+              </div>
+            )}
             {isLoading && !bodySpinnerExpired ? (
-              <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
+              <div
+                className="flex h-24 items-center justify-center gap-2 text-sm text-muted-foreground"
+                role="status"
+                aria-live="polite"
+              >
+                <RefreshCw className="size-4 motion-safe:animate-spin motion-reduce:animate-none" aria-hidden="true" />
                 {t('mail.loadingBody')}
               </div>
             ) : offlineMissing ? (

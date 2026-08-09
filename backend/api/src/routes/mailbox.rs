@@ -182,19 +182,21 @@ pub async fn bulk_action(
     let user_id = user.0.clone();
     let db2 = user_db.clone();
     tokio::spawn(async move {
-        let mut paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut folders: std::collections::HashMap<String, (String, Option<String>)> =
+            std::collections::HashMap::new();
         for (account_id, uid, folder_id) in affected {
-            let full_path = match paths.get(&folder_id) {
-                Some(p) => p.clone(),
+            let (full_path, folder_type) = match folders.get(&folder_id) {
+                Some(v) => v.clone(),
                 None => {
-                    let p: String =
-                        sqlx::query_scalar("SELECT full_path FROM folders WHERE id = ?")
-                            .bind(&folder_id)
-                            .fetch_one(&db2)
-                            .await
-                            .unwrap_or_default();
-                    paths.insert(folder_id.clone(), p.clone());
-                    p
+                    let v: (String, Option<String>) = sqlx::query_as(
+                        "SELECT full_path, folder_type FROM folders WHERE id = ?",
+                    )
+                    .bind(&folder_id)
+                    .fetch_one(&db2)
+                    .await
+                    .unwrap_or_default();
+                    folders.insert(folder_id.clone(), v.clone());
+                    v
                 }
             };
             let uid = uid as u32;
@@ -239,8 +241,10 @@ pub async fn bulk_action(
                         .await
                 }
                 "delete" => {
-                    let lower = full_path.to_lowercase();
-                    if lower.contains("trash") || lower.contains("deleted") {
+                    // Already-in-trash means hard delete. Detect by the
+                    // folder's type, not its name — localized servers call
+                    // it "Papierkorb", "Corbeille", etc.
+                    if folder_type.as_deref() == Some("TRASH") {
                         state2
                             .sync_manager
                             .queue_imap_expunge(user_id.clone(), account_id, uid, full_path)

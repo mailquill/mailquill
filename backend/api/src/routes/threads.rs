@@ -163,8 +163,8 @@ async fn bulk_thread_action(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(user_id).await?;
 
-    let messages: Vec<(String, String, i64, String, bool)> = sqlx::query_as(
-        "SELECT m.id, m.account_id, m.uid, f.full_path, m.is_local_draft FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0",
+    let messages: Vec<(String, String, i64, String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT m.id, m.account_id, m.uid, f.full_path, m.is_local_draft, f.folder_type FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0",
     )
     .bind(thread_id)
     .fetch_all(&user_db)
@@ -174,7 +174,7 @@ async fn bulk_thread_action(
         return Err(AppError::NotFound);
     }
 
-    for (msg_id, account_id, uid, folder_path, is_local_draft) in &messages {
+    for (msg_id, account_id, uid, folder_path, is_local_draft, folder_type) in &messages {
         if *is_local_draft {
             match action {
                 ThreadAction::Delete => {
@@ -210,17 +210,35 @@ async fn bulk_thread_action(
                     .bind(msg_id)
                     .execute(&user_db)
                     .await?;
-                state
-                    .sync_manager
-                    .queue_imap_move(
-                        user_id.to_owned(),
-                        account_id.clone(),
-                        *uid as u32,
-                        folder_path.clone(),
-                        "Trash".into(),
-                        false,
-                    )
-                    .await;
+                // Already-in-trash means hard delete. Detect by the folder's
+                // type, not its name — localized servers call it
+                // "Papierkorb", "Corbeille", etc. Otherwise a MOVE into the
+                // message's own folder either no-ops (message stays "not
+                // deleted") or falls back to COPY+flag, leaving a live
+                // duplicate the next sync re-imports as new.
+                if folder_type.as_deref() == Some("TRASH") {
+                    state
+                        .sync_manager
+                        .queue_imap_expunge(
+                            user_id.to_owned(),
+                            account_id.clone(),
+                            *uid as u32,
+                            folder_path.clone(),
+                        )
+                        .await;
+                } else {
+                    state
+                        .sync_manager
+                        .queue_imap_move(
+                            user_id.to_owned(),
+                            account_id.clone(),
+                            *uid as u32,
+                            folder_path.clone(),
+                            "Trash".into(),
+                            false,
+                        )
+                        .await;
+                }
             }
             ThreadAction::MarkRead(is_read) => {
                 sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")

@@ -168,7 +168,18 @@ async fn do_sync(account_id: &str, user_id: &str, app: &Arc<dyn SyncAppState>) {
         .await;
     publish_sync_status(account_id, user_id, app).await;
 
-    let result = sync_account(account_id, user_id, app).await;
+    // Hard ceiling per cycle: a hung connection (dead NAT path, stalled TLS)
+    // otherwise blocks this account's task forever — the ticker, IDLE pokes
+    // and queued IMAP commands all wait on this await. Interrupting is safe:
+    // every chunk commits its progress, so the next tick resumes where this
+    // cycle stopped.
+    const SYNC_CYCLE_TIMEOUT: time::Duration = time::Duration::from_secs(30 * 60);
+    let result = match time::timeout(SYNC_CYCLE_TIMEOUT, sync_account(account_id, user_id, app))
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("sync cycle timed out after 30 minutes".into()),
+    };
 
     match result {
         Ok(()) => {
@@ -841,19 +852,29 @@ async fn sync_folder(
 
         // Persist progress after each chunk (task 4.14) so messages stream into
         // the UI and an interrupted sync resumes from the last committed UID.
-        // Only advance through a contiguous run of locally stored UIDs: API
-        // providers may return partial chunks during quota/backpressure events,
-        // and moving past a gap would permanently skip that message.
-        let chunk_uids: Vec<i64> = sqlx::query_scalar(
-            "SELECT uid FROM messages WHERE folder_id = ? AND uid BETWEEN ? AND ? ORDER BY uid",
-        )
-        .bind(&folder_id)
-        .bind(chunk_start as i64)
-        .bind(chunk_end as i64)
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
-        max_uid = contiguous_uid(max_uid, &chunk_uids);
+        //
+        // IMAP: a successful UID FETCH response is authoritative for the
+        // requested range — uids the server did not return are expunged, not
+        // pending, so the cursor advances to the chunk end. Gmail mailboxes
+        // routinely start at high uids (huge expunge gaps); the contiguous
+        // rule pinned last_uid at 0 there and re-scanned the whole mailbox
+        // every cycle. API providers keep the contiguous rule: they may
+        // return partial chunks during quota/backpressure events, and moving
+        // past a gap would permanently skip those messages.
+        if provider_kind.syncs_over_imap() {
+            max_uid = max_uid.max(chunk_end as i64);
+        } else {
+            let chunk_uids: Vec<i64> = sqlx::query_scalar(
+                "SELECT uid FROM messages WHERE folder_id = ? AND uid BETWEEN ? AND ? ORDER BY uid",
+            )
+            .bind(&folder_id)
+            .bind(chunk_start as i64)
+            .bind(chunk_end as i64)
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+            max_uid = contiguous_uid(max_uid, &chunk_uids);
+        }
 
         let unread_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_read = 0 AND is_deleted = 0",

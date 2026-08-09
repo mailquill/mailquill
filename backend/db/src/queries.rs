@@ -74,23 +74,17 @@ type RawRow = (
     bool,
 );
 
-/// SQL predicate selecting the messages for a cross-account unified view.
-pub fn view_filter(view: Option<&str>) -> &'static str {
-    match view.unwrap_or("inbox") {
-        "starred" => "m.is_flagged = 1",
-        "sent" => "f.folder_type = 'SENT'",
-        "drafts" => "f.folder_type = 'DRAFTS'",
-        "archive" => "f.folder_type = 'ARCHIVE'",
-        "spam" => "f.folder_type = 'SPAM'",
-        "trash" => "f.folder_type = 'TRASH'",
-        _ => "f.folder_type = 'INBOX'",
-    }
-}
-
 const LIST_COLUMNS: &str = "m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path, f.folder_type, m.is_local_draft";
 
 /// Cross-account unified inbox/view page, newest first. Pass `account_id` to
 /// scope the same view to a single mailbox (e.g. that account's starred list).
+///
+/// Non-starred views resolve to concrete `folder_id`s first (mirrors
+/// `view_total`) instead of joining `folders` for a `folder_type` filter: that
+/// join forces a scan of every live message in `is_deleted`/`internal_date`
+/// order regardless of type, which is fine for a bulky view like Inbox but
+/// took ~1.8s to collect a page of a sparse one like Trash. A `folder_id IN
+/// (...)` predicate is served directly by the folder_id-prefixed indexes.
 pub async fn unified_page(
     db: &SqlitePool,
     view: Option<&str>,
@@ -99,29 +93,69 @@ pub async fn unified_page(
     limit: i64,
     unread: bool,
 ) -> Result<Page, sqlx::Error> {
-    let filter = view_filter(view);
-    let account_clause = if account_id.is_some() {
-        "AND m.account_id = ?"
-    } else {
-        ""
-    };
     let cursor_clause = if cursor.is_some() {
         "AND m.internal_date < ?"
     } else {
         ""
     };
     let unread_clause = if unread { "AND m.is_read = 0" } else { "" };
-    let sql = format!(
-        "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE {filter} AND m.is_deleted = 0 {unread_clause} {account_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
-    );
-    let mut q = sqlx::query_as::<_, RawRow>(sqlx::AssertSqlSafe(sql.as_str()));
-    if let Some(a) = account_id {
-        q = q.bind(a);
-    }
-    if let Some(c) = cursor {
-        q = q.bind(c);
-    }
-    let rows = q.bind(limit).fetch_all(db).await?;
+
+    let rows: Vec<RawRow> = if view == Some("starred") {
+        let account_clause = if account_id.is_some() {
+            "AND m.account_id = ?"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.is_flagged = 1 AND m.is_deleted = 0 {unread_clause} {account_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
+        );
+        let mut q = sqlx::query_as::<_, RawRow>(sqlx::AssertSqlSafe(sql.as_str()));
+        if let Some(a) = account_id {
+            q = q.bind(a);
+        }
+        if let Some(c) = cursor {
+            q = q.bind(c);
+        }
+        q.bind(limit).fetch_all(db).await?
+    } else {
+        let folder_type = match view.unwrap_or("inbox") {
+            "sent" => "SENT",
+            "drafts" => "DRAFTS",
+            "archive" => "ARCHIVE",
+            "spam" => "SPAM",
+            "trash" => "TRASH",
+            _ => "INBOX",
+        };
+        let folders_account_clause = if account_id.is_some() {
+            "AND account_id = ?"
+        } else {
+            ""
+        };
+        let folders_sql =
+            format!("SELECT id FROM folders WHERE folder_type = ? {folders_account_clause}");
+        let mut fq =
+            sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(folders_sql.as_str())).bind(folder_type);
+        if let Some(a) = account_id {
+            fq = fq.bind(a);
+        }
+        let folder_ids: Vec<String> = fq.fetch_all(db).await?;
+        if folder_ids.is_empty() {
+            Vec::new()
+        } else {
+            let placeholders = folder_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id IN ({placeholders}) AND m.is_deleted = 0 {unread_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
+            );
+            let mut q = sqlx::query_as::<_, RawRow>(sqlx::AssertSqlSafe(sql.as_str()));
+            for fid in &folder_ids {
+                q = q.bind(fid);
+            }
+            if let Some(c) = cursor {
+                q = q.bind(c);
+            }
+            q.bind(limit).fetch_all(db).await?
+        }
+    };
 
     let next_cursor = rows.last().map(|r| r.5.clone());
     let has_more = rows.len() as i64 == limit;

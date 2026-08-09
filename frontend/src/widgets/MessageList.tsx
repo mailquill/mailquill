@@ -175,16 +175,14 @@ export function MessageRow({
               ({domain})
             </span>
           )}
-          <ShieldAlert
-            className={cn(
-              'size-3.5 shrink-0',
-              message.phishing_verdict === 'phishing'
-                ? 'text-red-500'
-                : message.phishing_verdict === 'suspicious'
-                  ? 'text-amber-500'
-                  : 'text-muted-foreground',
-            )}
-          />
+          {(message.phishing_verdict === 'phishing' || message.phishing_verdict === 'suspicious') && (
+            <ShieldAlert
+              className={cn(
+                'size-3.5 shrink-0',
+                message.phishing_verdict === 'phishing' ? 'text-red-500' : 'text-amber-500',
+              )}
+            />
+          )}
           {count > 1 && (
             <span className="shrink-0 rounded-full bg-secondary px-1.5 text-[11px] font-bold leading-4 text-[var(--mq-text-3)]">
               {count}

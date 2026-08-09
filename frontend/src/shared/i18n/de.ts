@@ -207,6 +207,7 @@ export const de = {
       'Diese Nachricht liegt im Spam-Ordner. Prüfe Absender, Links und Anhänge, bevor du mit ihr interagierst.',
     phishingLikely: 'Diese Nachricht ist wahrscheinlich Phishing.',
     phishingSuspicious: 'Diese Nachricht hat verdächtige Merkmale.',
+    notSpamLearns: 'Absender wird künftig als vertrauenswürdig eingestuft',
   },
   view: { html: 'HTML', text: 'Nur-Text', headers: 'Kopfzeilen', raw: 'Original' },
   pgp: {

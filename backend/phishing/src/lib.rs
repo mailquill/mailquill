@@ -229,6 +229,19 @@ fn domain_of(addr: &str) -> Option<String> {
     addr.rsplit_once('@').map(|(_, d)| d.trim().to_lowercase())
 }
 
+/// Registrable domain a sender address is trusted under: the key stored in
+/// `phishing_trusted_senders` and matched against by [`analyse`]. Subdomains
+/// collapse onto the organisation (`notifications@mail.github.com` →
+/// `github.com`), so trusting a sender covers all of the org's mail hosts.
+pub fn sender_trust_domain(from_addr: &str) -> Option<String> {
+    let addr = mailparse::addrparse(from_addr)
+        .ok()
+        .and_then(|list| list.extract_single_info())
+        .map(|info| info.addr)
+        .unwrap_or_else(|| from_addr.to_owned());
+    domain_of(&addr).map(|d| registrable_domain(&d))
+}
+
 /// Domain without its last (TLD) label, for lookalike comparison.
 fn sans_tld(domain: &str) -> &str {
     domain
@@ -264,8 +277,16 @@ fn same_org(a: &str, b: &str) -> bool {
 
 /// Analyse a raw RFC 2822 message (full or header-only).
 /// `brands` is the complete (domain, brand_name) list to check against;
-/// `feed` is the current OpenPhish URL feed (empty feed = checks skipped).
-pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) -> Report {
+/// `feed` is the current OpenPhish URL feed (empty feed = checks skipped);
+/// `trusted` holds registrable sender domains the user marked "not spam" —
+/// mail from them is clean by definition, including on auth failures, because
+/// forwarding setups routinely break SPF/DKIM for legitimate senders.
+pub fn analyse(
+    raw: &[u8],
+    brands: &[(String, String)],
+    feed: &OpenPhishFeed,
+    trusted: &HashSet<String>,
+) -> Report {
     let mut checks: Vec<Check> = Vec::new();
 
     let parsed = match mailparse::parse_mail(raw) {
@@ -279,6 +300,20 @@ pub fn analyse(raw: &[u8], brands: &[(String, String)], feed: &OpenPhishFeed) ->
         }
     };
     let headers = parsed.get_headers();
+
+    if !trusted.is_empty() {
+        if let Some(from) = headers.get_first_value("From") {
+            if let Some(domain) = sender_trust_domain(&from) {
+                if trusted.contains(&domain) {
+                    return Report {
+                        score: 0,
+                        verdict: VERDICT_CLEAN,
+                        checks,
+                    };
+                }
+            }
+        }
+    }
 
     // ── Authentication-Results (SPF / DKIM / DMARC) ─────────────────────────
     if let Some(auth) = headers.get_first_value("Authentication-Results") {
@@ -608,6 +643,14 @@ pub async fn analyse_and_store_batch(db: &SqlitePool, messages: &[(&str, &[u8])]
             .unwrap_or_default();
     brands.extend(current_brands());
 
+    let trusted: HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT domain FROM phishing_trusted_senders")
+            .fetch_all(db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
     let feed = FEED
         .get()
         .map(|lock| lock.read().unwrap().clone())
@@ -615,7 +658,7 @@ pub async fn analyse_and_store_batch(db: &SqlitePool, messages: &[(&str, &[u8])]
     let reports: Vec<(&str, Report, String)> = messages
         .iter()
         .map(|(message_id, raw)| {
-            let report = analyse(raw, &brands, &feed);
+            let report = analyse(raw, &brands, &feed, &trusted);
             let checks_json = serde_json::to_string(&report.checks).unwrap_or_else(|_| "[]".into());
             (*message_id, report, checks_json)
         })

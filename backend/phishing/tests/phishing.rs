@@ -19,7 +19,7 @@ fn clean_message_scores_zero() {
         "From: Alice <alice@example.com>\r\nSubject: Hello\r\n",
         Some("<p>Hi there</p>"),
     );
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert_eq!(report.verdict, "clean");
     assert!(report.checks.is_empty());
 }
@@ -31,7 +31,7 @@ fn display_name_spoof_fires() {
         "From: ELSTER-Benachrichtigung <news@bombeirosgondomar.pt>\r\nSubject: Einkommensteuer 2025\r\n",
         None,
     );
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "display_name_spoof"));
     assert_ne!(report.verdict, "clean");
 }
@@ -39,14 +39,14 @@ fn display_name_spoof_fires() {
 #[test]
 fn legitimate_brand_domain_does_not_fire() {
     let msg = raw("From: PayPal <service@paypal.com>\r\n", None);
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.is_empty(), "checks: {:?}", report.checks);
 }
 
 #[test]
 fn brand_subdomain_does_not_fire() {
     let msg = raw("From: PayPal <service@mail.paypal.com>\r\n", None);
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(!report.checks.iter().any(|c| c.id == "display_name_spoof"));
 }
 
@@ -55,7 +55,7 @@ fn regional_brand_domain_does_not_fire() {
     // paypal.de is a legitimate PayPal domain; claiming "PayPal" from it must
     // not flag as spoofing, even though the list also has paypal.com.
     let msg = raw("From: PayPal <service@paypal.de>\r\n", None);
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.is_empty(), "checks: {:?}", report.checks);
 }
 
@@ -63,7 +63,7 @@ fn regional_brand_domain_does_not_fire() {
 fn token_matching_avoids_substring_false_positive() {
     // "Marketing" must not match the brand "ING".
     let msg = raw("From: Marketing Team <team@example.com>\r\n", None);
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(!report.checks.iter().any(|c| c.id == "display_name_spoof"));
 }
 
@@ -73,7 +73,7 @@ fn auth_failures_score() {
         "From: Bob <bob@example.com>\r\nAuthentication-Results: mx.example.com; spf=fail; dkim=fail; dmarc=fail\r\n",
         None,
     );
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert_eq!(report.score, 95);
     assert_eq!(report.verdict, "phishing");
 }
@@ -84,7 +84,7 @@ fn reply_to_and_return_path_mismatch() {
         "From: ceo@company.com\r\nReply-To: ceo@gmail.com\r\nReturn-Path: <bounce@bulk-mailer.com>\r\n",
         None,
     );
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "reply_to_mismatch"));
     assert!(report.checks.iter().any(|c| c.id == "return_path_mismatch"));
     assert_eq!(report.verdict, "suspicious");
@@ -99,7 +99,7 @@ fn same_org_subdomains_do_not_fire() {
         "From: Animexx <noreply@animexx.de>\r\nReturn-Path: <bounce@psrp.animexx.de>\r\nReply-To: kontakt@mail.animexx.de\r\n",
         Some(body),
     );
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.is_empty(), "checks: {:?}", report.checks);
     assert_eq!(report.verdict, "clean");
 }
@@ -108,21 +108,21 @@ fn same_org_subdomains_do_not_fire() {
 fn multi_part_tld_not_treated_as_org() {
     // evil.co.uk and bank.co.uk share only the public suffix — must fire.
     let msg = raw("From: x@bank.co.uk\r\nReply-To: y@evil.co.uk\r\n", None);
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "reply_to_mismatch"));
 }
 
 #[test]
 fn domain_lookalike_fires() {
     let msg = raw("From: Support <support@paypa1.com>\r\n", None);
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "domain_lookalike"));
 }
 
 #[test]
 fn punycode_domain_fires() {
     let msg = raw("From: Service <service@xn--pypal-4ve.com>\r\n", None);
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "idn_homograph"));
 }
 
@@ -136,7 +136,7 @@ fn link_text_href_mismatch_fires_and_caps() {
         <a href="https://example.com/ok">Click here</a>
     "#;
     let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     let link_points: i32 = report
         .checks
         .iter()
@@ -160,7 +160,7 @@ fn social_handles_in_link_text_do_not_fire() {
         "From: Instagram <stories-recap@mail.instagram.com>\r\nReturn-Path: <stories-recap@mail.instagram.com>\r\n",
         Some(body),
     );
-    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default());
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &Default::default());
     assert!(
         !report.checks.iter().any(|c| c.id == "link_mismatch"),
         "checks: {:?}",
@@ -174,7 +174,7 @@ fn custom_brand_entry_is_used() {
     let mut brands = vec![("acme-corp.com".to_string(), "ACME Corp".to_string())];
     brands.extend(bundled_brands());
     let msg = raw("From: ACME Corp Billing <billing@randomhost.net>\r\n", None);
-    let report = analyse(&msg, &brands, &OpenPhishFeed::default());
+    let report = analyse(&msg, &brands, &OpenPhishFeed::default(), &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "display_name_spoof"));
 }
 
@@ -196,7 +196,7 @@ fn openphish_exact_url_hit_is_phishing() {
     let body = r#"<a href="https://evil.example/steal/login">Click here</a>"#;
     let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
     let feed = feed_with(&["https://evil.example/steal/login"]);
-    let report = analyse(&msg, &bundled_brands(), &feed);
+    let report = analyse(&msg, &bundled_brands(), &feed, &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "openphish_url"));
     assert_eq!(report.verdict, "phishing");
 }
@@ -206,7 +206,7 @@ fn openphish_domain_hit_is_suspicious() {
     let body = r#"<a href="https://evil.example/other/path">Click here</a>"#;
     let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
     let feed = feed_with(&["https://evil.example/steal/login"]);
-    let report = analyse(&msg, &bundled_brands(), &feed);
+    let report = analyse(&msg, &bundled_brands(), &feed, &Default::default());
     assert!(report.checks.iter().any(|c| c.id == "openphish_domain"));
     assert!(!report.checks.iter().any(|c| c.id == "openphish_url"));
 }
@@ -216,6 +216,44 @@ fn openphish_clean_link_no_hit() {
     let body = r#"<a href="https://example.com/news">Click here</a>"#;
     let msg = raw("From: Newsletter <sender@example.com>\r\n", Some(body));
     let feed = feed_with(&["https://evil.example/steal/login"]);
-    let report = analyse(&msg, &bundled_brands(), &feed);
+    let report = analyse(&msg, &bundled_brands(), &feed, &Default::default());
     assert!(report.checks.is_empty(), "checks: {:?}", report.checks);
+}
+
+#[test]
+fn trusted_sender_domain_short_circuits_to_clean() {
+    // Display-name spoof + auth failure would normally score deep into
+    // suspicious; a trusted registrable domain overrides all of it.
+    let msg = raw(
+        "Authentication-Results: mx.example; dmarc=fail\r\nFrom: PayPal <mail@notify.example.com>\r\n",
+        None,
+    );
+    let trusted = std::collections::HashSet::from(["example.com".to_string()]);
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &trusted);
+    assert_eq!(report.verdict, "clean");
+    assert!(report.checks.is_empty());
+}
+
+#[test]
+fn untrusted_sender_is_still_analysed() {
+    let msg = raw(
+        "Authentication-Results: mx.example; dmarc=fail\r\nFrom: PayPal <mail@notify.example.com>\r\n",
+        None,
+    );
+    let trusted = std::collections::HashSet::from(["other.org".to_string()]);
+    let report = analyse(&msg, &bundled_brands(), &OpenPhishFeed::default(), &trusted);
+    assert_ne!(report.verdict, "clean");
+}
+
+#[test]
+fn sender_trust_domain_collapses_subdomains() {
+    assert_eq!(
+        phishing::sender_trust_domain("GitHub <notifications@mail.github.com>"),
+        Some("github.com".to_string())
+    );
+    assert_eq!(
+        phishing::sender_trust_domain("plain@example.co.uk"),
+        Some("example.co.uk".to_string())
+    );
+    assert_eq!(phishing::sender_trust_domain("no-address-here"), None);
 }

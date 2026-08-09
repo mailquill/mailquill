@@ -270,6 +270,23 @@ export function useNotSpamMessage() {
   })
 }
 
+/**
+ * "Not spam" from the phishing banner: teaches the filter (sender becomes
+ * trusted, verdicts clear server-side) while the message stays where it is —
+ * so no optimistic list removal, unlike {@link useNotSpamMessage}.
+ */
+export function useNotSpamInPlace() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => apiPost(`/messages/${id}/not-spam`),
+    onSettled: (_data, _err, id) => {
+      qc.invalidateQueries({ queryKey: ['message', id] })
+      qc.invalidateQueries({ queryKey: ['thread'] })
+      invalidateMailLists(qc)
+    },
+  })
+}
+
 export function useReanalyseMessage() {
   const qc = useQueryClient()
   return useMutation({

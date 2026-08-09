@@ -567,6 +567,8 @@ pub async fn mark_not_spam(
     let user_db = state.user_db_pool.get(&user.0).await?;
     let (account_id, uid, src_folder) = get_message_location(&user_db, &message_id).await?;
 
+    trust_sender_of(&user_db, &message_id).await;
+
     let inbox: Option<(String, String)> = sqlx::query_as(
         "SELECT id, full_path FROM folders WHERE account_id = ? AND folder_type = 'INBOX' ORDER BY full_path LIMIT 1",
     )
@@ -582,6 +584,19 @@ pub async fn mark_not_spam(
             .execute(&user_db)
             .await?;
         refresh_unread_counts(&user_db).await;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    // Only mail sitting in the spam folder gets moved. "Not spam" on a
+    // flagged message elsewhere (inbox banner, archive) just teaches the
+    // filter — yanking it into the inbox would be surprising.
+    let src_type: Option<String> =
+        sqlx::query_scalar("SELECT folder_type FROM folders WHERE account_id = ? AND full_path = ?")
+            .bind(&account_id)
+            .bind(&src_folder)
+            .fetch_optional(&user_db)
+            .await?;
+    if src_type.as_deref() != Some("SPAM") {
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -608,6 +623,51 @@ pub async fn mark_not_spam(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Learn from a "not spam" click: trust the message's sender domain and clear
+/// the phishing verdict on every flagged message from that organisation, so
+/// the user corrects a false positive once instead of per message. Future
+/// analyses short-circuit on the trusted domain. Best-effort — a failure here
+/// must not block the actual not-spam move.
+async fn trust_sender_of(user_db: &sqlx::SqlitePool, message_id: &str) {
+    let from_addr: Option<String> =
+        sqlx::query_scalar("SELECT from_addr FROM messages WHERE id = ?")
+            .bind(message_id)
+            .fetch_optional(user_db)
+            .await
+            .ok()
+            .flatten();
+    let Some(domain) = from_addr.as_deref().and_then(phishing::sender_trust_domain) else {
+        return;
+    };
+
+    let _ = sqlx::query("INSERT OR IGNORE INTO phishing_trusted_senders (domain) VALUES (?)")
+        .bind(&domain)
+        .execute(user_db)
+        .await;
+
+    // Match flagged messages by registrable domain in Rust — SQL LIKE can't
+    // express "same organisation" without over-matching lookalike domains.
+    let flagged: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, from_addr FROM messages WHERE phishing_verdict IN ('suspicious', 'phishing')",
+    )
+    .fetch_all(user_db)
+    .await
+    .unwrap_or_default();
+    for (id, addr) in flagged {
+        if phishing::sender_trust_domain(&addr).as_deref() != Some(domain.as_str()) {
+            continue;
+        }
+        let _ = sqlx::query("UPDATE messages SET phishing_verdict = 'clean' WHERE id = ?")
+            .bind(&id)
+            .execute(user_db)
+            .await;
+        let _ = sqlx::query("UPDATE phishing_analysis SET verdict = 'clean' WHERE message_id = ?")
+            .bind(&id)
+            .execute(user_db)
+            .await;
+    }
+}
 
 /// Recompute every folder's cached unread_count from the messages table.
 /// The cache is otherwise only refreshed by IMAP sync, so any API mutation

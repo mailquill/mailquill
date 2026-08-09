@@ -47,6 +47,7 @@ import {
   useToggleFlag,
   useDeleteMessage,
   useNotSpamMessage,
+  useNotSpamInPlace,
   useMessage,
   useReanalyseMessage,
   useThread,
@@ -276,10 +277,14 @@ export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onT
 function PhishingBanner({ message }: { message: Message }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
+  const notSpam = useNotSpamInPlace()
   const verdict = message.phishing_verdict
   if (verdict !== 'suspicious' && verdict !== 'phishing') return null
   const danger = verdict === 'phishing'
   const checks = message.phishing_checks ?? []
+  // The spam-folder banner already offers "not spam" with move-to-inbox
+  // semantics; don't show a second, subtly different button next to it.
+  const inSpamFolder = isSpamMessage(message)
 
   return (
     <div
@@ -290,17 +295,31 @@ function PhishingBanner({ message }: { message: Message }) {
           : 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300',
       )}
     >
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 text-left font-semibold"
-      >
-        <ShieldAlert className="size-4 shrink-0" aria-hidden="true" />
-        <span>{danger ? t('mail.phishingLikely') : t('mail.phishingSuspicious')}</span>
-        {checks.length > 0 && (
-          <ChevronDown className={cn('ml-auto size-4 shrink-0 transition-transform', expanded && 'rotate-180')} />
+      <div className="flex w-full items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left font-semibold"
+        >
+          <ShieldAlert className="size-4 shrink-0" aria-hidden="true" />
+          <span>{danger ? t('mail.phishingLikely') : t('mail.phishingSuspicious')}</span>
+          {checks.length > 0 && (
+            <ChevronDown className={cn('ml-auto size-4 shrink-0 transition-transform', expanded && 'rotate-180')} />
+          )}
+        </button>
+        {!inSpamFolder && (
+          <button
+            type="button"
+            onClick={() => notSpam.mutate(message.id)}
+            disabled={notSpam.isPending}
+            title={t('mail.notSpamLearns')}
+            className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-[12px] font-bold text-foreground shadow-sm hover:bg-secondary disabled:opacity-50"
+          >
+            <ShieldCheck className="size-3.5" aria-hidden="true" />
+            {t('action.notSpam')}
+          </button>
         )}
-      </button>
+      </div>
       {expanded && checks.length > 0 && (
         <ul className="mt-2 flex list-disc flex-col gap-1 pl-9">
           {checks.map((check, i) => (

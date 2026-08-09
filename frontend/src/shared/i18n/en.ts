@@ -207,6 +207,7 @@ export const en = {
       'This message is in the spam folder. Check the sender, links, and attachments before interacting with it.',
     phishingLikely: 'This message is likely phishing.',
     phishingSuspicious: 'This message has suspicious characteristics.',
+    notSpamLearns: 'The sender will be trusted from now on',
   },
   view: { html: 'HTML', text: 'Text', headers: 'Headers', raw: 'Original' },
   pgp: {

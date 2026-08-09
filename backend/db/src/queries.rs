@@ -142,16 +142,31 @@ pub async fn unified_page(
         if folder_ids.is_empty() {
             Vec::new()
         } else {
-            let placeholders = folder_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id IN ({placeholders}) AND m.is_deleted = 0 {unread_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?",
+            // Top-K merge: pull at most `limit` newest rows out of each
+            // folder with its own `folder_id = ?` scan (served directly,
+            // pre-sorted, by the folder_id-prefixed indexes), then re-sort
+            // only that small merged set. A flat `folder_id IN (...)`
+            // predicate looks equivalent but isn't: SQLite can't merge
+            // several already-sorted index scans into one ordered stream,
+            // so it materializes every matching row into a temp b-tree
+            // before ORDER BY + LIMIT can run — observed ~2.4s across 6
+            // accounts' Inbox folders, worse than the join it replaced.
+            // Each branch needs its own ORDER BY + LIMIT to cap the per-folder
+            // scan; SQLite only allows that on a UNION ALL branch when it's
+            // wrapped in its own subquery, so wrap before joining branches.
+            let per_folder_sql = format!(
+                "SELECT * FROM (SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id = ? AND m.is_deleted = 0 {unread_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?)",
             );
+            let union_sql = vec![per_folder_sql.as_str(); folder_ids.len()].join(" UNION ALL ");
+            let sql =
+                format!("SELECT * FROM ({union_sql}) ORDER BY internal_date DESC LIMIT ?");
             let mut q = sqlx::query_as::<_, RawRow>(sqlx::AssertSqlSafe(sql.as_str()));
             for fid in &folder_ids {
                 q = q.bind(fid);
-            }
-            if let Some(c) = cursor {
-                q = q.bind(c);
+                if let Some(c) = cursor {
+                    q = q.bind(c);
+                }
+                q = q.bind(limit);
             }
             q.bind(limit).fetch_all(db).await?
         }
@@ -626,5 +641,62 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.items.len(), 1);
         assert!(page.items[0].is_local_draft);
+    }
+
+    // A cross-account view resolves multiple folder_ids (one INBOX per
+    // account) and must merge their per-folder top-K scans back into one
+    // globally date-ordered, correctly paginated stream — not just concatenate
+    // each folder's rows in folder order.
+    #[tokio::test]
+    async fn cross_account_inbox_merges_and_paginates_in_date_order() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO folders (id, account_id, full_path, folder_type) VALUES
+             ('inbox-a', 'acc-a', 'INBOX', 'INBOX'),
+             ('inbox-b', 'acc-b', 'INBOX', 'INBOX')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages
+             (id, account_id, folder_id, uid, thread_id, subject, from_addr, internal_date)
+             VALUES
+             ('m1', 'acc-a', 'inbox-a', 1, 'm1', 'newest',       'a@example.test', '2026-01-04T00:00:00Z'),
+             ('m2', 'acc-b', 'inbox-b', 1, 'm2', 'second-newest','b@example.test', '2026-01-03T00:00:00Z'),
+             ('m3', 'acc-a', 'inbox-a', 2, 'm3', 'third',        'a@example.test', '2026-01-02T00:00:00Z'),
+             ('m4', 'acc-b', 'inbox-b', 2, 'm4', 'oldest',       'b@example.test', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let page1 = unified_page(&db, Some("inbox"), None, None, 2, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            page1.items.iter().map(|i| i.message_id.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
+        assert_eq!(page1.total, 4);
+
+        let cursor = page1.next_cursor.expect("first page should report a cursor");
+        let page2 = unified_page(&db, Some("inbox"), None, Some(&cursor), 2, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            page2.items.iter().map(|i| i.message_id.as_str()).collect::<Vec<_>>(),
+            vec!["m3", "m4"]
+        );
+
+        // page2 filled a full `limit` batch, so next_cursor is set on the
+        // rows.len() == limit heuristic (shared with folder_page) even
+        // though m4 was the last row; the next fetch must come back empty.
+        if let Some(cursor2) = page2.next_cursor {
+            let page3 = unified_page(&db, Some("inbox"), None, Some(&cursor2), 2, false)
+                .await
+                .unwrap();
+            assert!(page3.items.is_empty());
+        }
     }
 }

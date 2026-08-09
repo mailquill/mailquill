@@ -56,7 +56,7 @@ pub async fn remote_image(
         }
     };
     if let Err(err) = ensure_public_host(&url).await {
-        return Ok(proxy_failure_response(&url, err));
+        return Ok(proxy_blocked_response(&url, err));
     }
     for _ in 0..=MAX_REDIRECTS {
         let response = match client.get(url.clone()).send().await {
@@ -94,7 +94,7 @@ pub async fn remote_image(
                 Err(err) => return Ok(proxy_failure_response(&url, err)),
             };
             if let Err(err) = ensure_public_host(&url).await {
-                return Ok(proxy_failure_response(&url, err));
+                return Ok(proxy_blocked_response(&url, err));
             }
             continue;
         }
@@ -244,9 +244,24 @@ async fn ensure_public_host(url: &Url) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Upstream didn't deliver a usable image (4xx/5xx, timeout, wrong content
+/// type, oversized). Routine for tracking pixels and expired links — nothing
+/// an operator can act on, so keep it out of the warn log.
 fn proxy_failure_response(url: &Url, err: AppError) -> Response<Body> {
-    tracing::warn!(
+    tracing::debug!(
         "remote image proxy failed: host={} url={} reason={err}",
+        url.host_str().unwrap_or("<none>"),
+        sanitized_url(url.as_str())
+    );
+    empty_image_response()
+}
+
+/// The proxy refused to fetch (private/unresolvable host). Unlike upstream
+/// failures this can indicate a probe against internal addresses, so it stays
+/// on warn.
+fn proxy_blocked_response(url: &Url, err: AppError) -> Response<Body> {
+    tracing::warn!(
+        "remote image proxy blocked request: host={} url={} reason={err}",
         url.host_str().unwrap_or("<none>"),
         sanitized_url(url.as_str())
     );

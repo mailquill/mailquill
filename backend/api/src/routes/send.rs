@@ -141,6 +141,7 @@ pub async fn send_email(
     let send_id = Uuid::new_v4().to_string();
     let response_send_id = send_id.clone();
     let user_id = user.0;
+    let account_id = account.id.clone();
     let subject = req.subject.clone();
     let draft_id = req.draft_id.clone();
     let event_state = state.clone();
@@ -168,6 +169,7 @@ pub async fn send_email(
                     &event_state,
                     &user_id,
                     &send_id,
+                    &account_id,
                     "sent",
                     Some(&message_id),
                     Some(&subject),
@@ -181,6 +183,7 @@ pub async fn send_email(
                     &event_state,
                     &user_id,
                     &send_id,
+                    &account_id,
                     "failed",
                     None,
                     Some(&subject),
@@ -353,6 +356,7 @@ fn publish_send_status(
     state: &AppState,
     user_id: &str,
     send_id: &str,
+    account_id: &str,
     status: &str,
     message_id: Option<&str>,
     subject: Option<&str>,
@@ -363,6 +367,7 @@ fn publish_send_status(
         event_type: "send".to_owned(),
         payload: serde_json::json!({
             "send_id": send_id,
+            "account_id": account_id,
             "status": status,
             "message_id": message_id,
             "subject": subject,

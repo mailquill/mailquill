@@ -23,6 +23,7 @@ import {
   Moon,
   RefreshCw,
   Wrench,
+  AlertCircle,
 } from 'lucide-react'
 import { ApiError } from '@/shared/api'
 import { cn } from '@/shared/lib/utils'
@@ -51,9 +52,10 @@ import {
   useEnableMailboxContacts,
   useDisableMailboxContacts,
   useDiscoverMailboxContacts,
+  useSyncStatus,
 } from '@/shared/hooks/useAccounts'
 import { useSyncContactAccount } from '@/shared/hooks/useContacts'
-import { startOAuthRedirect } from '@/shared/lib/oauth'
+import { startOAuthRedirect, oauthProviderFromStatus } from '@/shared/lib/oauth'
 import { useThemeStore, type ThemePref } from '@/shared/hooks/useTheme'
 import { useUiPrefs, type Density, type CalendarGrouping } from '@/shared/hooks/useUiPrefs'
 import { getLangPref, setLangPref, type LangPref } from '@/shared/i18n'
@@ -87,6 +89,10 @@ const NAV: { id: Section; icon: typeof Users }[] = [
   { id: 'notifications', icon: Bell },
   { id: 'privacy', icon: ShieldCheck },
 ]
+
+function updateAccountErrorMessage(error: unknown): string {
+  return error instanceof ApiError ? error.detail ?? error.message : String(error)
+}
 
 function providerOf(account: Account): string {
   const host = `${account.imap_host} ${account.smtp_host}`.toLowerCase()
@@ -204,6 +210,9 @@ function AccountsSection() {
   const [adding, setAdding] = useState(() => searchParams.get('add') === '1')
   const connected = searchParams.get('connected')
   const contactsReturn = searchParams.get('contacts')
+  // Set by a failed-send toast's "check credentials" action or a sync-error
+  // banner elsewhere — opens and focuses this account's credential fields.
+  const focusAccountId = searchParams.get('focus')
 
   useEffect(() => {
     if (!connected || !contactsReturn) return
@@ -249,7 +258,11 @@ function AccountsSection() {
 
       <div className="flex flex-col gap-3">
         {accounts.map((account) => (
-          <AccountCard key={account.id} account={account} />
+          <AccountCard
+            key={account.id}
+            account={account}
+            autoFocusCredentials={account.id === focusAccountId}
+          />
         ))}
         {!accounts.length && !adding && (
           <p className="rounded-lg border border-border p-6 text-center text-sm text-muted-foreground">
@@ -266,9 +279,13 @@ const accountEditSchema = z.object({
   imap_host: z.string().min(1),
   imap_port: z.coerce.number().int().positive(),
   imap_auth_scheme: z.string().min(1),
+  // Left blank, these keep the currently stored password — the server never
+  // sends decrypted credentials back down, so there is nothing to prefill.
+  imap_password: z.string().optional(),
   smtp_host: z.string().min(1),
   smtp_port: z.coerce.number().int().positive(),
   smtp_auth_scheme: z.string().min(1),
+  smtp_password: z.string().optional(),
   body_sync_mode: z.enum(['lazy', 'full']),
   sync_interval_secs: z.coerce.number().int().positive(),
   sync_mode: z.enum(['idle', 'interval']),
@@ -279,12 +296,19 @@ const accountEditSchema = z.object({
 type AccountEditInput = z.input<typeof accountEditSchema>
 type AccountEditData = z.output<typeof accountEditSchema>
 
-function AccountCard({ account }: { account: Account }) {
+export function AccountCard({
+  account,
+  autoFocusCredentials = false,
+}: {
+  account: Account
+  autoFocusCredentials?: boolean
+}) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(autoFocusCredentials)
   const [tlsRetryData, setTlsRetryData] = useState<AccountEditData | null>(null)
   const updateAccount = useUpdateAccount()
   const deleteAccount = useDeleteAccount()
+  const { data: syncStatus } = useSyncStatus(account.id)
   const color = resolveAccountColor(account)
   const {
     register,
@@ -302,6 +326,24 @@ function AccountCard({ account }: { account: Account }) {
     reset(accountToForm(account))
   }, [account, reset])
 
+  const smtpPasswordFieldId = `${account.id}-smtp-password`
+
+  function focusCredentials() {
+    setExpanded(true)
+    window.requestAnimationFrame(() => {
+      const field = document.getElementById(smtpPasswordFieldId)
+      field?.scrollIntoView({ block: 'center' })
+      field?.focus()
+    })
+  }
+
+  useEffect(() => {
+    if (autoFocusCredentials) focusCredentials()
+    // Only react to the id changing (e.g. a fresh toast/redirect), not to
+    // every re-render — focusCredentials itself is stable per account.id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFocusCredentials])
+
   function autodetectDav() {
     const { carddav_url, caldav_url } = davDefaults(account.primary_email, account.imap_host)
     setValue('carddav_url', carddav_url, { shouldDirty: true })
@@ -311,19 +353,37 @@ function AccountCard({ account }: { account: Account }) {
   function saveAccount(data: AccountEditData, decision?: TlsDecision) {
     setTlsRetryData(data)
     const certificate = tlsCertificateFromError(updateAccount.error)
-    updateAccount.mutate({
-      id: account.id,
-      data: {
-        ...data,
-        imap_tls_cert: certificate?.der_base64,
-        smtp_tls_cert:
-          certificate && data.smtp_host === certificate.host ? certificate.der_base64 : undefined,
-        tls_decision: decision,
+    // Blank password fields mean "unchanged" — never PATCH an empty string
+    // over a working stored credential.
+    const { imap_password, smtp_password, ...rest } = data
+    updateAccount.mutate(
+      {
+        id: account.id,
+        data: {
+          ...rest,
+          ...(imap_password ? { imap_password } : {}),
+          ...(smtp_password ? { smtp_password } : {}),
+          imap_tls_cert: certificate?.der_base64,
+          smtp_tls_cert:
+            certificate && data.smtp_host === certificate.host ? certificate.der_base64 : undefined,
+          tls_decision: decision,
+        },
       },
-    })
+      {
+        // Clear typed passwords from the form only once they're actually
+        // saved — a failed save (validation, TLS prompt) must keep them so
+        // the user isn't forced to retype on retry.
+        onSuccess: () => {
+          setValue('imap_password', '')
+          setValue('smtp_password', '')
+        },
+      },
+    )
   }
 
   const tlsCertificate = tlsCertificateFromError(updateAccount.error)
+  const reauthProvider = oauthProviderFromStatus(syncStatus)
+  const needsCredentialFix = !reauthProvider && syncStatus?.state === 'error'
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-card">
@@ -361,6 +421,22 @@ function AccountCard({ account }: { account: Account }) {
         <ChevronDown className={cn('size-4 shrink-0 text-muted-foreground transition-transform', expanded && 'rotate-180')} />
       </button>
 
+      {(reauthProvider || needsCredentialFix) && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-destructive/10 px-4 py-2.5 text-[12.5px] text-destructive">
+          <AlertCircle className="size-4 shrink-0" />
+          <span className="flex-1">
+            {reauthProvider ? t('settings.reauthDescription') : syncStatus?.error || t('settings.connectionErrorDescription')}
+          </span>
+          <button
+            type="button"
+            className="shrink-0 font-semibold underline"
+            onClick={() => (reauthProvider ? startOAuthRedirect(reauthProvider, account.id) : focusCredentials())}
+          >
+            {reauthProvider ? t('settings.reconnect') : t('settings.updateCredentials')}
+          </button>
+        </div>
+      )}
+
       <ContactCapabilityRow account={account} />
 
       {expanded && (
@@ -395,6 +471,12 @@ function AccountCard({ account }: { account: Account }) {
             </Field>
             <Field id={`${account.id}-smtp-auth`} label={t('settings.smtpAuth')} error={errors.smtp_auth_scheme?.message}>
               <Input id={`${account.id}-smtp-auth`} {...register('smtp_auth_scheme')} />
+            </Field>
+            <Field id={`${account.id}-imap-password`} label={t('settings.imapPassword')} hint={t('settings.passwordUnchangedHint')} error={errors.imap_password?.message}>
+              <Input id={`${account.id}-imap-password`} type="password" autoComplete="new-password" {...register('imap_password')} />
+            </Field>
+            <Field id={smtpPasswordFieldId} label={t('settings.smtpPassword')} hint={t('settings.passwordUnchangedHint')} error={errors.smtp_password?.message}>
+              <Input id={smtpPasswordFieldId} type="password" autoComplete="new-password" {...register('smtp_password')} />
             </Field>
             <Field id={`${account.id}-body`} label={t('settings.bodySyncMode')} error={errors.body_sync_mode?.message}>
               <Select id={`${account.id}-body`} {...register('body_sync_mode')}>
@@ -442,6 +524,12 @@ function AccountCard({ account }: { account: Account }) {
 
           {/* Folder selection — pick which mailboxes get synced */}
           <FolderSyncList accountId={account.id} />
+
+          {/* Saving re-tests the IMAP/SMTP connection; a still-wrong password
+              surfaces here rather than only in a toast that can be missed. */}
+          {updateAccount.isError && !tlsCertificate && (
+            <p className="mt-4 text-[12.5px] text-destructive">{updateAccountErrorMessage(updateAccount.error)}</p>
+          )}
 
           <div className="mt-4 flex justify-between gap-2">
             <Button
@@ -682,9 +770,14 @@ function accountToForm(account: Account): AccountEditInput {
     imap_host: account.imap_host,
     imap_port: account.imap_port,
     imap_auth_scheme: account.imap_auth_scheme,
+    // Never prefilled: the server only stores encrypted credentials and
+    // doesn't send them back down. Blank stays blank until the user types a
+    // new one; saveAccount() then treats "still blank" as "keep unchanged".
+    imap_password: '',
     smtp_host: account.smtp_host,
     smtp_port: account.smtp_port,
     smtp_auth_scheme: account.smtp_auth_scheme,
+    smtp_password: '',
     body_sync_mode: account.body_sync_mode === 'full' ? 'full' : 'lazy',
     sync_interval_secs: account.sync_interval_secs,
     sync_mode: account.sync_mode === 'interval' ? 'interval' : 'idle',
@@ -1167,17 +1260,19 @@ function Toggle({
 interface FieldProps {
   id: string
   label: string
+  hint?: string
   error?: string
   children: ReactNode
 }
 
-function Field({ id, label, error, children }: FieldProps) {
+function Field({ id, label, hint, error, children }: FieldProps) {
   return (
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={id} className="text-[12px] font-semibold">
         {label}
       </Label>
       {children}
+      {hint && !error && <p className="text-xs text-muted-foreground">{hint}</p>}
       {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   )

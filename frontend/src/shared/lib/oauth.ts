@@ -1,4 +1,5 @@
 import { useAuthStore } from '@/app/store'
+import type { SyncStatus } from '@/shared/types'
 
 /**
  * Begin an OAuth connect flow by navigating the browser to the provider-start
@@ -17,4 +18,15 @@ export function startOAuthRedirect(
   if (destination === 'calendar') params.set('calendar', 'true')
   if (destination === 'contacts') params.set('contacts', 'true')
   window.location.assign(`/api/auth/oauth/${provider}/start?${params}`)
+}
+
+/**
+ * Extract the OAuth provider from a mail sync status stuck in
+ * `reauth_required`. The sync task encodes it as `oauth_reauthentication_required:<provider>`
+ * in the status error (see mail-sync's `oauth_reauthentication_error`).
+ */
+export function oauthProviderFromStatus(status?: SyncStatus): 'google' | 'microsoft' | null {
+  if (status?.state !== 'reauth_required') return null
+  const provider = status.error?.split(':', 2)[1]
+  return provider === 'google' || provider === 'microsoft' ? provider : null
 }

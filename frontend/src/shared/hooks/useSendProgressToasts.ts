@@ -1,5 +1,6 @@
 import { useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import type { SendStatus } from '@/shared/hooks/useMailNotifications'
 
@@ -9,6 +10,7 @@ import type { SendStatus } from '@/shared/hooks/useMailNotifications'
  */
 export function useSendProgressToasts() {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const sendSubjects = useRef(new Map<string, string>())
   const terminalSendIds = useRef(new Set<string>())
 
@@ -40,15 +42,22 @@ export function useSendProgressToasts() {
         return
       }
 
+      const accountId = status.account_id
       toast.error(t('compose.sendFailed'), {
         id: status.send_id,
         description: subject
           ? t('compose.sendFailedDetail', { subject, error: status.error ?? t('compose.unknownSendError') })
           : status.error ?? t('compose.unknownSendError'),
         duration: Number.POSITIVE_INFINITY,
+        action: accountId
+          ? {
+              label: t('compose.checkCredentials'),
+              onClick: () => navigate(`/mail/settings?focus=${accountId}`),
+            }
+          : undefined,
       })
     },
-    [t],
+    [t, navigate],
   )
 
   return { showSendQueued, showSendStatus }

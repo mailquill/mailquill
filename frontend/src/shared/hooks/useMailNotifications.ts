@@ -15,6 +15,7 @@ interface PushPayload {
 
 const sendStatusSchema = z.object({
   send_id: z.string().min(1),
+  account_id: z.string().nullish(),
   status: z.enum(['sent', 'failed']),
   message_id: z.string().nullish(),
   subject: z.string().nullish(),

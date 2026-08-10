@@ -7,13 +7,16 @@ const toastMocks = vi.hoisted(() => ({
   success: vi.fn(),
   error: vi.fn(),
 }))
+const navigateMock = vi.hoisted(() => vi.fn())
 
 vi.mock('sonner', () => ({ toast: toastMocks }))
+vi.mock('react-router-dom', () => ({ useNavigate: () => navigateMock }))
 
 beforeEach(() => {
   toastMocks.loading.mockReset()
   toastMocks.success.mockReset()
   toastMocks.error.mockReset()
+  navigateMock.mockReset()
 })
 
 describe('useSendProgressToasts', () => {
@@ -48,5 +51,31 @@ describe('useSendProgressToasts', () => {
       expect.objectContaining({ id: 'send-2', description: '“Invoice” failed: OAuth expired' }),
     )
     expect(toastMocks.loading).not.toHaveBeenCalled()
+  })
+
+  it('offers a credentials-check action that jumps to the failing account, when known', () => {
+    const { result } = renderHook(() => useSendProgressToasts())
+
+    act(() => result.current.showSendStatus({
+      send_id: 'send-3', account_id: 'acc-1', status: 'failed', subject: 'Invoice', message_id: null,
+      error: '535 5.7.8 Username and Password not accepted',
+    }))
+
+    const call = toastMocks.error.mock.calls[0]
+    const action = call[1].action as { label: string; onClick: () => void }
+    expect(action.label).toBe('Check credentials')
+    action.onClick()
+    expect(navigateMock).toHaveBeenCalledWith('/mail/settings?focus=acc-1')
+  })
+
+  it('omits the action when the failed send has no account_id (e.g. an older client)', () => {
+    const { result } = renderHook(() => useSendProgressToasts())
+
+    act(() => result.current.showSendStatus({
+      send_id: 'send-4', status: 'failed', subject: 'Invoice', message_id: null, error: 'boom',
+    }))
+
+    const call = toastMocks.error.mock.calls[0]
+    expect(call[1].action).toBeUndefined()
   })
 })

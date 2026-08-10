@@ -1,9 +1,12 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
+import { afterEach, vi } from 'vitest'
 import '@/shared/i18n'
 
 afterEach(cleanup)
+
+// jsdom doesn't implement scrollIntoView (real browsers do).
+Element.prototype.scrollIntoView = vi.fn()
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

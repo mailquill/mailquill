@@ -6,7 +6,7 @@ import { useClickOutside } from '@/shared/hooks/useClickOutside'
 import { useSyncStatuses, useTriggerSync } from '@/shared/hooks/useAccounts'
 import { accountInitials, resolveAccountColor } from '@/shared/lib/avatar'
 import { relativeFromNow } from '@/shared/lib/format'
-import { startOAuthRedirect } from '@/shared/lib/oauth'
+import { startOAuthRedirect, oauthProviderFromStatus } from '@/shared/lib/oauth'
 import type { SyncStatus } from '@/shared/types'
 
 type Phase = 'syncing' | 'reauth' | 'error' | 'idle'
@@ -214,10 +214,4 @@ export function SyncStatusMenu() {
       )}
     </div>
   )
-}
-
-function oauthProviderFromStatus(status?: SyncStatus): 'google' | 'microsoft' | null {
-  if (status?.state !== 'reauth_required') return null
-  const provider = status.error?.split(':', 2)[1]
-  return provider === 'google' || provider === 'microsoft' ? provider : null
 }

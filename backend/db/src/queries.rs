@@ -76,6 +76,18 @@ type RawRow = (
 
 const LIST_COLUMNS: &str = "m.id, m.thread_id, m.subject, m.from_addr, m.snippet, m.internal_date, m.is_read, m.is_flagged, m.account_id, m.folder_id, m.list_id, m.phishing_verdict, f.full_path, f.folder_type, m.is_local_draft";
 
+/// One `unified_page` UNION ALL branch: the newest live rows of a single
+/// folder. Pulled out so its query plan is unit-testable directly (see
+/// `folder_branch_forces_the_undeleted_date_index`) — without an explicit
+/// `INDEXED BY`, the planner can pick the global `idx_msg_deleted_date`
+/// instead and walk every other live message in the account before reaching
+/// this folder's rows.
+fn unified_view_branch_sql(unread_clause: &str, cursor_clause: &str) -> String {
+    format!(
+        "SELECT * FROM (SELECT {LIST_COLUMNS} FROM messages m INDEXED BY idx_msg_folder_undeleted_date JOIN folders f ON f.id = m.folder_id WHERE m.folder_id = ? AND m.is_deleted = 0 {unread_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?)",
+    )
+}
+
 /// Cross-account unified inbox/view page, newest first. Pass `account_id` to
 /// scope the same view to a single mailbox (e.g. that account's starred list).
 ///
@@ -154,9 +166,8 @@ pub async fn unified_page(
             // Each branch needs its own ORDER BY + LIMIT to cap the per-folder
             // scan; SQLite only allows that on a UNION ALL branch when it's
             // wrapped in its own subquery, so wrap before joining branches.
-            let per_folder_sql = format!(
-                "SELECT * FROM (SELECT {LIST_COLUMNS} FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.folder_id = ? AND m.is_deleted = 0 {unread_clause} {cursor_clause} ORDER BY m.internal_date DESC LIMIT ?)",
-            );
+            //
+            let per_folder_sql = unified_view_branch_sql(unread_clause, cursor_clause);
             let union_sql = vec![per_folder_sql.as_str(); folder_ids.len()].join(" UNION ALL ");
             let sql =
                 format!("SELECT * FROM ({union_sql}) ORDER BY internal_date DESC LIMIT ?");
@@ -403,7 +414,7 @@ async fn enrich_threads(db: &SqlitePool, rows: Vec<RawRow>) -> Result<Vec<Thread
 
 #[cfg(test)]
 mod tests {
-    use super::{unified_page, STARRED_COUNT_SQL, SYNCED_MESSAGE_COUNT_SQL};
+    use super::{unified_page, unified_view_branch_sql, STARRED_COUNT_SQL, SYNCED_MESSAGE_COUNT_SQL};
     use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 
     async fn test_db() -> SqlitePool {
@@ -495,6 +506,21 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_msg_folder_undeleted_date ON messages(folder_id, internal_date DESC) \
+             WHERE is_deleted = 0",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        // The real deleted+date index unified_page must NOT use for its
+        // per-folder branches (see idx_msg_folder_undeleted_date's INDEXED BY
+        // hint) — present here so a regression that drops the hint is
+        // visible as "wrong index" rather than "only index available".
+        sqlx::query("CREATE INDEX idx_msg_deleted_date ON messages(is_deleted, internal_date DESC)")
+            .execute(&db)
+            .await
+            .unwrap();
         db
     }
 
@@ -511,6 +537,36 @@ mod tests {
             plan.iter()
                 .any(|(_, _, _, detail)| detail.contains("idx_msg_flagged")),
             "unexpected query plan: {plan:?}"
+        );
+    }
+
+    // A folder that's mostly permanently-deleted history (Trash/Spam after
+    // years of use) must not force a scan of every live message in the
+    // account to find its handful of survivors. Without the INDEXED BY hint
+    // on unified_view_branch_sql, the planner picks idx_msg_deleted_date —
+    // present in this schema specifically so that wrong choice is available
+    // to pick, mirroring the real one.
+    #[tokio::test]
+    async fn folder_branch_forces_the_undeleted_date_index() {
+        let db = test_db().await;
+        let sql = unified_view_branch_sql("", "");
+        let plan: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+                .bind("folder-1")
+                .bind(50_i64)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_msg_folder_undeleted_date")),
+            "unexpected query plan: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|(_, _, _, detail)| !detail.contains("idx_msg_deleted_date")),
+            "fell back to the global deleted+date index: {plan:?}"
         );
     }
 

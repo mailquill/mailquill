@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { apiGet, ensureFreshAccessToken, setAccessToken } from './client'
+import {
+  apiGet,
+  ensureFreshAccessToken,
+  getAccessToken,
+  refreshAccessToken,
+  setAccessToken,
+  setRefreshSubscriber,
+} from './client'
 
 function tokenExpiringAt(epochSeconds: number): string {
   const payload = btoa(JSON.stringify({ exp: epochSeconds }))
@@ -11,6 +18,7 @@ function tokenExpiringAt(epochSeconds: number): string {
 
 afterEach(() => {
   setAccessToken(null)
+  setRefreshSubscriber(() => undefined)
   vi.unstubAllGlobals()
 })
 
@@ -66,5 +74,47 @@ describe('access-token renewal', () => {
     }))
 
     await expect(Promise.all([first, second])).resolves.toEqual([fresh, fresh])
+  })
+
+  // A PWA left offline overnight must not be signed out: fetch() throwing
+  // (offline, DNS, timeout) says nothing about whether the "remember me"
+  // refresh cookie is still valid server-side, so this must not be treated
+  // like an explicit auth rejection.
+  it('keeps the session when refresh fails to reach the server at all', async () => {
+    const stale = tokenExpiringAt(Math.floor(Date.now() / 1000) - 1)
+    setAccessToken(stale)
+    const subscriber = vi.fn()
+    setRefreshSubscriber(subscriber)
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    await expect(ensureFreshAccessToken()).resolves.toBeNull()
+
+    expect(getAccessToken()).toBe(stale)
+    expect(subscriber).not.toHaveBeenCalled()
+  })
+
+  it('keeps the session on a transient server error (5xx) from refresh', async () => {
+    const stale = tokenExpiringAt(Math.floor(Date.now() / 1000) - 1)
+    setAccessToken(stale)
+    const subscriber = vi.fn()
+    setRefreshSubscriber(subscriber)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 503 })))
+
+    await expect(refreshAccessToken()).resolves.toBeNull()
+
+    expect(getAccessToken()).toBe(stale)
+    expect(subscriber).not.toHaveBeenCalled()
+  })
+
+  it('clears the session when the server explicitly rejects the refresh cookie (401)', async () => {
+    setAccessToken(tokenExpiringAt(Math.floor(Date.now() / 1000) - 1))
+    const subscriber = vi.fn()
+    setRefreshSubscriber(subscriber)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 401 })))
+
+    await expect(refreshAccessToken()).resolves.toBeNull()
+
+    expect(getAccessToken()).toBeNull()
+    expect(subscriber).toHaveBeenCalledWith(null)
   })
 })

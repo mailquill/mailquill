@@ -65,9 +65,17 @@ async function doRefresh(): Promise<string | null> {
       method: 'POST',
       credentials: 'include',
     })
-    if (!res.ok) {
+    if (res.status === 401) {
+      // The server explicitly rejected the refresh cookie (missing, expired,
+      // or revoked) — this is a genuine logout, not a hiccup.
       accessToken = null
       refreshSubscriber?.(null)
+      return null
+    }
+    if (!res.ok) {
+      // A non-401 failure (5xx, maintenance, ...) says nothing about whether
+      // the refresh cookie is still good. Leave the session alone so the
+      // next attempt — once the server recovers — can still succeed.
       return null
     }
     const data = await res.json()
@@ -75,8 +83,12 @@ async function doRefresh(): Promise<string | null> {
     refreshSubscriber?.(accessToken)
     return accessToken
   } catch {
-    accessToken = null
-    refreshSubscriber?.(null)
+    // fetch() throwing means we couldn't reach the server at all (offline,
+    // DNS, timeout) — not that the session is invalid. A PWA left offline
+    // overnight must not be logged out by this: keep the current access
+    // token and the persisted session as-is, and let the next reachable
+    // attempt (once back online) refresh normally via the still-valid
+    // "remember me" cookie.
     return null
   }
 }

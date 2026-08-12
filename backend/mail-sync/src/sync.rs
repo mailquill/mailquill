@@ -600,6 +600,18 @@ async fn idle_session_loop(
     }
 }
 
+// Spam and trash get new mail constantly; never push-notify for them.
+// Sent/Drafts also never push-notify: a message can legitimately exist in
+// both INBOX and a Sent-type folder (mailing lists, self-CC, auto-forward
+// copies) — without this, the same message notifies once per folder it lands
+// in.
+fn notify_allowed_for_folder_type(folder_type: Option<&str>) -> bool {
+    !matches!(
+        folder_type,
+        Some("SPAM") | Some("TRASH") | Some("SENT") | Some("DRAFTS")
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn sync_folder(
     account_id: &str,
@@ -624,8 +636,7 @@ async fn sync_folder(
     let (folder_id, stored_uidvalidity, last_uid, folder_type) =
         folder_row.ok_or("folder not found")?;
 
-    // Spam and trash get new mail constantly; never push-notify for them.
-    let notify_allowed = !matches!(folder_type.as_deref(), Some("SPAM") | Some("TRASH"));
+    let notify_allowed = notify_allowed_for_folder_type(folder_type.as_deref());
 
     // Folder status (IMAP: SELECT; APIs: metadata lookup)
     let server_uidvalidity = provider.folder_status(folder_path).await?.uidvalidity;
@@ -1365,12 +1376,29 @@ async fn do_imap_expunge(
 mod tests {
     use super::{
         changed_message_flags, default_folder_sync_enabled, folder_sync_priority,
-        load_sync_task_context, oauth_reauthentication_error, persist_message_metadata_chunk,
-        ProviderError, ProviderKind, SyncTaskContext,
+        load_sync_task_context, notify_allowed_for_folder_type, oauth_reauthentication_error,
+        persist_message_metadata_chunk, ProviderError, ProviderKind, SyncTaskContext,
     };
     use crate::session::FetchedMessage;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::collections::HashMap;
+
+    #[test]
+    fn notify_allowed_excludes_spam_trash_sent_drafts() {
+        for blocked in ["SPAM", "TRASH", "SENT", "DRAFTS"] {
+            assert!(
+                !notify_allowed_for_folder_type(Some(blocked)),
+                "expected {blocked} to be excluded from push-notify"
+            );
+        }
+        for allowed in ["INBOX", "ARCHIVE", "CUSTOM"] {
+            assert!(
+                notify_allowed_for_folder_type(Some(allowed)),
+                "expected {allowed} to still push-notify"
+            );
+        }
+        assert!(notify_allowed_for_folder_type(None));
+    }
 
     #[tokio::test]
     async fn sync_task_context_loads_readable_account_identity() {

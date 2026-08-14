@@ -60,6 +60,7 @@ describe('account credential editing and reauth', () => {
     render(<AccountCard account={account} />)
 
     await user.click(screen.getByRole('button', { name: /Work/ }))
+    await user.click(screen.getByRole('button', { name: /Server settings/ }))
     const smtpPassword = screen.getByLabelText('SMTP password') as HTMLInputElement
     expect(smtpPassword.value).toBe('')
     expect(smtpPassword.type).toBe('password')
@@ -77,6 +78,7 @@ describe('account credential editing and reauth', () => {
     render(<AccountCard account={account} />)
 
     await user.click(screen.getByRole('button', { name: /Work/ }))
+    await user.click(screen.getByRole('button', { name: /Server settings/ }))
     const smtpPassword = screen.getByLabelText('SMTP password') as HTMLInputElement
     await user.type(smtpPassword, 'new-app-password')
     await user.click(screen.getByRole('button', { name: 'Save changes' }))

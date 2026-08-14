@@ -144,11 +144,27 @@ export function Swatches({ value, onChange }: { value: string; onChange: (v: str
   )
 }
 
-export function SrvField({ label, children, w }: { label: string; children: ReactNode; w?: string }) {
+export function SrvField({
+  label,
+  children,
+  w,
+  error,
+  htmlFor,
+}: {
+  label: string
+  children: ReactNode
+  w?: string
+  error?: string
+  htmlFor?: string
+}) {
+  const LabelTag = htmlFor ? 'label' : 'div'
   return (
     <div className={cn('min-w-0', w)}>
-      <div className="mb-1.5 text-[11.5px] font-semibold text-secondary-foreground">{label}</div>
+      <LabelTag htmlFor={htmlFor} className="mb-1.5 block text-[11.5px] font-semibold text-secondary-foreground">
+        {label}
+      </LabelTag>
       {children}
+      {error && <p className="mt-1 text-[11px] text-destructive">{error}</p>}
     </div>
   )
 }

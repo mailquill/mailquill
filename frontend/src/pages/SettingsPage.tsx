@@ -15,7 +15,9 @@ import {
   Plus,
   Trash2,
   ChevronDown,
+  ChevronRight,
   ShieldCheck,
+  ShieldAlert,
   CalendarDays,
   Check,
   Monitor,
@@ -24,6 +26,11 @@ import {
   RefreshCw,
   Wrench,
   AlertCircle,
+  Settings as Cog,
+  Globe,
+  Inbox,
+  Send,
+  Calendar,
 } from 'lucide-react'
 import { ApiError } from '@/shared/api'
 import { cn } from '@/shared/lib/utils'
@@ -38,10 +45,10 @@ import {
   tlsCertificateFromError,
   type TlsDecision,
 } from '@/shared/components'
-import { AddAccountForm, Swatches } from '@/features/accounts'
+import { AddAccountForm, Swatches, ServerGroup, SrvField } from '@/features/accounts'
 import { RulesSection } from '@/widgets/RulesSection'
 import { PgpKeyManagement } from '@/widgets/PgpKeyManagement'
-import { davDefaults } from '@/shared/lib/dav'
+import { discoverServersAsync, providerInfo } from '@/shared/lib/serverDiscovery'
 import {
   useAccounts,
   useDeleteAccount,
@@ -92,15 +99,6 @@ const NAV: { id: Section; icon: typeof Users }[] = [
 
 function updateAccountErrorMessage(error: unknown): string {
   return error instanceof ApiError ? error.detail ?? error.message : String(error)
-}
-
-function providerOf(account: Account): string {
-  const host = `${account.imap_host} ${account.smtp_host}`.toLowerCase()
-  if (host.includes('gmail') || host.includes('google')) return 'Google'
-  if (host.includes('office365') || host.includes('outlook') || host.includes('microsoft')) return 'Outlook'
-  if (host.includes('gmx')) return 'GMX'
-  if (host.includes('icloud') || host.includes('apple')) return 'iCloud'
-  return 'IMAP'
 }
 
 export function SettingsPage() {
@@ -305,11 +303,15 @@ export function AccountCard({
 }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(autoFocusCredentials)
+  const [srvOpen, setSrvOpen] = useState(autoFocusCredentials)
+  const [detecting, setDetecting] = useState(false)
+  const [detected, setDetected] = useState<{ source: string; provider: string } | null>(null)
   const [tlsRetryData, setTlsRetryData] = useState<AccountEditData | null>(null)
   const updateAccount = useUpdateAccount()
   const deleteAccount = useDeleteAccount()
   const { data: syncStatus } = useSyncStatus(account.id)
   const color = resolveAccountColor(account)
+  const pInfo = providerInfo(account.primary_email)
   const {
     register,
     handleSubmit,
@@ -330,6 +332,7 @@ export function AccountCard({
 
   function focusCredentials() {
     setExpanded(true)
+    setSrvOpen(true)
     window.requestAnimationFrame(() => {
       const field = document.getElementById(smtpPasswordFieldId)
       field?.scrollIntoView({ block: 'center' })
@@ -344,11 +347,31 @@ export function AccountCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFocusCredentials])
 
-  function autodetectDav() {
-    const { carddav_url, caldav_url } = davDefaults(account.primary_email, account.imap_host)
-    setValue('carddav_url', carddav_url, { shouldDirty: true })
-    setValue('caldav_url', caldav_url, { shouldDirty: true })
+  // Fills host/port/DAV fields from the email domain — never touches
+  // imap_auth_scheme/smtp_auth_scheme, since switching a working account to
+  // xoauth2 needs a fresh OAuth grant, not a guessed hostname.
+  async function runAutodetect() {
+    if (detecting) return
+    setDetecting(true)
+    setDetected(null)
+    const d = await discoverServersAsync(account.primary_email)
+    setValue('imap_host', d.imapHost, { shouldDirty: true })
+    setValue('imap_port', d.imapPort, { shouldDirty: true })
+    setValue('smtp_host', d.smtpHost, { shouldDirty: true })
+    setValue('smtp_port', d.smtpPort, { shouldDirty: true })
+    setValue('carddav_url', d.carddavUrl, { shouldDirty: true })
+    setValue('caldav_url', d.caldavUrl, { shouldDirty: true })
+    setDetected({ source: d.source, provider: d.provider })
+    setDetecting(false)
   }
+
+  const detectLabel = detected && (
+    detected.source === 'provider'
+      ? t('settings.detectedProvider', { provider: detected.provider })
+      : detected.source === 'exchange'
+        ? t('settings.detectedExchange')
+        : t('settings.detectedDns')
+  )
 
   function saveAccount(data: AccountEditData, decision?: TlsDecision) {
     setTlsRetryData(data)
@@ -415,8 +438,14 @@ export function AccountCard({
           <div className="truncate text-[14px] font-bold">{account.display_name}</div>
           <div className="truncate text-[12.5px] text-muted-foreground">{account.primary_email}</div>
         </div>
-        <span className="shrink-0 rounded-full bg-secondary px-2.5 py-1 text-[11px] font-bold text-secondary-foreground">
-          {providerOf(account)}
+        <span
+          className={cn(
+            'inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold',
+            pInfo.known ? 'bg-[var(--mq-row-open)] text-[#1d4ed8]' : 'bg-secondary text-secondary-foreground',
+          )}
+        >
+          {pInfo.oauth && <ShieldAlert className="size-3" />}
+          {pInfo.name}
         </span>
         <ChevronDown className={cn('size-4 shrink-0 text-muted-foreground transition-transform', expanded && 'rotate-180')} />
       </button>
@@ -454,30 +483,6 @@ export function AccountCard({
             <Field id={`${account.id}-sync`} label={t('settings.syncInterval')} error={errors.sync_interval_secs?.message}>
               <Input id={`${account.id}-sync`} type="number" {...register('sync_interval_secs')} />
             </Field>
-            <Field id={`${account.id}-imap-host`} label={t('settings.imapHost')} error={errors.imap_host?.message}>
-              <Input id={`${account.id}-imap-host`} {...register('imap_host')} />
-            </Field>
-            <Field id={`${account.id}-imap-port`} label={t('settings.imapPort')} error={errors.imap_port?.message}>
-              <Input id={`${account.id}-imap-port`} type="number" {...register('imap_port')} />
-            </Field>
-            <Field id={`${account.id}-smtp-host`} label={t('settings.smtpHost')} error={errors.smtp_host?.message}>
-              <Input id={`${account.id}-smtp-host`} {...register('smtp_host')} />
-            </Field>
-            <Field id={`${account.id}-smtp-port`} label={t('settings.smtpPort')} error={errors.smtp_port?.message}>
-              <Input id={`${account.id}-smtp-port`} type="number" {...register('smtp_port')} />
-            </Field>
-            <Field id={`${account.id}-imap-auth`} label={t('settings.imapAuth')} error={errors.imap_auth_scheme?.message}>
-              <Input id={`${account.id}-imap-auth`} {...register('imap_auth_scheme')} />
-            </Field>
-            <Field id={`${account.id}-smtp-auth`} label={t('settings.smtpAuth')} error={errors.smtp_auth_scheme?.message}>
-              <Input id={`${account.id}-smtp-auth`} {...register('smtp_auth_scheme')} />
-            </Field>
-            <Field id={`${account.id}-imap-password`} label={t('settings.imapPassword')} hint={t('settings.passwordUnchangedHint')} error={errors.imap_password?.message}>
-              <Input id={`${account.id}-imap-password`} type="password" autoComplete="new-password" {...register('imap_password')} />
-            </Field>
-            <Field id={smtpPasswordFieldId} label={t('settings.smtpPassword')} hint={t('settings.passwordUnchangedHint')} error={errors.smtp_password?.message}>
-              <Input id={smtpPasswordFieldId} type="password" autoComplete="new-password" {...register('smtp_password')} />
-            </Field>
             <Field id={`${account.id}-body`} label={t('settings.bodySyncMode')} error={errors.body_sync_mode?.message}>
               <Select id={`${account.id}-body`} {...register('body_sync_mode')}>
                 <option value="lazy">{t('settings.loadOnOpen')}</option>
@@ -496,30 +501,114 @@ export function AccountCard({
             />
           </div>
 
-          {/* CalDAV stays part of the normal mailbox settings. Contact server
-              overrides are intentionally kept in advanced setup. */}
+          {/* Server settings — collapsed by default: IMAP/SMTP host, auth,
+              password, plus CardDAV/CalDAV. One auto-detect fills all of it
+              from the account's email domain; it never touches
+              imap_auth_scheme/smtp_auth_scheme, since switching a working
+              account to xoauth2 needs a fresh OAuth grant, not a guessed
+              hostname. */}
           <div className="mt-4 border-t border-border pt-4">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="text-[12px] font-bold uppercase tracking-wide text-muted-foreground">
-                {t('settings.davSection')}
-              </span>
-              <Button type="button" variant="outline" size="sm" onClick={autodetectDav}>
-                {t('settings.autoDetect')}
-              </Button>
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <Field id={`${account.id}-caldav`} label={t('settings.caldavUrl')}>
-                <Input id={`${account.id}-caldav`} placeholder="https://…/.well-known/caldav" {...register('caldav_url')} />
-              </Field>
-            </div>
-            <details className="mt-3 rounded-md border border-border p-3">
-              <summary className="cursor-pointer text-[12.5px] font-semibold">{t('contacts.advancedCarddav')}</summary>
-              <div className="mt-3 max-w-xl">
-                <Field id={`${account.id}-carddav`} label={t('settings.carddavUrl')}>
-                  <Input id={`${account.id}-carddav`} placeholder="https://…/.well-known/carddav" {...register('carddav_url')} />
-                </Field>
+            <button
+              type="button"
+              onClick={() => setSrvOpen((o) => !o)}
+              className={cn(
+                'flex w-full items-center gap-2.5 border border-border bg-secondary px-3.5 py-[11px]',
+                srvOpen ? 'rounded-t-lg' : 'rounded-lg',
+              )}
+            >
+              <Cog className="size-4 text-secondary-foreground" />
+              <span className="text-[13px] font-bold text-foreground">{t('settings.serverSettings')}</span>
+              <span className="text-[11.5px] text-muted-foreground">{t('settings.serverSettingsHint')}</span>
+              {srvOpen ? (
+                <ChevronDown className="ml-auto size-[15px] text-muted-foreground" />
+              ) : (
+                <ChevronRight className="ml-auto size-[15px] text-muted-foreground" />
+              )}
+            </button>
+
+            {srvOpen && (
+              <div className="flex flex-col gap-5 rounded-b-lg border border-t-0 border-border p-4">
+                {pInfo.oauth && (
+                  <div className="flex items-center gap-3 rounded-lg border border-[#bfdbfe] bg-[var(--mq-row-open)] px-3.5 py-3">
+                    <ShieldAlert className="size-[18px] shrink-0 text-[#2563eb]" />
+                    <span className="flex-1 text-[12.5px] leading-snug text-secondary-foreground">{t('settings.oauthBanner')}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={runAutodetect}
+                    disabled={detecting}
+                    className={cn(
+                      'inline-flex h-[34px] items-center gap-2 rounded-[7px] px-3.5 text-[12.5px] font-bold transition-colors',
+                      detecting ? 'cursor-default bg-secondary text-muted-foreground' : 'bg-[#2563eb] text-white hover:bg-[#1d4ed8]',
+                    )}
+                  >
+                    {detecting ? <RefreshCw className="size-[15px] animate-spin" /> : <Globe className="size-[15px]" />}
+                    {detecting ? t('settings.detecting') : t('settings.autoDetect')}
+                  </button>
+                  {detected && !detecting && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-[#16a34a]/10 px-2.5 py-1 text-[12px] font-semibold text-[#16a34a]">
+                      <Check className="size-3.5" strokeWidth={2.5} />
+                      {detectLabel}
+                    </span>
+                  )}
+                  <span className="ml-auto text-[11.5px] text-muted-foreground">{t('settings.autoHint')}</span>
+                </div>
+
+                <ServerGroup title={t('settings.imap')} icon={Inbox}>
+                  <div className="flex gap-3">
+                    <SrvField label={t('settings.host')} w="flex-[2.2]" error={errors.imap_host?.message}>
+                      <Input className="font-mono" {...register('imap_host')} />
+                    </SrvField>
+                    <SrvField label={t('settings.port')} w="flex-[0.7]" error={errors.imap_port?.message}>
+                      <Input className="font-mono" type="number" {...register('imap_port')} />
+                    </SrvField>
+                    <SrvField label={t('settings.imapAuth')} w="flex-[1.1]" error={errors.imap_auth_scheme?.message}>
+                      <Input className="font-mono" {...register('imap_auth_scheme')} />
+                    </SrvField>
+                  </div>
+                  <SrvField label={t('settings.imapPassword')} error={errors.imap_password?.message} htmlFor={`${account.id}-imap-password`}>
+                    <Input id={`${account.id}-imap-password`} type="password" autoComplete="new-password" {...register('imap_password')} />
+                  </SrvField>
+                </ServerGroup>
+
+                <ServerGroup title={t('settings.smtp')} icon={Send}>
+                  <div className="flex gap-3">
+                    <SrvField label={t('settings.host')} w="flex-[2.2]" error={errors.smtp_host?.message}>
+                      <Input className="font-mono" {...register('smtp_host')} />
+                    </SrvField>
+                    <SrvField label={t('settings.port')} w="flex-[0.7]" error={errors.smtp_port?.message}>
+                      <Input className="font-mono" type="number" {...register('smtp_port')} />
+                    </SrvField>
+                    <SrvField label={t('settings.smtpAuth')} w="flex-[1.1]" error={errors.smtp_auth_scheme?.message}>
+                      <Input className="font-mono" {...register('smtp_auth_scheme')} />
+                    </SrvField>
+                  </div>
+                  <SrvField label={t('settings.smtpPassword')} error={errors.smtp_password?.message} htmlFor={smtpPasswordFieldId}>
+                    <Input id={smtpPasswordFieldId} type="password" autoComplete="new-password" {...register('smtp_password')} />
+                  </SrvField>
+                </ServerGroup>
+
+                <ServerGroup title={t('settings.caldav')} icon={Calendar}>
+                  <SrvField label={t('settings.url')}>
+                    <Input className="font-mono" placeholder="https://…/.well-known/caldav" {...register('caldav_url')} />
+                  </SrvField>
+                </ServerGroup>
+
+                <details className="rounded-md border border-border p-3">
+                  <summary className="cursor-pointer text-[12.5px] font-semibold">{t('contacts.advancedCarddav')}</summary>
+                  <div className="mt-3">
+                    <ServerGroup title={t('settings.carddav')} icon={Users}>
+                      <SrvField label={t('settings.url')}>
+                        <Input className="font-mono" placeholder="https://…/.well-known/carddav" {...register('carddav_url')} />
+                      </SrvField>
+                    </ServerGroup>
+                  </div>
+                </details>
               </div>
-            </details>
+            )}
           </div>
 
           {/* Folder selection — pick which mailboxes get synced */}

@@ -268,11 +268,23 @@ fn proxy_blocked_response(url: &Url, err: AppError) -> Response<Body> {
     empty_image_response()
 }
 
+/// A 1x1 transparent GIF. Upstream failures (dead link, blocked host, wrong
+/// content type, ...) must still resolve as a *successful* image load —
+/// `204 No Content` has no decodable body, so the browser fires the `<img>`
+/// `error` event and renders the native broken-image icon instead of the
+/// blank space a failed/expired remote image should be.
+const TRANSPARENT_GIF: &[u8] = &[
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0xFF, 0xFF, 0xFF, 0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B,
+];
+
 fn empty_image_response() -> Response<Body> {
     Response::builder()
-        .status(StatusCode::NO_CONTENT)
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/gif")
         .header(header::CACHE_CONTROL, "private, max-age=300")
-        .body(Body::empty())
+        .body(Body::from(TRANSPARENT_GIF))
         .unwrap()
 }
 
@@ -283,5 +295,24 @@ fn sanitized_url(raw: &str) -> String {
             url.to_string()
         }
         Err(_) => raw.split('?').next().unwrap_or(raw).to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A dead link, blocked host, or non-image upstream response must still
+    // resolve as a *successful* <img> load — 204 has no decodable body, so
+    // the browser fires the error event and shows a broken-image icon
+    // instead of the blank space a failed remote image should render as.
+    #[test]
+    fn empty_image_response_is_a_decodable_image_not_no_content() {
+        let response = empty_image_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/gif"
+        );
     }
 }

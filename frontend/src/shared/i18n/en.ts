@@ -162,6 +162,7 @@ export const en = {
     moveTo: 'Move to',
     createRule: 'Create rule from email',
     done: 'Done',
+    close: 'Close',
     movedTo: 'Moved to {{folder}}',
   },
   ml: {
@@ -202,6 +203,10 @@ export const en = {
     attachments_other: '{{count}} attachments',
     unnamedAttachment: 'Unnamed attachment',
     attachmentDownloadFailed: 'Download failed — try again',
+    attachmentDownload: 'Download',
+    attachmentPreview: 'Open a preview of {{name}}',
+    attachmentPreviewLoading: 'Loading preview…',
+    attachmentPreviewFailed: 'The preview could not be loaded.',
     spamSuspected: 'Suspected spam',
     spamSuspectedDescription:
       'This message is in the spam folder. Check the sender, links, and attachments before interacting with it.',

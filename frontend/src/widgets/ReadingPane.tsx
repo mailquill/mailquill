@@ -16,7 +16,6 @@ import {
   Download,
   Code,
   FileText,
-  Paperclip,
   ImageOff,
   List,
   ChevronDown,
@@ -56,9 +55,10 @@ import {
 import { useMeetingInvitations, useRsvpInvitation } from '@/shared/hooks/useCalendar'
 import { useContactSearch } from '@/shared/hooks/useContacts'
 import { useAddAllowedImageSender, useImageAllowlist, usePublicConfig, useSettings } from '@/shared/hooks/useSettings'
+import { AttachmentList } from '@/widgets/AttachmentList'
 import { PgpMessagePanel } from '@/widgets/PgpMessagePanel'
 import type { MailOutletContext } from '@/pages/MailLayout'
-import type { MeetingInvitation, Message, MessageAttachment } from '@/shared/types'
+import type { MeetingInvitation, Message } from '@/shared/types'
 
 function ToolButton({
   label,
@@ -788,81 +788,6 @@ function isSpamMessage(message: Message) {
 
 function hasCompleteBody(message: Message | undefined): boolean {
   return Boolean(message && (message.body_available === true || message.body_html != null || message.body_text != null))
-}
-
-function AttachmentList({ attachments }: { attachments: MessageAttachment[] }) {
-  const { t, i18n } = useTranslation()
-  const [downloadingId, setDownloadingId] = useState<string | null>(null)
-  const [failedId, setFailedId] = useState<string | null>(null)
-
-  const downloadAttachment = async (attachment: MessageAttachment) => {
-    setDownloadingId(attachment.id)
-    setFailedId(null)
-    try {
-      const blob = await apiGetBlob(`/attachments/${attachment.id}`)
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = attachment.filename?.split(/[\\/]/).pop() || t('mail.unnamedAttachment')
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-    } catch {
-      setFailedId(attachment.id)
-    } finally {
-      setDownloadingId(null)
-    }
-  }
-
-  return (
-    <section className="mb-3.5 rounded-md border border-border bg-secondary/30 px-3 py-2.5">
-      <div className="mb-2 flex items-center gap-1.5 text-[12.5px] font-bold text-secondary-foreground">
-        <Paperclip className="size-4" aria-hidden="true" />
-        {t('mail.attachments', { count: attachments.length })}
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {attachments.map((attachment) => {
-          const filename = attachment.filename || t('mail.unnamedAttachment')
-          const failed = failedId === attachment.id
-          return (
-            <button
-              key={attachment.id}
-              type="button"
-              onClick={() => downloadAttachment(attachment)}
-              disabled={downloadingId === attachment.id}
-              className="group flex min-w-0 max-w-full items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2 text-left shadow-sm transition-colors hover:bg-secondary disabled:opacity-60"
-            >
-              <span className="flex size-8 shrink-0 items-center justify-center rounded bg-secondary text-muted-foreground group-hover:text-foreground">
-                <FileText className="size-4" aria-hidden="true" />
-              </span>
-              <span className="min-w-0">
-                <span className="block max-w-72 truncate text-[12.5px] font-semibold text-foreground">{filename}</span>
-                <span className={cn('block text-[11px]', failed ? 'text-destructive' : 'text-muted-foreground')}>
-                  {failed
-                    ? t('mail.attachmentDownloadFailed')
-                    : formatAttachmentSize(attachment.size_bytes, i18n.language) || attachment.content_type}
-                </span>
-              </span>
-              <Download className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
-            </button>
-          )
-        })}
-      </div>
-    </section>
-  )
-}
-
-function formatAttachmentSize(size: number | null, locale: string): string | null {
-  if (size == null) return null
-  const units = ['B', 'KB', 'MB', 'GB']
-  let value = size
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: unit === 0 ? 0 : 1 }).format(value)} ${units[unit]}`
 }
 
 function RsvpCard({ messageId }: { messageId: string }) {

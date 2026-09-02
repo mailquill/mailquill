@@ -110,6 +110,7 @@ export const de = {
     moveTo: 'Verschieben in',
     createRule: 'Regel aus E-Mail erstellen',
     done: 'Fertig',
+    close: 'Schließen',
     movedTo: 'Nach {{folder}} verschoben',
   },
   topbar: {
@@ -202,6 +203,10 @@ export const de = {
     attachments_other: '{{count}} Anhänge',
     unnamedAttachment: 'Unbenannter Anhang',
     attachmentDownloadFailed: 'Download fehlgeschlagen – erneut versuchen',
+    attachmentDownload: 'Herunterladen',
+    attachmentPreview: '{{name}} in der Vorschau öffnen',
+    attachmentPreviewLoading: 'Vorschau wird geladen…',
+    attachmentPreviewFailed: 'Vorschau konnte nicht geladen werden.',
     spamSuspected: 'Spamverdacht',
     spamSuspectedDescription:
       'Diese Nachricht liegt im Spam-Ordner. Prüfe Absender, Links und Anhänge, bevor du mit ihr interagierst.',

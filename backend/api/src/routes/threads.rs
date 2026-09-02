@@ -246,17 +246,17 @@ async fn bulk_thread_action(
                     .bind(msg_id)
                     .execute(&user_db)
                     .await?;
-                state
-                    .sync_manager
-                    .queue_imap_flag(
-                        user_id.to_owned(),
-                        account_id.clone(),
-                        *uid as u32,
-                        folder_path.clone(),
-                        "seen".into(),
-                        is_read,
-                    )
-                    .await;
+                crate::routes::messages::enqueue_flag_op(
+                    &state,
+                    user_id,
+                    &user_db,
+                    account_id,
+                    *uid,
+                    folder_path,
+                    "seen",
+                    is_read,
+                )
+                .await;
             }
         }
     }

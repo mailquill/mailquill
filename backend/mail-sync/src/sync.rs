@@ -139,9 +139,9 @@ async fn run_sync_task_with_context(
                             warn!("IMAP move failed: account={account_id} user={uid} uid={msg_uid} folder={src_folder} dest={dest_folder} expunge={expunge} err={e}");
                         }
                     }
-                    Some(SyncCommand::IMapFlag { user_id: uid, uid: msg_uid, folder, flag, set }) => {
-                        if let Err(e) = do_imap_flag(&account_id, &uid, msg_uid, &folder, &flag, set, &app_state).await {
-                            warn!("IMAP flag failed: account={account_id} user={uid} uid={msg_uid} folder={folder} flag={flag} set={set} err={e}");
+                    Some(SyncCommand::FlushFlags { user_id: uid }) => {
+                        if let Err(e) = do_flush_pending_flags(&account_id, &uid, &app_state).await {
+                            warn!("flag flush failed: account={account_id} user={uid} err={e}");
                         }
                     }
                     Some(SyncCommand::IMapExpunge { user_id: uid, uid: msg_uid, folder }) => {
@@ -241,6 +241,11 @@ async fn sync_account(
     let provider_kind = ProviderKind::parse(&provider_kind);
 
     let mut provider = open_provider(account_id, user_id, app).await?;
+
+    // Push locally queued flag changes first: the reconciliation below copies
+    // server flags over local rows, so an unpushed "mark read" would otherwise
+    // be reverted right here.
+    flush_pending_flags(account_id, provider.as_mut(), &db).await;
 
     // Discover folders (task 4.1). Every folder is upserted so it stays visible
     // and toggle-able in settings, regardless of whether it's synced.
@@ -687,7 +692,15 @@ async fn sync_folder(
     // Header backfill below only fetches NEW uids, so server-side flag changes on
     // existing messages (e.g. read on another device) would otherwise never sync.
     if prev_last_uid > 0 {
-        reconcile_flags(&folder_id, folder_path, prev_last_uid, provider, db).await?;
+        reconcile_flags(
+            account_id,
+            &folder_id,
+            folder_path,
+            prev_last_uid,
+            provider,
+            db,
+        )
+        .await?;
     }
 
     // Highest UID currently in the mailbox bounds the chunk walk.
@@ -1057,7 +1070,51 @@ async fn persist_message_metadata_chunk(
         }
         metadata_tx.commit().await?;
     }
+    // The upsert above copies the server's flags onto every re-imported row.
+    // Restore flags whose local change is still queued for the server, so a
+    // message read right after it arrived doesn't jump back to unread.
+    reapply_pending_flags(account_id, folder_id, folder_path, chunk_start, chunk_end, db).await?;
     Ok(imported_messages)
+}
+
+/// Re-assert pending local flag values on rows a metadata chunk just rewrote.
+async fn reapply_pending_flags(
+    account_id: &str,
+    folder_id: &str,
+    folder_path: &str,
+    chunk_start: u32,
+    chunk_end: u32,
+    db: &sqlx::SqlitePool,
+) -> Result<(), sqlx::Error> {
+    const RESTORE_SEEN: &str = "UPDATE messages SET is_read = (
+             SELECT p.value FROM pending_flag_ops p
+             WHERE p.account_id = ? AND p.folder_path = ? AND p.flag = 'seen' AND p.uid = messages.uid
+         )
+         WHERE folder_id = ? AND uid BETWEEN ? AND ? AND EXISTS (
+             SELECT 1 FROM pending_flag_ops p
+             WHERE p.account_id = ? AND p.folder_path = ? AND p.flag = 'seen' AND p.uid = messages.uid
+         )";
+    const RESTORE_FLAGGED: &str = "UPDATE messages SET is_flagged = (
+             SELECT p.value FROM pending_flag_ops p
+             WHERE p.account_id = ? AND p.folder_path = ? AND p.flag = 'flagged' AND p.uid = messages.uid
+         )
+         WHERE folder_id = ? AND uid BETWEEN ? AND ? AND EXISTS (
+             SELECT 1 FROM pending_flag_ops p
+             WHERE p.account_id = ? AND p.folder_path = ? AND p.flag = 'flagged' AND p.uid = messages.uid
+         )";
+    for sql in [RESTORE_SEEN, RESTORE_FLAGGED] {
+        sqlx::query(sql)
+            .bind(account_id)
+            .bind(folder_path)
+            .bind(folder_id)
+            .bind(i64::from(chunk_start))
+            .bind(i64::from(chunk_end))
+            .bind(account_id)
+            .bind(folder_path)
+            .execute(db)
+            .await?;
+    }
+    Ok(())
 }
 
 fn contiguous_uid(current: i64, sorted_uids: &[i64]) -> i64 {
@@ -1161,9 +1218,105 @@ async fn process_calendar_parts(db: &sqlx::SqlitePool, message_id: &str, parts: 
     }
 }
 
+/// One pending flag row: the change the user made locally, still to be pushed.
+type PendingFlagOp = (i64, String, i64, String, bool, i64);
+
+/// Which flags of a message have an unconfirmed local push.
+#[derive(Clone, Copy, Default)]
+struct PendingFlags {
+    seen: bool,
+    flagged: bool,
+}
+
+/// Give up on a flag the server keeps rejecting instead of retrying forever
+/// (e.g. the uid was expunged remotely, or the folder is read-only).
+const MAX_FLAG_PUSH_ATTEMPTS: i64 = 10;
+
+/// Every flag change queued for an account that the server has not confirmed.
+async fn pending_flag_ops(
+    account_id: &str,
+    db: &sqlx::SqlitePool,
+) -> Result<Vec<PendingFlagOp>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, folder_path, uid, flag, value, attempts FROM pending_flag_ops WHERE account_id = ? ORDER BY id",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await
+}
+
+/// Pending flags of one folder, keyed by uid, for the reconciliation to skip.
+async fn pending_flags_by_uid(
+    account_id: &str,
+    folder_path: &str,
+    db: &sqlx::SqlitePool,
+) -> HashMap<i64, PendingFlags> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT uid, flag FROM pending_flag_ops WHERE account_id = ? AND folder_path = ?",
+    )
+    .bind(account_id)
+    .bind(folder_path)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    let mut pending: HashMap<i64, PendingFlags> = HashMap::new();
+    for (uid, flag) in rows {
+        let entry = pending.entry(uid).or_default();
+        match flag.as_str() {
+            "seen" => entry.seen = true,
+            "flagged" => entry.flagged = true,
+            _ => {}
+        }
+    }
+    pending
+}
+
+/// Push the pending flag changes of an account to the server, clearing each row
+/// the server accepted.
+///
+/// Runs before anything reads flags back, so the reconciliation sees the state
+/// the user asked for. A failed push keeps its row (and its protection against
+/// being reverted) until the retry budget is spent; a single bad uid must not
+/// abort the sync cycle, so errors are logged, not propagated.
+async fn flush_pending_flags(account_id: &str, provider: &mut dyn MailProvider, db: &sqlx::SqlitePool) {
+    let ops = match pending_flag_ops(account_id, db).await {
+        Ok(ops) => ops,
+        Err(error) => {
+            warn!("pending flag ops unreadable: account={account_id} err={error}");
+            return;
+        }
+    };
+    for (id, folder_path, uid, flag, value, attempts) in ops {
+        let uid = uid.clamp(0, u32::MAX as i64) as u32;
+        match provider.set_flag(&folder_path, uid, &flag, value).await {
+            Ok(()) => {
+                let _ = sqlx::query("DELETE FROM pending_flag_ops WHERE id = ?")
+                    .bind(id)
+                    .execute(db)
+                    .await;
+            }
+            Err(error) => {
+                let attempts = attempts + 1;
+                warn!(
+                    "flag push failed: account={account_id} folder={folder_path} uid={uid} flag={flag} value={value} attempt={attempts} err={error}"
+                );
+                let query = if attempts >= MAX_FLAG_PUSH_ATTEMPTS {
+                    sqlx::query("DELETE FROM pending_flag_ops WHERE id = ?").bind(id)
+                } else {
+                    sqlx::query("UPDATE pending_flag_ops SET attempts = ? WHERE id = ?")
+                        .bind(attempts)
+                        .bind(id)
+                };
+                let _ = query.execute(db).await;
+            }
+        }
+    }
+}
+
 /// Reconcile read/flagged state of stored messages (UIDs `1..=up_to_uid`) with
 /// the server by fetching FLAGS in chunks and updating rows that exist locally.
 async fn reconcile_flags(
+    account_id: &str,
     folder_id: &str,
     folder_path: &str,
     up_to_uid: u32,
@@ -1171,6 +1324,10 @@ async fn reconcile_flags(
     db: &sqlx::SqlitePool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     const FLAG_CHUNK: u32 = 1000;
+    // Flags the user changed locally whose push has not been confirmed yet.
+    // The server's value for those is stale by definition, so keep the local
+    // one instead of reverting the user's action.
+    let pending = pending_flags_by_uid(account_id, folder_path, db).await;
     let mut start: u32 = 1;
     while start <= up_to_uid {
         let end = start.saturating_add(FLAG_CHUNK - 1).min(up_to_uid);
@@ -1192,7 +1349,7 @@ async fn reconcile_flags(
         .map(|(uid, seen, flagged, deleted)| (uid, (seen, flagged, deleted)))
         .collect();
         let expunged = expunged_uids(&flags, &stored_flags);
-        let changed_flags = changed_message_flags(flags, &stored_flags);
+        let changed_flags = changed_message_flags(flags, &stored_flags, &pending);
         if changed_flags.is_empty() && expunged.is_empty() {
             if end >= up_to_uid {
                 break;
@@ -1255,11 +1412,16 @@ fn expunged_uids(
 fn changed_message_flags(
     server_flags: Vec<(u32, bool, bool, bool)>,
     stored_flags: &HashMap<i64, (bool, bool, bool)>,
+    pending: &HashMap<i64, PendingFlags>,
 ) -> Vec<(u32, bool, bool, bool)> {
     server_flags
         .into_iter()
         .filter_map(|(uid, seen, flagged, deleted)| {
             let stored = stored_flags.get(&i64::from(uid))?;
+            // A pending local push wins over the server's pre-push value.
+            let pending = pending.get(&i64::from(uid)).copied().unwrap_or_default();
+            let seen = if pending.seen { stored.0 } else { seen };
+            let flagged = if pending.flagged { stored.1 } else { flagged };
             let effective_deleted = deleted || stored.2;
             (stored != &(seen, flagged, effective_deleted)).then_some((uid, seen, flagged, deleted))
         })
@@ -1344,17 +1506,19 @@ async fn resolve_dest_folder(
     dest.to_owned()
 }
 
-async fn do_imap_flag(
+/// Open a connection just to drain the pending flag outbox (immediate push
+/// after the user flipped a flag; the next sync cycle drains it as well).
+async fn do_flush_pending_flags(
     account_id: &str,
     user_id: &str,
-    uid: u32,
-    folder: &str,
-    flag: &str,
-    set: bool,
     app: &Arc<dyn SyncAppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let db = app.user_db(user_id).await?;
+    if pending_flag_ops(account_id, &db).await?.is_empty() {
+        return Ok(());
+    }
     let mut provider = open_provider(account_id, user_id, app).await?;
-    provider.set_flag(folder, uid, flag, set).await?;
+    flush_pending_flags(account_id, provider.as_mut(), &db).await;
     let _ = provider.close().await;
     Ok(())
 }
@@ -1377,7 +1541,7 @@ mod tests {
     use super::{
         changed_message_flags, default_folder_sync_enabled, folder_sync_priority,
         load_sync_task_context, notify_allowed_for_folder_type, oauth_reauthentication_error,
-        persist_message_metadata_chunk, ProviderError, ProviderKind, SyncTaskContext,
+        persist_message_metadata_chunk, PendingFlags, ProviderError, ProviderKind, SyncTaskContext,
     };
     use crate::session::FetchedMessage;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -1550,6 +1714,7 @@ mod tests {
                 (3, false, false, false),
             ],
             &stored,
+            &HashMap::new(),
         );
 
         assert_eq!(changed, vec![(2, true, true, false)]);
@@ -1559,9 +1724,44 @@ mod tests {
     fn flag_reconciliation_never_restores_locally_deleted_messages() {
         let stored = HashMap::from([(1, (true, false, true))]);
 
-        let changed = changed_message_flags(vec![(1, true, false, false)], &stored);
+        let changed = changed_message_flags(vec![(1, true, false, false)], &stored, &HashMap::new());
 
         assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn flag_reconciliation_keeps_local_state_while_a_push_is_pending() {
+        // Read locally, not yet pushed: the server still reports it unseen.
+        let stored = HashMap::from([(1, (true, false, false))]);
+        let pending = HashMap::from([(
+            1,
+            PendingFlags {
+                seen: true,
+                flagged: false,
+            },
+        )]);
+
+        let changed = changed_message_flags(vec![(1, false, false, false)], &stored, &pending);
+
+        assert!(changed.is_empty(), "a pending push must not be reverted");
+    }
+
+    #[test]
+    fn flag_reconciliation_still_applies_flags_without_a_pending_push() {
+        let stored = HashMap::from([(1, (true, false, false))]);
+        let pending = HashMap::from([(
+            1,
+            PendingFlags {
+                seen: true,
+                flagged: false,
+            },
+        )]);
+
+        // \Flagged has no pending push, so the server's value wins — while the
+        // pending \Seen keeps the local read state.
+        let changed = changed_message_flags(vec![(1, false, true, false)], &stored, &pending);
+
+        assert_eq!(changed, vec![(1, true, true, false)]);
     }
 
     #[test]

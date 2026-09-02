@@ -808,13 +808,42 @@ pub async fn queue_imap_flag(
         .await;
         r
     }.await {
-        state.sync_manager.queue_imap_flag(
-            user_id.to_owned(),
-            account_id,
-            uid as u32,
-            folder_path,
-            flag.to_owned(),
-            set,
-        ).await;
+        enqueue_flag_op(state, user_id, db, &account_id, uid, &folder_path, flag, set).await;
     }
+}
+
+/// Record a flag change as pending and nudge the account's sync task to push it.
+///
+/// The row in `pending_flag_ops` is what makes the change survive: the nudge is
+/// best-effort (no sync task, full channel, failed IMAP command), and until the
+/// server confirms the flag, the pending row also stops the next flag
+/// reconciliation from copying the server's stale value back over the local one.
+pub async fn enqueue_flag_op(
+    state: &AppState,
+    user_id: &str,
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+    uid: i64,
+    folder_path: &str,
+    flag: &str,
+    set: bool,
+) {
+    let stored = sqlx::query(
+        "INSERT INTO pending_flag_ops (account_id, folder_path, uid, flag, value) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, folder_path, uid, flag) DO UPDATE SET value = excluded.value, attempts = 0",
+    )
+    .bind(account_id)
+    .bind(folder_path)
+    .bind(uid)
+    .bind(flag)
+    .bind(set)
+    .execute(db)
+    .await;
+    if let Err(error) = stored {
+        tracing::warn!("pending flag op not stored: message flag may revert: {error}");
+    }
+    state
+        .sync_manager
+        .queue_flag_flush(user_id.to_owned(), account_id)
+        .await;
 }

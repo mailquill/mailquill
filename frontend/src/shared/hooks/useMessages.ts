@@ -132,10 +132,35 @@ function adjustCountsForRemoval(qc: QueryClient, id: string): () => void {
   return () => qc.setQueryData(['unified-counts'], prev)
 }
 
+// Flip one cached row's read state, keeping the thread's unread counter — the
+// value list rows actually render — consistent with it.
+function markMessageRead(m: Message, isRead: boolean): Message {
+  if (m.is_read === isRead) return m
+  const threadUnread =
+    m.thread_unread == null
+      ? m.thread_unread
+      : isRead
+        ? Math.max(0, m.thread_unread - 1)
+        : m.thread_unread + 1
+  return { ...m, is_read: isRead, thread_unread: threadUnread }
+}
+
 // Optimistically flip a message's read state in every cached list and adjust the
 // affected unread badges. `mark_read` refreshes the same counts server-side, so
 // the reconciling refetch matches and there's no flicker.
-function optimisticMarkRead(qc: QueryClient, id: string, isRead: boolean): () => void {
+async function optimisticMarkRead(
+  qc: QueryClient,
+  id: string,
+  isRead: boolean,
+): Promise<() => void> {
+  // A list request already in flight would otherwise resolve *after* the flip
+  // and write the pre-flip rows back, leaving the row unread until the next
+  // refetch — the whole reason marking read looked unreliable.
+  await Promise.all([
+    qc.cancelQueries({ queryKey: ['unified'] }),
+    qc.cancelQueries({ queryKey: ['folder-messages'] }),
+    qc.cancelQueries({ queryKey: ['unified-counts'] }),
+  ])
   const prevCounts = qc.getQueryData<UnifiedCounts>(['unified-counts'])
   const snaps = [
     ...qc.getQueriesData<InfiniteList>({ queryKey: ['unified'] }),
@@ -153,14 +178,16 @@ function optimisticMarkRead(qc: QueryClient, id: string, isRead: boolean): () =>
     }
     qc.setQueryData(['unified-counts'], next)
   }
-  // Then flip is_read in the list caches so rows update immediately.
+  // Then flip is_read in the list caches so rows update immediately. Rows render
+  // their unread state from `thread_unread` (falling back to `is_read`), so that
+  // counter has to move too — otherwise the row stays bold until the refetch.
   for (const [key, data] of snaps) {
     if (!data) continue
     qc.setQueryData<InfiniteList>(key, {
       ...data,
       pages: data.pages.map((p) => ({
         ...p,
-        messages: p.messages.map((m) => (m.id === id ? { ...m, is_read: isRead } : m)),
+        messages: p.messages.map((m) => (m.id === id ? markMessageRead(m, isRead) : m)),
       })),
     })
   }

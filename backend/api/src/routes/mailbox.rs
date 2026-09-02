@@ -202,30 +202,30 @@ pub async fn bulk_action(
             let uid = uid as u32;
             match action.as_str() {
                 "read" => {
-                    state2
-                        .sync_manager
-                        .queue_imap_flag(
-                            user_id.clone(),
-                            account_id,
-                            uid,
-                            full_path,
-                            "seen".into(),
-                            true,
-                        )
-                        .await
+                    crate::routes::messages::enqueue_flag_op(
+                        &state2,
+                        &user_id,
+                        &db2,
+                        &account_id,
+                        i64::from(uid),
+                        &full_path,
+                        "seen",
+                        true,
+                    )
+                    .await
                 }
                 "flag" => {
-                    state2
-                        .sync_manager
-                        .queue_imap_flag(
-                            user_id.clone(),
-                            account_id,
-                            uid,
-                            full_path,
-                            "flagged".into(),
-                            true,
-                        )
-                        .await
+                    crate::routes::messages::enqueue_flag_op(
+                        &state2,
+                        &user_id,
+                        &db2,
+                        &account_id,
+                        i64::from(uid),
+                        &full_path,
+                        "flagged",
+                        true,
+                    )
+                    .await
                 }
                 "archive" => {
                     state2

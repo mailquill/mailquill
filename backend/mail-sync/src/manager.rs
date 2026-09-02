@@ -40,13 +40,10 @@ pub enum SyncCommand {
         dest_folder: String,
         expunge: bool,
     },
-    IMapFlag {
-        user_id: String,
-        uid: u32,
-        folder: String,
-        flag: String,
-        set: bool,
-    },
+    /// Push every flag change queued in `pending_flag_ops` to the server.
+    /// Carries no payload: the ops live in the user database, so a coalesced
+    /// wake-up is enough and nothing is lost if this signal is dropped.
+    FlushFlags { user_id: String },
     IMapExpunge {
         user_id: String,
         uid: u32,
@@ -200,28 +197,16 @@ impl SyncManager {
         }
     }
 
-    /// Queue an IMAP flag change.
-    pub async fn queue_imap_flag(
-        &self,
-        user_id: String,
-        account_id: String,
-        uid: u32,
-        folder: String,
-        flag: String,
-        set: bool,
-    ) {
+    /// Ask an account's sync task to push its pending flag changes now.
+    ///
+    /// Best-effort by design: the ops are already persisted, so a full channel
+    /// (a flush is queued anyway) or a missing task (account paused, task
+    /// restarting) only delays the push to the next sync cycle instead of
+    /// losing it.
+    pub async fn queue_flag_flush(&self, user_id: String, account_id: &str) {
         let tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.get(&account_id) {
-            let _ = task
-                .tx
-                .send(SyncCommand::IMapFlag {
-                    user_id,
-                    uid,
-                    folder,
-                    flag,
-                    set,
-                })
-                .await;
+        if let Some(task) = tasks.get(account_id) {
+            let _ = task.tx.try_send(SyncCommand::FlushFlags { user_id });
         }
     }
 

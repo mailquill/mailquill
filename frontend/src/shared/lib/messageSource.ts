@@ -1,5 +1,6 @@
 import type { Message } from '@/shared/types'
 import { parseFromAddr } from '@/shared/lib/format'
+import { htmlToPlainText } from '@/shared/lib/htmlToPlainText'
 
 // Synthesize realistic message internals (headers, raw .eml) from the stored
 // message model, using real values where the backend provides them and filling
@@ -38,13 +39,7 @@ const domainOf = (email: string) => email.split('@')[1] || 'localhost'
 
 export function messagePlain(message: Message): string {
   if (message.body_text) return message.body_text
-  if (message.body_html) {
-    return message.body_html
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim()
-  }
+  if (message.body_html) return htmlToPlainText(message.body_html)
   return message.snippet ?? ''
 }
 

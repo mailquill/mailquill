@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { messageHtml } from './messageSource'
+import { messageHtml, messagePlain } from './messageSource'
 import type { Message } from '@/shared/types'
 
 function textMessage(body: string): Message {
@@ -40,5 +40,21 @@ describe('messageHtml', () => {
     const message = { ...textMessage('plain'), body_html: '<p>rich</p>' } as Message
 
     expect(messageHtml(message)).toBe('<p>rich</p>')
+  })
+})
+
+describe('messagePlain', () => {
+  it('prefers the plain-text part verbatim', () => {
+    expect(messagePlain(textMessage('Zeile 1\r\nZeile 2'))).toBe('Zeile 1\r\nZeile 2')
+  })
+
+  it('keeps the line structure of an HTML-only message', () => {
+    const message = {
+      ...textMessage(''),
+      body_text: null,
+      body_html: '<p>Guten Tag,</p><div>Mit freundlichen Grüßen<br>Ihre Sparkasse</div>',
+    } as Message
+
+    expect(messagePlain(message)).toBe('Guten Tag,\n\nMit freundlichen Grüßen\nIhre Sparkasse')
   })
 })

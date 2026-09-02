@@ -51,9 +51,14 @@ export function messagePlain(message: Message): string {
 export function messageHtml(message: Message): string {
   if (message.body_html) return message.body_html
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  // Mail bodies arrive with CRLF line endings, and HTML collapses every run of
+  // whitespace: without normalizing the endings a blank line never matches the
+  // paragraph split, and without the <br> a wrapped signature ends up on the
+  // same line. Both turn the plain-text fallback into one unbroken block.
   const paras = messagePlain(message)
+    .replace(/\r\n?/g, '\n')
     .split(/\n{2,}/)
-    .map((p) => `  <p style="margin:0 0 14px;">${esc(p)}</p>`)
+    .map((p) => `  <p style="margin:0 0 14px;">${esc(p).replace(/\n/g, '<br>')}</p>`)
     .join('\n')
   return `<!DOCTYPE html>
 <html>

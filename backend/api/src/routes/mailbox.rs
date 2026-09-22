@@ -173,8 +173,6 @@ pub async fn bulk_action(
     let affected = q.fetch_all(&user_db).await?;
     let affected_len = affected.len();
 
-    crate::routes::messages::refresh_unread_counts(&user_db).await;
-
     // Propagate to IMAP in the background — queueing potentially thousands of
     // commands must not block the response.
     let action = req.action.clone();

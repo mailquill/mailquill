@@ -388,7 +388,6 @@ pub async fn mark_read(
         .bind(&message_id)
         .execute(&user_db)
         .await?;
-    refresh_unread_counts(&user_db).await;
 
     // Queue IMAP flag update
     queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", req.is_read).await;
@@ -488,6 +487,13 @@ pub async fn delete_message(
     .flatten();
     let is_trash = src_type.as_deref() == Some("TRASH");
 
+    // Hide the row before queueing the IMAP side: queueing waits while the
+    // account's sync task is busy, and the delete has to stick even then.
+    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+        .bind(&message_id)
+        .execute(&user_db)
+        .await?;
+
     if is_trash {
         // Hard delete — EXPUNGE
         state
@@ -508,12 +514,6 @@ pub async fn delete_message(
             )
             .await;
     }
-
-    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
-        .bind(&message_id)
-        .execute(&user_db)
-        .await?;
-    refresh_unread_counts(&user_db).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -537,6 +537,13 @@ pub async fn move_message(
             .await?;
     let dest_path = dest_path.ok_or(AppError::NotFound)?;
 
+    // Hide the row before queueing, so the move sticks even while the
+    // account's sync task is too busy to take the command right away.
+    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+        .bind(&message_id)
+        .execute(&user_db)
+        .await?;
+
     state
         .sync_manager
         .queue_imap_move(
@@ -548,12 +555,6 @@ pub async fn move_message(
             false,
         )
         .await;
-
-    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
-        .bind(&message_id)
-        .execute(&user_db)
-        .await?;
-    refresh_unread_counts(&user_db).await;
     let _ = state.sync_manager.force_poll(&account_id).await;
 
     Ok(StatusCode::NO_CONTENT)
@@ -583,7 +584,6 @@ pub async fn mark_not_spam(
             .bind(&message_id)
             .execute(&user_db)
             .await?;
-        refresh_unread_counts(&user_db).await;
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -600,6 +600,13 @@ pub async fn mark_not_spam(
         return Ok(StatusCode::NO_CONTENT);
     }
 
+    // Hide the row before queueing, so the move sticks even while the
+    // account's sync task is too busy to take the command right away.
+    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+        .bind(&message_id)
+        .execute(&user_db)
+        .await?;
+
     state
         .sync_manager
         .queue_imap_move(
@@ -611,12 +618,6 @@ pub async fn mark_not_spam(
             false,
         )
         .await;
-
-    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
-        .bind(&message_id)
-        .execute(&user_db)
-        .await?;
-    refresh_unread_counts(&user_db).await;
     let _ = state.sync_manager.force_poll(&account_id).await;
 
     Ok(StatusCode::NO_CONTENT)
@@ -674,14 +675,6 @@ async fn trust_sender_of(user_db: &sqlx::SqlitePool, message_id: &str) {
 /// that touches is_read or is_deleted must call this or the sidebar badges
 /// go stale. A full recompute is cheap (few folders, messages.folder_id is
 /// indexed) and stays correct for multi-folder mutations like thread actions.
-pub(crate) async fn refresh_unread_counts(db: &sqlx::SqlitePool) {
-    let _ = sqlx::query(
-        "UPDATE folders SET unread_count = (SELECT COUNT(*) FROM messages WHERE folder_id = folders.id AND is_read = 0 AND is_deleted = 0)",
-    )
-    .execute(db)
-    .await;
-}
-
 async fn require_message_exists(db: &sqlx::SqlitePool, message_id: &str) -> Result<(), AppError> {
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM messages WHERE id = ?")
         .bind(message_id)

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    error::AppError, middleware::UserId, routes::messages::refresh_unread_counts, state::AppState,
+    error::AppError, middleware::UserId, state::AppState,
 };
 
 #[derive(Deserialize)]
@@ -259,10 +259,6 @@ async fn bulk_thread_action(
                 .await;
             }
         }
-    }
-
-    if matches!(action, ThreadAction::Delete | ThreadAction::MarkRead(_)) {
-        refresh_unread_counts(&user_db).await;
     }
 
     Ok(StatusCode::NO_CONTENT)

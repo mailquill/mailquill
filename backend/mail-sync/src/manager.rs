@@ -85,7 +85,7 @@ impl SyncManager {
         let mut tasks = self.tasks.lock().await;
         // Stop any existing task for this account
         if let Some(old) = tasks.remove(&account_id) {
-            let _ = old.tx.send(SyncCommand::Shutdown).await;
+            let _ = old.tx.try_send(SyncCommand::Shutdown);
             old.handle.abort();
         }
         self.statuses
@@ -116,7 +116,7 @@ impl SyncManager {
     pub async fn stop_account(&self, account_id: &str) {
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.remove(account_id) {
-            let _ = task.tx.send(SyncCommand::Shutdown).await;
+            let _ = task.tx.try_send(SyncCommand::Shutdown);
             task.handle.abort();
         }
         self.statuses.lock().await.remove(account_id);
@@ -162,13 +162,33 @@ impl SyncManager {
         st.total = total;
     }
 
+    /// The command sender of an account's sync task, if one is running.
+    ///
+    /// Callers send on the returned clone after the registry lock is released:
+    /// the channel is bounded and a task busy with a long sync can keep it full,
+    /// and waiting for capacity while holding the lock would stall every other
+    /// account's commands with it.
+    async fn task_sender(&self, account_id: &str) -> Option<mpsc::Sender<SyncCommand>> {
+        self.tasks
+            .lock()
+            .await
+            .get(account_id)
+            .map(|task| task.tx.clone())
+    }
+
     /// Queue an immediate sync poll for an account.
+    ///
+    /// Returns whether the account has a live sync task. Never waits: a full
+    /// channel means the task is alive with work queued, and its ticker polls
+    /// anyway, so dropping this poll is fine — blocking the caller (an HTTP
+    /// request) until a long sync drains the queue is not.
     pub async fn force_poll(&self, account_id: &str) -> bool {
-        let tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.get(account_id) {
-            task.tx.send(SyncCommand::ForcePoll).await.is_ok()
-        } else {
-            false
+        match self.task_sender(account_id).await {
+            Some(tx) => !matches!(
+                tx.try_send(SyncCommand::ForcePoll),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ),
+            None => false,
         }
     }
 
@@ -182,10 +202,8 @@ impl SyncManager {
         dest_folder: String,
         expunge: bool,
     ) {
-        let tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.get(&account_id) {
-            let _ = task
-                .tx
+        if let Some(tx) = self.task_sender(&account_id).await {
+            let _ = tx
                 .send(SyncCommand::IMapMove {
                     user_id,
                     uid,
@@ -204,9 +222,8 @@ impl SyncManager {
     /// restarting) only delays the push to the next sync cycle instead of
     /// losing it.
     pub async fn queue_flag_flush(&self, user_id: String, account_id: &str) {
-        let tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.get(account_id) {
-            let _ = task.tx.try_send(SyncCommand::FlushFlags { user_id });
+        if let Some(tx) = self.task_sender(account_id).await {
+            let _ = tx.try_send(SyncCommand::FlushFlags { user_id });
         }
     }
 
@@ -218,10 +235,8 @@ impl SyncManager {
         uid: u32,
         folder: String,
     ) {
-        let tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.get(&account_id) {
-            let _ = task
-                .tx
+        if let Some(tx) = self.task_sender(&account_id).await {
+            let _ = tx
                 .send(SyncCommand::IMapExpunge {
                     user_id,
                     uid,
@@ -283,5 +298,73 @@ pub trait SyncAppState: Send + Sync + 'static {
         _account_id: &str,
     ) -> Result<Option<String>, String> {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Registers an account whose command channel is already full, like a sync
+    /// task stuck in a long cycle. The receiver is kept so the channel stays open.
+    async fn busy_account(manager: &SyncManager) -> mpsc::Receiver<SyncCommand> {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(SyncCommand::ForcePoll).unwrap();
+        let handle = tokio::spawn(async {});
+        manager
+            .tasks
+            .lock()
+            .await
+            .insert("busy".into(), AccountTask { tx, handle });
+        rx
+    }
+
+    #[tokio::test]
+    async fn force_poll_on_a_busy_task_reports_it_alive_without_waiting() {
+        let manager = SyncManager::new();
+        let _rx = busy_account(&manager).await;
+
+        let alive = tokio::time::timeout(Duration::from_secs(1), manager.force_poll("busy"))
+            .await
+            .expect("force_poll must not wait for channel capacity");
+        assert!(alive, "a full channel still means the task is running");
+    }
+
+    #[tokio::test]
+    async fn a_busy_account_does_not_block_commands_for_other_accounts() {
+        let manager = Arc::new(SyncManager::new());
+        let _rx = busy_account(&manager).await;
+
+        // Waits for capacity on the busy account's channel.
+        let blocked = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .queue_imap_expunge("user".into(), "busy".into(), 1, "Trash".into())
+                    .await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let handle = tokio::spawn(async {});
+        tokio::time::timeout(Duration::from_secs(1), async {
+            manager
+                .tasks
+                .lock()
+                .await
+                .insert("other".into(), AccountTask { tx, handle });
+            manager
+                .queue_imap_expunge("user".into(), "other".into(), 2, "Trash".into())
+                .await;
+        })
+        .await
+        .expect("the registry lock must not be held while waiting on a full channel");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SyncCommand::IMapExpunge { uid: 2, .. })
+        ));
+        blocked.abort();
     }
 }

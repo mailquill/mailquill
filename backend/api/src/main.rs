@@ -28,8 +28,8 @@ use api::state::{AppState, VapidConfig};
 #[allow(dead_code)]
 struct FrontendAssets;
 
-const PROXIED_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; object-src 'none'";
-const DIRECT_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: http: https:; connect-src 'self'; frame-src 'none'; object-src 'none'";
+const PROXIED_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob:; object-src 'none'";
+const DIRECT_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: http: https:; connect-src 'self'; frame-src blob:; object-src 'none'";
 
 fn content_security_policy(remote_image_proxy_enabled: bool) -> &'static str {
     if remote_image_proxy_enabled {
@@ -693,6 +693,8 @@ mod tests {
             assert!(csp.contains("script-src 'self'"));
             assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
             assert!(csp.contains("connect-src 'self'"));
+            // PDF attachment previews render an object URL in an iframe.
+            assert!(csp.contains("frame-src blob:;"));
             assert_eq!(csp, content_security_policy(proxy_enabled));
             if proxy_enabled {
                 assert!(!csp.contains("http:"));

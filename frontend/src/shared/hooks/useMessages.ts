@@ -5,6 +5,8 @@ import {
   useQueryClient,
   type QueryClient,
 } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import i18n from '@/shared/i18n'
 import { apiGet, apiPost, apiPatch, apiDelete } from '@/shared/api'
 import type { Message, SaveDraftInput, SendMessageInput } from '@/shared/types'
 import type { UnifiedCounts, UnifiedView } from '@/shared/lib/unifiedViews'
@@ -85,6 +87,13 @@ export function useThread(threadId: string) {
     queryFn: () => apiGet<{ messages: Message[] }>(`/threads/${threadId}`),
     enabled: !!threadId,
   })
+}
+
+// A failed list action rolls its optimistic change back, which on its own looks
+// exactly like a list that refused to refresh. Say what happened instead.
+function reportActionError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  toast.error(i18n.t('mail.actionFailed', { error: message }))
 }
 
 // Sidebar badges read from ['folders'] and ['unified-counts'], so every mutation
@@ -243,7 +252,10 @@ export function useMarkRead() {
     mutationFn: ({ id, is_read }: { id: string; is_read: boolean }) =>
       apiPatch(`/messages/${id}/read`, { is_read }),
     onMutate: ({ id, is_read }) => optimisticMarkRead(qc, id, is_read),
-    onError: (_e, _vars, restore) => restore?.(),
+    onError: (error, _vars, restore) => {
+      restore?.()
+      reportActionError(error)
+    },
     onSettled: (_data, _err, { id }) => {
       qc.invalidateQueries({ queryKey: ['message', id] })
       invalidateMailLists(qc)
@@ -268,7 +280,10 @@ export function useArchiveMessage() {
   return useMutation({
     mutationFn: (id: string) => apiPost(`/messages/${id}/archive`),
     onMutate: (id) => removeFromMailLists(qc, (m) => m.id === id),
-    onError: (_e, _id, restore) => restore?.(),
+    onError: (error, _id, restore) => {
+      restore?.()
+      reportActionError(error)
+    },
     onSettled: () => invalidateMailLists(qc),
   })
 }
@@ -289,7 +304,10 @@ export function useNotSpamMessage() {
   return useMutation({
     mutationFn: (id: string) => apiPost(`/messages/${id}/not-spam`),
     onMutate: (id) => removeFromMailLists(qc, (m) => m.id === id),
-    onError: (_e, _id, restore) => restore?.(),
+    onError: (error, _id, restore) => {
+      restore?.()
+      reportActionError(error)
+    },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['thread'] })
       invalidateMailLists(qc)
@@ -339,7 +357,10 @@ export function useDeleteMessage() {
         restoreCounts()
       }
     },
-    onError: (_e, _id, restore) => restore?.(),
+    onError: (error, _id, restore) => {
+      restore?.()
+      reportActionError(error)
+    },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['thread'] })
       invalidateMailLists(qc)
@@ -365,6 +386,7 @@ export function useBulkAction() {
       folder,
     }: { action: 'read' | 'archive' | 'delete' | 'flag' } & BulkScope) =>
       apiPost('/mailbox/bulk', { action, view, account_id: accountId, folder }),
+    onError: reportActionError,
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['thread'] })
       invalidateMailLists(qc)
@@ -377,7 +399,10 @@ export function useArchiveThread() {
   return useMutation({
     mutationFn: (threadId: string) => apiPost(`/threads/${threadId}/archive`),
     onMutate: (threadId) => removeFromMailLists(qc, (m) => m.thread_id === threadId),
-    onError: (_e, _id, restore) => restore?.(),
+    onError: (error, _id, restore) => {
+      restore?.()
+      reportActionError(error)
+    },
     onSettled: () => invalidateMailLists(qc),
   })
 }
@@ -387,7 +412,10 @@ export function useDeleteThread() {
   return useMutation({
     mutationFn: (threadId: string) => apiPost(`/threads/${threadId}/delete`),
     onMutate: (threadId) => removeFromMailLists(qc, (m) => m.thread_id === threadId),
-    onError: (_e, _id, restore) => restore?.(),
+    onError: (error, _id, restore) => {
+      restore?.()
+      reportActionError(error)
+    },
     onSettled: () => invalidateMailLists(qc),
   })
 }

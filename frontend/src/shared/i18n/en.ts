@@ -182,6 +182,7 @@ export const en = {
     flag: 'Flag',
   },
   mail: {
+    actionFailed: 'Action failed: {{error}}',
     conversations: '{{count}} conversations',
     messageCount: '{{count}} messages',
     allAccounts: 'all accounts',

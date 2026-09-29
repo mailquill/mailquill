@@ -13,13 +13,9 @@ use std::path::Path;
 /// Open (creating if needed) a mail db pool with the production WAL pragmas and
 /// migrations applied.
 pub async fn open_pool(path: &Path) -> anyhow::Result<SqlitePool> {
-    let opts = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true);
-    let pool = SqlitePool::connect_with(opts).await?;
-    sqlx::query(db::migrations::WAL_PRAGMAS)
-        .execute(&pool)
-        .await?;
+    let pool =
+        SqlitePool::connect_with(db::migrations::connect_options(path).create_if_missing(true))
+            .await?;
     db::migrations::run_mail_migrations(&pool)
         .await
         .map_err(|e| anyhow::anyhow!("migrations: {e}"))?;

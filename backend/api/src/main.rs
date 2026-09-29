@@ -13,7 +13,7 @@ use mailquill_core::{
     blob::create_blob_store, crypto::CredentialKey, jwt::JwtKey, pii::init_pii_mode,
 };
 use rust_embed::RustEmbed;
-use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+use sqlx::SqlitePool;
 use std::{
     io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
@@ -519,14 +519,9 @@ async fn reset_account_password(email: &str, data_dir: Option<PathBuf>) -> Resul
 }
 
 async fn open_existing_app_db(db_path: &Path) -> Result<SqlitePool, String> {
-    let options = SqliteConnectOptions::new().filename(db_path);
-    let pool = SqlitePool::connect_with(options)
+    let pool = SqlitePool::connect_with(db::migrations::connect_options(db_path))
         .await
         .map_err(|error| format!("cannot open {}: {error}", db_path.display()))?;
-    sqlx::query(db::migrations::WAL_PRAGMAS)
-        .execute(&pool)
-        .await
-        .map_err(|error| format!("cannot configure {}: {error}", db_path.display()))?;
     db::migrations::run_app_migrations(&pool)
         .await
         .map_err(|error| format!("cannot migrate {}: {error}", db_path.display()))?;
@@ -555,14 +550,10 @@ fn load_vapid_config(settings: &config::Settings) -> Option<Arc<VapidConfig>> {
 
 async fn open_app_db(data_dir: &str) -> SqlitePool {
     let db_path = format!("{data_dir}/app.db");
-    let opts = SqliteConnectOptions::new()
-        .filename(&db_path)
-        .create_if_missing(true);
-    let pool = SqlitePool::connect_with(opts).await.expect("open app.db");
-    sqlx::query(db::migrations::WAL_PRAGMAS)
-        .execute(&pool)
-        .await
-        .expect("apply WAL pragmas");
+    let pool =
+        SqlitePool::connect_with(db::migrations::connect_options(&db_path).create_if_missing(true))
+            .await
+            .expect("open app.db");
     db::migrations::run_app_migrations(&pool)
         .await
         .expect("run app migrations");

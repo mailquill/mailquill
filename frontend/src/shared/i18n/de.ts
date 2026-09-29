@@ -182,6 +182,7 @@ export const de = {
     flag: 'Markieren',
   },
   mail: {
+    actionFailed: 'Aktion fehlgeschlagen: {{error}}',
     conversations: '{{count}} Unterhaltungen',
     messageCount: '{{count}} Nachrichten',
     allAccounts: 'alle Konten',

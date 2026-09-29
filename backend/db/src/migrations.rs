@@ -1,4 +1,8 @@
-use sqlx::{migrate::MigrateError, SqlitePool};
+use sqlx::{
+    migrate::MigrateError,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
+    SqlitePool,
+};
 
 pub async fn run_app_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
     sqlx::migrate!("./migrations/app").run(pool).await
@@ -8,14 +12,28 @@ pub async fn run_mail_migrations(pool: &SqlitePool) -> Result<(), MigrateError> 
     sqlx::migrate!("./migrations/mail").run(pool).await
 }
 
-pub const WAL_PRAGMAS: &str = "
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA cache_size=-65536;
-PRAGMA mmap_size=268435456;
-PRAGMA temp_store=MEMORY;
-PRAGMA foreign_keys=ON;
-";
+/// Connection options every Mailquill SQLite pool is opened with.
+///
+/// The pragmas belong here rather than in a one-off `PRAGMA` statement run
+/// against the pool: all but `journal_mode` are per-connection settings, and a
+/// statement executed on a pool reaches exactly one of its connections. The
+/// rest then ran with SQLite's defaults, including a five-second lock timeout —
+/// short enough that an API write could fail with "database is locked" while a
+/// sync cycle held the writer, losing the user's action.
+pub fn connect_options(path: impl AsRef<std::path::Path>) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        // A sync cycle commits large chunks; API writes wait for it instead of
+        // failing. Long enough to outlast a chunk, short enough to surface a
+        // genuinely stuck writer.
+        .busy_timeout(std::time::Duration::from_secs(30))
+        .pragma("cache_size", "-65536")
+        .pragma("mmap_size", "268435456")
+        .pragma("temp_store", "MEMORY")
+}
 
 #[cfg(test)]
 mod tests {
@@ -33,6 +51,43 @@ mod tests {
             .await
             .unwrap();
         pool
+    }
+
+    /// Every pooled connection must carry the pragmas, not just the first one:
+    /// a `PRAGMA` statement run against the pool reaches a single connection.
+    #[tokio::test]
+    async fn every_pooled_connection_gets_the_pragmas() {
+        let dir = std::env::temp_dir().join(format!("mailquill-pragmas-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pragmas.db");
+        let pool = SqlitePoolOptions::new()
+            .min_connections(4)
+            .max_connections(4)
+            .connect_with(connect_options(&path).create_if_missing(true))
+            .await
+            .unwrap();
+
+        // Hold all four at once, so each reports its own settings.
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(pool.acquire().await.unwrap());
+        }
+        for conn in &mut held {
+            let timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+                .fetch_one(&mut **conn)
+                .await
+                .unwrap();
+            assert_eq!(timeout, 30_000);
+            let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&mut **conn)
+                .await
+                .unwrap();
+            assert_eq!(foreign_keys, 1);
+        }
+
+        drop(held);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

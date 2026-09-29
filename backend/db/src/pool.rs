@@ -1,6 +1,6 @@
-use crate::migrations::{run_mail_migrations, WAL_PRAGMAS};
+use crate::migrations::{connect_options, run_mail_migrations};
 use lru::LruCache;
-use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+use sqlx::SqlitePool;
 use std::{
     num::NonZeroUsize,
     path::PathBuf,
@@ -62,16 +62,7 @@ impl UserDbPool {
             .map_err(PoolError::Io)?;
 
         let db_path = dir.join("mail.db");
-        let opts = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true);
-
-        let pool = SqlitePool::connect_with(opts)
-            .await
-            .map_err(PoolError::Sqlx)?;
-
-        sqlx::query(WAL_PRAGMAS)
-            .execute(&pool)
+        let pool = SqlitePool::connect_with(connect_options(&db_path).create_if_missing(true))
             .await
             .map_err(PoolError::Sqlx)?;
 

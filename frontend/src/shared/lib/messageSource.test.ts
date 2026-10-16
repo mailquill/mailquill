@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { messageHtml, messagePlain } from './messageSource'
+import { messageHeaders, messageHtml, messagePlain, messageRawEml } from './messageSource'
 import type { Message } from '@/shared/types'
 
 function textMessage(body: string): Message {
@@ -56,5 +56,64 @@ describe('messagePlain', () => {
     } as Message
 
     expect(messagePlain(message)).toBe('Guten Tag,\n\nMit freundlichen Grüßen\nIhre Sparkasse')
+  })
+})
+
+describe('message date headers', () => {
+  it('prefers a valid message date and formats timestamps with a matching UTC offset', () => {
+    const message = { ...textMessage('body'), date: '2026-09-01T23:59:58-04:00' }
+    const headers = Object.fromEntries(messageHeaders(message))
+
+    expect(headers.Date).toBe('Wed, 02 Sep 2026 03:59:58 +0000')
+    expect(headers.Received).toContain('Wed, 02 Sep 2026 04:00:02 +0000')
+    expect(headers['DKIM-Signature']).toContain(`t=${Date.parse(message.date) / 1000};`)
+  })
+
+  it.each([null, '', 'not a date', '2026-99-99T00:00:00Z', '+999999-01-01T00:00:00Z'])(
+    'falls back to the internal date when the message date is %j',
+    (date) => {
+      const message = { ...textMessage('body'), date }
+      const headers = Object.fromEntries(messageHeaders(message))
+
+      expect(headers.Date).toBe('Wed, 02 Sep 2026 10:15:00 +0000')
+      expect(headers.Received).toContain('Wed, 02 Sep 2026 10:15:04 +0000')
+      expect(headers['DKIM-Signature']).toContain(`t=${Date.parse(message.internal_date) / 1000};`)
+      expect(messageRawEml(message)).toContain(`Date: ${headers.Date}`)
+    },
+  )
+
+  it.each([
+    { date: 'not a date', internal_date: 'also invalid' },
+    { date: '', internal_date: '' },
+    { date: null, internal_date: 'invalid' },
+  ])('keeps headers and raw export usable without valid dates: %j', (dates) => {
+    const message = { ...textMessage('The message body'), ...dates }
+    const headers = Object.fromEntries(messageHeaders(message))
+    const raw = messageRawEml(message)
+
+    expect(headers).not.toHaveProperty('Date')
+    expect(headers['DKIM-Signature']).not.toMatch(/\bt=/)
+    expect(headers.From).toBe('Kontowecker <noreply@kontowecker.de>')
+    expect(raw).toContain('The message body')
+    expect(raw).not.toMatch(/NaN|Invalid Date|undefined/)
+    expect(messageRawEml(message)).toBe(raw)
+  })
+
+  it('uses a valid message date even when the internal date is invalid', () => {
+    const message = {
+      ...textMessage('body'),
+      date: '2026-09-02T10:15:00Z',
+      internal_date: 'invalid',
+    }
+
+    expect(Object.fromEntries(messageHeaders(message)).Date).toBe('Wed, 02 Sep 2026 10:15:00 +0000')
+  })
+
+  it('handles delivery delay overflow at the maximum supported date', () => {
+    const message = { ...textMessage('body'), date: '+275760-09-13T00:00:00.000Z' }
+    const headers = Object.fromEntries(messageHeaders(message))
+
+    expect(headers.Received).toContain(headers.Date)
+    expect(messageRawEml(message)).not.toMatch(/NaN|Invalid Date/)
   })
 })

@@ -28,11 +28,20 @@ function hex(seed: string, n: number): string {
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-function rfc2822(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
+/** Format a validated date in UTC so its fields agree with the offset. */
+function rfc2822(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0')
-  return `${DOW[d.getDay()]}, ${p(d.getDate())} ${MON[d.getMonth()]} ${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} +0200`
+  return `${DOW[d.getUTCDay()]}, ${p(d.getUTCDate())} ${MON[d.getUTCMonth()]} ${d.getUTCFullYear()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} +0000`
+}
+
+/** Prefer the message date, falling back to a valid internal date. */
+function messageDate(message: Message): Date | null {
+  for (const value of [message.date, message.internal_date]) {
+    if (!value) continue
+    const date = new Date(value)
+    if (!Number.isNaN(date.getTime())) return date
+  }
+  return null
 }
 
 const domainOf = (email: string) => email.split('@')[1] || 'localhost'
@@ -66,20 +75,31 @@ ${paras}
 
 export type Header = [name: string, value: string]
 
+/**
+ * Synthesize headers, omitting date-derived values when no valid date exists.
+ * @param message - Stored message whose headers should be synthesized.
+ * @returns Deterministic headers for display and raw message export.
+ */
 export function messageHeaders(message: Message): Header[] {
   const { name, email } = parseFromAddr(message.from_addr)
   const date = message.date ?? message.internal_date
   const seed = `${message.id}|${email}|${date}|${message.subject}`
   const fromDomain = domainOf(email)
   const msgId = message.message_id_header || `<${hex(seed, 24)}.${hex(seed + 'b', 8)}@${fromDomain}>`
-  const recvDate = rfc2822(new Date(new Date(date).getTime() + 4000).toISOString())
+  const parsedDate = messageDate(message)
+  const receivedDate = parsedDate ? new Date(parsedDate.getTime() + 4000) : null
+  // Adding the delivery delay can exceed JavaScript's supported date range.
+  const recvDate = receivedDate && !Number.isNaN(receivedDate.getTime())
+    ? rfc2822(receivedDate)
+    : parsedDate ? rfc2822(parsedDate) : null
+  const signatureTime = parsedDate ? ` t=${Math.floor(parsedDate.getTime() / 1000)};` : ''
 
   const headers: Header[] = [
     ['Delivered-To', message.to_addrs || ''],
     ['Return-Path', `<${email}>`],
     [
       'Received',
-      `from mail.${fromDomain} (mail.${fromDomain}. [${parseInt(hex(seed, 2), 16)}.${parseInt(hex(seed + '1', 2), 16)}.${parseInt(hex(seed + '2', 2), 16)}.${parseInt(hex(seed + '3', 2), 16)}])\n        by mx.mailtastic.app with ESMTPS id ${hex(seed + 'r', 16)};\n        ${recvDate}`,
+      `from mail.${fromDomain} (mail.${fromDomain}. [${parseInt(hex(seed, 2), 16)}.${parseInt(hex(seed + '1', 2), 16)}.${parseInt(hex(seed + '2', 2), 16)}.${parseInt(hex(seed + '3', 2), 16)}])\n        by mx.mailtastic.app with ESMTPS id ${hex(seed + 'r', 16)}${recvDate ? `;\n        ${recvDate}` : ''}`,
     ],
     [
       'Authentication-Results',
@@ -87,10 +107,10 @@ export function messageHeaders(message: Message): Header[] {
     ],
     [
       'DKIM-Signature',
-      `v=1; a=rsa-sha256; c=relaxed/relaxed; d=${fromDomain};\n        s=default; t=${Math.floor(new Date(date).getTime() / 1000)};\n        bh=${hex(seed + 'bh', 44)}=;\n        b=${hex(seed + 'sig', 60)}=`,
+      `v=1; a=rsa-sha256; c=relaxed/relaxed; d=${fromDomain};\n        s=default;${signatureTime}\n        bh=${hex(seed + 'bh', 44)}=;\n        b=${hex(seed + 'sig', 60)}=`,
     ],
     ['Message-ID', msgId],
-    ['Date', rfc2822(date)],
+    ...(parsedDate ? [['Date', rfc2822(parsedDate)] as Header] : []),
     ['From', name ? `${name} <${email}>` : `<${email}>`],
     ['To', message.to_addrs || ''],
   ]

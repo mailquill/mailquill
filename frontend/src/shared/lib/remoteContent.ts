@@ -38,6 +38,15 @@ export function blockRemoteContent(html: string): RemoteBlockResult {
   // Legacy HTML-email markup: <body background>, <td background>, …
   doc.querySelectorAll('[background]').forEach((el) => stripAttr(el, 'background'))
 
+  // <link> fetches (stylesheets, prefetch, icons) are remote loads too and
+  // have no inline equivalent worth keeping.
+  doc.querySelectorAll('link[href]').forEach((el) => {
+    if (REMOTE_URL.test(el.getAttribute('href') ?? '')) {
+      el.remove()
+      blocked = true
+    }
+  })
+
   const stripCss = (css: string) => {
     const replaced = css.replace(CSS_REMOTE_URL, 'url()')
     if (replaced !== css) blocked = true
@@ -80,6 +89,12 @@ export function proxyRemoteContent(html: string, token: string | null): string {
   })
 
   doc.querySelectorAll('[background]').forEach((el) => proxyAttr(el, 'background'))
+
+  // Only image-like resources go through the proxy; a remote <link> would
+  // bypass it, so it is dropped even when remote images are allowed.
+  doc.querySelectorAll('link[href]').forEach((el) => {
+    if (REMOTE_URL.test(el.getAttribute('href') ?? '')) el.remove()
+  })
 
   const proxyCss = (css: string) =>
     css.replace(CSS_REMOTE_URL, (_match, quote: string, raw: string) => {

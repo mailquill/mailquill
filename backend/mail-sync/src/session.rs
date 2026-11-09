@@ -534,14 +534,25 @@ pub async fn move_message(
     dest_folder: &str,
     expunge_after: bool,
 ) -> Result<(), SessionError> {
-    let uid_set = uid.to_string();
-    let result = session.uid_mv(&uid_set, dest_folder).await;
+    move_uid_set(session, &uid.to_string(), dest_folder, expunge_after).await
+}
+
+/// MOVE every message of an IMAP uid set (`"4,7:9"`) to another folder in one
+/// command. Uids the server no longer has are ignored by `UID MOVE`, so a set
+/// may name messages another client already removed.
+pub async fn move_uid_set(
+    session: &mut ImapSession,
+    uid_set: &str,
+    dest_folder: &str,
+    expunge_after: bool,
+) -> Result<(), SessionError> {
+    let result = session.uid_mv(uid_set, dest_folder).await;
 
     if result.is_err() {
         // Fallback: COPY + mark deleted + expunge
-        session.uid_copy(&uid_set, dest_folder).await?;
+        session.uid_copy(uid_set, dest_folder).await?;
         session
-            .uid_store(&uid_set, "+FLAGS.SILENT (\\Deleted)")
+            .uid_store(uid_set, "+FLAGS.SILENT (\\Deleted)")
             .await?
             .try_collect::<Vec<_>>()
             .await?;
@@ -550,6 +561,31 @@ pub async fn move_message(
         }
     }
     Ok(())
+}
+
+/// Render uids as a compact IMAP sequence set, folding runs into ranges
+/// (`[1, 2, 3, 7]` → `"1:3,7"`). The input is sorted and deduplicated first.
+pub fn uid_set(uids: &[u32]) -> String {
+    let mut sorted: Vec<u32> = uids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let start = sorted[i];
+        let mut end = start;
+        while i + 1 < sorted.len() && sorted[i + 1] == end + 1 {
+            i += 1;
+            end = sorted[i];
+        }
+        parts.push(if start == end {
+            start.to_string()
+        } else {
+            format!("{start}:{end}")
+        });
+        i += 1;
+    }
+    parts.join(",")
 }
 
 /// Set or clear an IMAP flag.
@@ -580,9 +616,14 @@ pub async fn set_flag(
 
 /// EXPUNGE a specific UID (mark deleted + expunge).
 pub async fn expunge_uid(session: &mut ImapSession, uid: u32) -> Result<(), SessionError> {
-    let uid_set = uid.to_string();
+    expunge_uid_set(session, &uid.to_string()).await
+}
+
+/// Mark every message of an IMAP uid set `\Deleted` and EXPUNGE the selected
+/// folder once. One round trip pair regardless of how many uids the set names.
+pub async fn expunge_uid_set(session: &mut ImapSession, uid_set: &str) -> Result<(), SessionError> {
     session
-        .uid_store(&uid_set, "+FLAGS.SILENT (\\Deleted)")
+        .uid_store(uid_set, "+FLAGS.SILENT (\\Deleted)")
         .await?
         .try_collect::<Vec<_>>()
         .await?;
@@ -626,11 +667,18 @@ pub async fn append_to_sent(
 
 #[cfg(test)]
 mod tests {
-    use super::build_xoauth2_sasl;
+    use super::{build_xoauth2_sasl, uid_set};
 
     #[test]
     fn xoauth2_sasl_payload_is_not_preencoded() {
         let sasl = build_xoauth2_sasl("user@example.com", "token");
         assert_eq!(sasl, "user=user@example.com\x01auth=Bearer token\x01\x01");
+    }
+
+    #[test]
+    fn uid_set_folds_runs_and_ignores_order_and_duplicates() {
+        assert_eq!(uid_set(&[]), "");
+        assert_eq!(uid_set(&[5]), "5");
+        assert_eq!(uid_set(&[3, 1, 2, 7, 7, 10, 11]), "1:3,7,10:11");
     }
 }

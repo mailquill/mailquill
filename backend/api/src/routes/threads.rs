@@ -174,9 +174,15 @@ async fn bulk_thread_action(
 ) -> Result<impl IntoResponse, AppError> {
     let user_db = state.user_db_pool.get(user_id).await?;
 
+    // Every live row of the thread, plus copies of those messages that the
+    // threading did not attach (same Message-ID in another folder, e.g. the
+    // archive): marking the thread read must not leave the copy unread.
     let messages: Vec<(String, String, i64, String, bool, Option<String>)> = sqlx::query_as(
-        "SELECT m.id, m.account_id, m.uid, f.full_path, m.is_local_draft, f.folder_type FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? AND m.is_deleted = 0",
+        "SELECT m.id, m.account_id, m.uid, f.full_path, m.is_local_draft, f.folder_type FROM messages m JOIN folders f ON f.id = m.folder_id \
+         WHERE m.is_deleted = 0 AND (m.thread_id = ? OR (m.message_id_header <> '' AND m.message_id_header IN \
+             (SELECT t.message_id_header FROM messages t WHERE t.thread_id = ? AND t.account_id = m.account_id AND t.message_id_header IS NOT NULL)))",
     )
+    .bind(thread_id)
     .bind(thread_id)
     .fetch_all(&user_db)
     .await?;
@@ -210,17 +216,16 @@ async fn bulk_thread_action(
                     .bind(msg_id)
                     .execute(&user_db)
                     .await?;
-                state
-                    .sync_manager
-                    .queue_imap_move(
-                        user_id.to_owned(),
-                        account_id.clone(),
-                        *uid as u32,
-                        folder_path.clone(),
-                        "Archive".into(),
-                        false,
-                    )
-                    .await;
+                crate::routes::messages::enqueue_message_op(
+                    state,
+                    user_id,
+                    &user_db,
+                    account_id,
+                    *uid as u32,
+                    folder_path,
+                    Some("Archive"),
+                )
+                .await;
             }
             ThreadAction::Delete => {
                 sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
@@ -233,29 +238,21 @@ async fn bulk_thread_action(
                 // message's own folder either no-ops (message stays "not
                 // deleted") or falls back to COPY+flag, leaving a live
                 // duplicate the next sync re-imports as new.
-                if folder_type.as_deref() == Some("TRASH") {
-                    state
-                        .sync_manager
-                        .queue_imap_expunge(
-                            user_id.to_owned(),
-                            account_id.clone(),
-                            *uid as u32,
-                            folder_path.clone(),
-                        )
-                        .await;
+                let dest = if folder_type.as_deref() == Some("TRASH") {
+                    None
                 } else {
-                    state
-                        .sync_manager
-                        .queue_imap_move(
-                            user_id.to_owned(),
-                            account_id.clone(),
-                            *uid as u32,
-                            folder_path.clone(),
-                            "Trash".into(),
-                            false,
-                        )
-                        .await;
-                }
+                    Some("Trash")
+                };
+                crate::routes::messages::enqueue_message_op(
+                    state,
+                    user_id,
+                    &user_db,
+                    account_id,
+                    *uid as u32,
+                    folder_path,
+                    dest,
+                )
+                .await;
             }
             ThreadAction::MarkRead(is_read) => {
                 // Pending row before the local flip, so the flag reconciliation

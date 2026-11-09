@@ -133,9 +133,36 @@ impl MailProvider for ImapProvider {
         Ok(session::move_message(&mut self.session, uid, dest_folder, false).await?)
     }
 
+    async fn move_messages(
+        &mut self,
+        src_folder: &str,
+        uids: &[u32],
+        dest_folder: &str,
+    ) -> Result<(), ProviderError> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        self.ensure_selected(src_folder).await?;
+        let set = session::uid_set(uids);
+        Ok(session::move_uid_set(&mut self.session, &set, dest_folder, false).await?)
+    }
+
     async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError> {
         self.ensure_selected(folder).await?;
         Ok(session::expunge_uid(&mut self.session, uid).await?)
+    }
+
+    async fn delete_permanently_many(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> Result<(), ProviderError> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        self.ensure_selected(folder).await?;
+        let set = session::uid_set(uids);
+        Ok(session::expunge_uid_set(&mut self.session, &set).await?)
     }
 
     async fn append_sent(&mut self, raw_message: &[u8]) -> Result<(), ProviderError> {

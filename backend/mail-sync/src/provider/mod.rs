@@ -211,8 +211,37 @@ pub trait MailProvider: Send {
         dest_folder: &str,
     ) -> Result<(), ProviderError>;
 
+    /// Move several messages of one folder to the same destination. The
+    /// default issues one [`Self::move_message`] per uid; IMAP overrides it
+    /// with a single `UID MOVE` over the whole set.
+    async fn move_messages(
+        &mut self,
+        src_folder: &str,
+        uids: &[u32],
+        dest_folder: &str,
+    ) -> Result<(), ProviderError> {
+        for &uid in uids {
+            self.move_message(src_folder, uid, dest_folder).await?;
+        }
+        Ok(())
+    }
+
     /// Permanently delete (IMAP: \Deleted + EXPUNGE).
     async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError>;
+
+    /// Permanently delete several messages of one folder. The default issues
+    /// one [`Self::delete_permanently`] per uid; IMAP overrides it with a
+    /// single `UID STORE` + `EXPUNGE` over the whole set.
+    async fn delete_permanently_many(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+    ) -> Result<(), ProviderError> {
+        for &uid in uids {
+            self.delete_permanently(folder, uid).await?;
+        }
+        Ok(())
+    }
 
     /// Store a sent message in the provider's Sent folder. No-op for
     /// providers that do this server-side on send (Gmail API).

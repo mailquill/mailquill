@@ -38,19 +38,6 @@ pub enum SyncCommand {
     Shutdown,
     /// Run a sync cycle now instead of waiting for the next tick.
     ForcePoll,
-    /// Move one message between folders on the server.
-    IMapMove {
-        /// Owner of the account; selects the user database.
-        user_id: String,
-        /// Provider-native uid of the message in `src_folder`.
-        uid: u32,
-        /// Folder the message currently lives in.
-        src_folder: String,
-        /// Folder to move the message into.
-        dest_folder: String,
-        /// Expunge the source folder afterwards so the copy does not linger.
-        expunge: bool,
-    },
     /// Push every flag change queued in `pending_flag_ops` to the server.
     /// Carries no payload: the ops live in the user database, so a coalesced
     /// wake-up is enough and nothing is lost if this signal is dropped.
@@ -58,14 +45,12 @@ pub enum SyncCommand {
         /// Owner of the account; selects the user database.
         user_id: String,
     },
-    /// Permanently delete one message (set `\Deleted` and expunge it).
-    IMapExpunge {
+    /// Push every move/expunge queued in `pending_message_ops` to the server.
+    /// Like [`Self::FlushFlags`] it carries no payload: the operations live in
+    /// the user database and a coalesced wake-up is enough.
+    FlushMessageOps {
         /// Owner of the account; selects the user database.
         user_id: String,
-        /// Provider-native uid of the message in `folder`.
-        uid: u32,
-        /// Folder containing the message.
-        folder: String,
     },
 }
 
@@ -208,36 +193,6 @@ impl SyncManager {
         }
     }
 
-    /// Queue an IMAP MOVE operation.
-    ///
-    /// Returns as soon as the command is handed off. The local row is already
-    /// hidden by the caller, so the HTTP request must not wait for the sync
-    /// task to drain its channel — a long cycle would otherwise hold every
-    /// delete/move/archive request (and, through the browser's per-host
-    /// connection limit, the whole UI) until it finishes.
-    pub async fn queue_imap_move(
-        &self,
-        user_id: String,
-        account_id: String,
-        uid: u32,
-        src_folder: String,
-        dest_folder: String,
-        expunge: bool,
-    ) {
-        if let Some(tx) = self.task_sender(&account_id).await {
-            Self::deliver(
-                tx,
-                SyncCommand::IMapMove {
-                    user_id,
-                    uid,
-                    src_folder,
-                    dest_folder,
-                    expunge,
-                },
-            );
-        }
-    }
-
     /// Hand a command to a sync task without waiting for channel capacity.
     ///
     /// A full channel means the task is busy with a long cycle; the send then
@@ -266,23 +221,17 @@ impl SyncManager {
         }
     }
 
-    /// Queue an IMAP EXPUNGE. Non-blocking like [`Self::queue_imap_move`].
-    pub async fn queue_imap_expunge(
-        &self,
-        user_id: String,
-        account_id: String,
-        uid: u32,
-        folder: String,
-    ) {
-        if let Some(tx) = self.task_sender(&account_id).await {
-            Self::deliver(
-                tx,
-                SyncCommand::IMapExpunge {
-                    user_id,
-                    uid,
-                    folder,
-                },
-            );
+    /// Ask an account's sync task to push its pending moves/expunges now.
+    ///
+    /// The operations are already persisted in `pending_message_ops`, so this
+    /// only has to wake the task. Unlike [`Self::queue_flag_flush`] the nudge
+    /// is delivered even while the channel is full (a background send takes
+    /// over): the user just hid the rows and expects the server to follow
+    /// without waiting for the next periodic cycle. A missing task (account
+    /// paused, task restarting) leaves the ops for the next sync cycle.
+    pub async fn queue_message_op_flush(&self, user_id: String, account_id: &str) {
+        if let Some(tx) = self.task_sender(account_id).await {
+            Self::deliver(tx, SyncCommand::FlushMessageOps { user_id });
         }
     }
 }
@@ -401,10 +350,8 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(50), async {
             SyncManager::deliver(
                 tx.clone(),
-                SyncCommand::IMapExpunge {
+                SyncCommand::FlushMessageOps {
                     user_id: "user".into(),
-                    uid: 7,
-                    folder: "Trash".into(),
                 },
             );
         })
@@ -415,10 +362,7 @@ mod tests {
         let delivered = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("the background send completes once the task drains");
-        assert!(matches!(
-            delivered,
-            Some(SyncCommand::IMapExpunge { uid: 7, .. })
-        ));
+        assert!(matches!(delivered, Some(SyncCommand::FlushMessageOps { .. })));
     }
 
     #[tokio::test]
@@ -438,7 +382,7 @@ mod tests {
             let manager = manager.clone();
             tokio::spawn(async move {
                 manager
-                    .queue_imap_expunge("user".into(), "busy".into(), 1, "Trash".into())
+                    .queue_message_op_flush("user".into(), "busy")
                     .await;
             })
         };
@@ -453,14 +397,14 @@ mod tests {
                 .await
                 .insert("other".into(), AccountTask { tx, handle });
             manager
-                .queue_imap_expunge("user".into(), "other".into(), 2, "Trash".into())
+                .queue_message_op_flush("user".into(), "other")
                 .await;
         })
         .await
         .expect("the registry lock must not be held while waiting on a full channel");
         assert!(matches!(
             rx.try_recv(),
-            Ok(SyncCommand::IMapExpunge { uid: 2, .. })
+            Ok(SyncCommand::FlushMessageOps { .. })
         ));
         blocked.abort();
     }

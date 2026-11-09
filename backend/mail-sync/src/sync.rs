@@ -151,7 +151,18 @@ async fn run_sync_task_with_context(
             }
         }
 
+        // Both flush commands carry no payload, so a burst of them (one per
+        // deleted row) collapses into a single pass over the outbox tables.
+        let mut flushed_flags = false;
+        let mut flushed_ops = false;
         for cmd in commands {
+            match &cmd {
+                SyncCommand::FlushFlags { .. } if flushed_flags => continue,
+                SyncCommand::FlushFlags { .. } => flushed_flags = true,
+                SyncCommand::FlushMessageOps { .. } if flushed_ops => continue,
+                SyncCommand::FlushMessageOps { .. } => flushed_ops = true,
+                _ => {}
+            }
             run_queued_command(&account_id, cmd, &app_state).await;
         }
         if poll {
@@ -164,23 +175,19 @@ async fn run_sync_task_with_context(
     info!("sync task stopping: account={account_id}");
 }
 
-/// Execute one queued provider command (move, flag flush, expunge). Failures
-/// are logged, never propagated: one bad uid must not take the task down.
+/// Execute one queued provider command (flag flush, message-op flush).
+/// Failures are logged, never propagated: one bad command must not take the
+/// task down.
 async fn run_queued_command(account_id: &str, cmd: SyncCommand, app_state: &Arc<dyn SyncAppState>) {
     match cmd {
-        SyncCommand::IMapMove { user_id: uid, uid: msg_uid, src_folder, dest_folder, expunge } => {
-            if let Err(e) = do_imap_move(account_id, &uid, msg_uid, &src_folder, &dest_folder, expunge, app_state).await {
-                warn!("IMAP move failed: account={account_id} user={uid} uid={msg_uid} folder={src_folder} dest={dest_folder} expunge={expunge} err={e}");
-            }
-        }
         SyncCommand::FlushFlags { user_id: uid } => {
             if let Err(e) = do_flush_pending_flags(account_id, &uid, app_state).await {
                 warn!("flag flush failed: account={account_id} user={uid} err={e}");
             }
         }
-        SyncCommand::IMapExpunge { user_id: uid, uid: msg_uid, folder } => {
-            if let Err(e) = do_imap_expunge(account_id, &uid, msg_uid, &folder, app_state).await {
-                warn!("IMAP expunge failed: account={account_id} user={uid} uid={msg_uid} folder={folder} err={e}");
+        SyncCommand::FlushMessageOps { user_id: uid } => {
+            if let Err(e) = do_flush_pending_message_ops(account_id, &uid, app_state).await {
+                warn!("message op flush failed: account={account_id} user={uid} err={e}");
             }
         }
         // Handled by the task loop itself.
@@ -279,6 +286,9 @@ async fn sync_account(
     // server flags over local rows, so an unpushed "mark read" would otherwise
     // be reverted right here.
     flush_pending_flags(account_id, provider.as_mut(), &db).await;
+    // Same for moves/expunges: whatever a nudge or a restart lost reaches the
+    // server here, before the folder sync re-reads the affected folders.
+    flush_pending_message_ops(account_id, provider.as_mut(), &db).await;
 
     // Discover folders (task 4.1). Every folder is upserted so it stays visible
     // and toggle-able in settings, regardless of whether it's synced.
@@ -1570,49 +1580,26 @@ async fn update_unread_count(
 
 // ── queued flag/move operations (provider-agnostic) ──────────────────────────
 
-async fn do_imap_move(
-    account_id: &str,
-    user_id: &str,
-    uid: u32,
-    src_folder: &str,
-    dest_folder: &str,
-    _expunge: bool,
-    app: &Arc<dyn SyncAppState>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let dest = resolve_dest_folder(account_id, user_id, dest_folder, app).await;
-    let mut provider = open_provider(account_id, user_id, app).await?;
-    provider.move_message(src_folder, uid, &dest).await?;
-    let _ = provider.close().await;
-    Ok(())
-}
-
 /// Map a logical destination ("Trash"/"Archive"/"Spam") to the account's real
 /// folder. IMAP servers localize these ("Papierkorb", "INBOX.Trash"), so a
 /// literal name won't match — we look the path up by folder_type instead. Any
 /// other value is treated as an explicit folder path and passed through.
-async fn resolve_dest_folder(
-    account_id: &str,
-    user_id: &str,
-    dest: &str,
-    app: &Arc<dyn SyncAppState>,
-) -> String {
+async fn resolve_dest_folder(account_id: &str, dest: &str, db: &sqlx::SqlitePool) -> String {
     let folder_type = match dest {
         "Trash" => "TRASH",
         "Archive" => "ARCHIVE",
         "Spam" | "Junk" => "SPAM",
         _ => return dest.to_owned(),
     };
-    if let Ok(db) = app.user_db(user_id).await {
-        if let Ok(Some(path)) = sqlx::query_scalar::<_, String>(
-            "SELECT full_path FROM folders WHERE account_id = ? AND folder_type = ? ORDER BY full_path LIMIT 1",
-        )
-        .bind(account_id)
-        .bind(folder_type)
-        .fetch_optional(&db)
-        .await
-        {
-            return path;
-        }
+    if let Ok(Some(path)) = sqlx::query_scalar::<_, String>(
+        "SELECT full_path FROM folders WHERE account_id = ? AND folder_type = ? ORDER BY full_path LIMIT 1",
+    )
+    .bind(account_id)
+    .bind(folder_type)
+    .fetch_optional(db)
+    .await
+    {
+        return path;
     }
     dest.to_owned()
 }
@@ -1634,17 +1621,211 @@ async fn do_flush_pending_flags(
     Ok(())
 }
 
-async fn do_imap_expunge(
+/// Open a connection just to drain the pending move/expunge outbox (immediate
+/// push after the user deleted, archived or moved mail; every sync cycle
+/// drains it as well).
+async fn do_flush_pending_message_ops(
     account_id: &str,
     user_id: &str,
-    uid: u32,
-    folder: &str,
     app: &Arc<dyn SyncAppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let db = app.user_db(user_id).await?;
+    if pending_message_ops(account_id, &db).await?.is_empty() {
+        return Ok(());
+    }
     let mut provider = open_provider(account_id, user_id, app).await?;
-    provider.delete_permanently(folder, uid).await?;
+    flush_pending_message_ops(account_id, provider.as_mut(), &db).await;
     let _ = provider.close().await;
     Ok(())
+}
+
+/// One row of `pending_message_ops`: `(id, folder_path, uid, op, dest_folder, attempts)`.
+type PendingMessageOp = (i64, String, i64, String, Option<String>, i64);
+
+/// Give up on a move/expunge the server keeps rejecting and bring the local
+/// row back, so the user sees that the action did not happen instead of a
+/// message that silently lives on at the server.
+const MAX_MESSAGE_OP_ATTEMPTS: i64 = 10;
+
+/// Largest uid set handed to the provider in one command. Keeps the IMAP
+/// command line well below common server limits even for non-contiguous uids.
+const MESSAGE_OP_BATCH: usize = 200;
+
+/// Every move/expunge queued for an account that the server has not confirmed.
+async fn pending_message_ops(
+    account_id: &str,
+    db: &sqlx::SqlitePool,
+) -> Result<Vec<PendingMessageOp>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, folder_path, uid, op, dest_folder, attempts FROM pending_message_ops WHERE account_id = ? ORDER BY id",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await
+}
+
+/// A run of consecutive outbox rows that one provider command can serve:
+/// same source folder, same operation, same destination.
+struct MessageOpBatch {
+    folder_path: String,
+    op: String,
+    dest_folder: Option<String>,
+    rows: Vec<(i64, u32, i64)>,
+}
+
+/// Group the outbox rows into batches, preserving their order. A batch never
+/// exceeds [`MESSAGE_OP_BATCH`] rows.
+fn batch_message_ops(ops: Vec<PendingMessageOp>) -> Vec<MessageOpBatch> {
+    let mut batches: Vec<MessageOpBatch> = Vec::new();
+    for (id, folder_path, uid, op, dest_folder, attempts) in ops {
+        let uid = uid.clamp(0, u32::MAX as i64) as u32;
+        let fits = batches.last().is_some_and(|b| {
+            b.folder_path == folder_path
+                && b.op == op
+                && b.dest_folder == dest_folder
+                && b.rows.len() < MESSAGE_OP_BATCH
+        });
+        if fits {
+            batches.last_mut().unwrap().rows.push((id, uid, attempts));
+        } else {
+            batches.push(MessageOpBatch {
+                folder_path,
+                op,
+                dest_folder,
+                rows: vec![(id, uid, attempts)],
+            });
+        }
+    }
+    batches
+}
+
+/// Push the pending moves/expunges of an account to the server, clearing each
+/// row the server accepted.
+///
+/// Rows are grouped per folder/operation/destination so a bulk delete of a
+/// whole folder costs one connection and a handful of commands instead of one
+/// login per message. A batch the server rejects is retried uid by uid, so a
+/// single bad uid cannot hold back the rest; a row that keeps failing is
+/// dropped after [`MAX_MESSAGE_OP_ATTEMPTS`] and its local message un-hidden.
+/// Errors are logged, not propagated: the sync cycle must go on.
+async fn flush_pending_message_ops(
+    account_id: &str,
+    provider: &mut dyn MailProvider,
+    db: &sqlx::SqlitePool,
+) {
+    let ops = match pending_message_ops(account_id, db).await {
+        Ok(ops) => ops,
+        Err(error) => {
+            warn!("pending message ops unreadable: account={account_id} err={error}");
+            return;
+        }
+    };
+    if ops.is_empty() {
+        return;
+    }
+
+    let mut dest_cache: HashMap<String, String> = HashMap::new();
+    for batch in batch_message_ops(ops) {
+        let dest = match &batch.dest_folder {
+            Some(logical) => match dest_cache.get(logical) {
+                Some(path) => Some(path.clone()),
+                None => {
+                    let path = resolve_dest_folder(account_id, logical, db).await;
+                    dest_cache.insert(logical.clone(), path.clone());
+                    Some(path)
+                }
+            },
+            None => None,
+        };
+        let uids: Vec<u32> = batch.rows.iter().map(|(_, uid, _)| *uid).collect();
+
+        let whole = run_message_op(provider, &batch.op, &batch.folder_path, &uids, dest.as_deref()).await;
+        match whole {
+            Ok(()) => {
+                for (id, ..) in &batch.rows {
+                    let _ = sqlx::query("DELETE FROM pending_message_ops WHERE id = ?")
+                        .bind(id)
+                        .execute(db)
+                        .await;
+                }
+                continue;
+            }
+            Err(error) => warn!(
+                "message op batch failed, retrying per uid: account={account_id} folder={} op={} dest={:?} uids={} err={error}",
+                batch.folder_path,
+                batch.op,
+                dest,
+                uids.len()
+            ),
+        }
+
+        for (id, uid, attempts) in &batch.rows {
+            match run_message_op(provider, &batch.op, &batch.folder_path, &[*uid], dest.as_deref()).await {
+                Ok(()) => {
+                    let _ = sqlx::query("DELETE FROM pending_message_ops WHERE id = ?")
+                        .bind(id)
+                        .execute(db)
+                        .await;
+                }
+                Err(error) => {
+                    let attempts = attempts + 1;
+                    warn!(
+                        "message op failed: account={account_id} folder={} uid={uid} op={} dest={:?} attempt={attempts} err={error}",
+                        batch.folder_path, batch.op, dest
+                    );
+                    if attempts >= MAX_MESSAGE_OP_ATTEMPTS {
+                        abandon_message_op(account_id, *id, &batch.folder_path, *uid, db).await;
+                    } else {
+                        let _ = sqlx::query("UPDATE pending_message_ops SET attempts = ? WHERE id = ?")
+                            .bind(attempts)
+                            .bind(id)
+                            .execute(db)
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Issue one move or expunge for a uid set.
+async fn run_message_op(
+    provider: &mut dyn MailProvider,
+    op: &str,
+    folder_path: &str,
+    uids: &[u32],
+    dest: Option<&str>,
+) -> Result<(), ProviderError> {
+    match (op, dest) {
+        ("expunge", _) => provider.delete_permanently_many(folder_path, uids).await,
+        ("move", Some(dest)) => provider.move_messages(folder_path, uids, dest).await,
+        ("move", None) => Err(ProviderError::Other("move without destination".into())),
+        (other, _) => Err(ProviderError::Other(format!("unknown message op {other}"))),
+    }
+}
+
+/// Drop an outbox row whose retry budget is spent and show its message again.
+/// The next flag reconciliation hides it once more should the server have
+/// removed it after all.
+async fn abandon_message_op(
+    account_id: &str,
+    id: i64,
+    folder_path: &str,
+    uid: u32,
+    db: &sqlx::SqlitePool,
+) {
+    let _ = sqlx::query("DELETE FROM pending_message_ops WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await;
+    let _ = sqlx::query(
+        "UPDATE messages SET is_deleted = 0 WHERE uid = ? AND folder_id IN (SELECT id FROM folders WHERE account_id = ? AND full_path = ?)",
+    )
+    .bind(i64::from(uid))
+    .bind(account_id)
+    .bind(folder_path)
+    .execute(db)
+    .await;
 }
 
 #[cfg(test)]
@@ -2001,12 +2182,192 @@ mod reconciliation_tests {
                  value INTEGER NOT NULL,
                  attempts INTEGER NOT NULL DEFAULT 0,
                  UNIQUE (account_id, folder_path, uid, flag)
-             );",
+             );
+             CREATE TABLE pending_message_ops (
+                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                 account_id TEXT NOT NULL,
+                 folder_path TEXT NOT NULL,
+                 uid INTEGER NOT NULL,
+                 op TEXT NOT NULL,
+                 dest_folder TEXT,
+                 attempts INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE (account_id, folder_path, uid)
+             );
+             CREATE TABLE folders (
+                 id TEXT NOT NULL PRIMARY KEY,
+                 account_id TEXT NOT NULL,
+                 full_path TEXT NOT NULL,
+                 folder_type TEXT NOT NULL DEFAULT 'CUSTOM'
+             );
+             INSERT INTO folders VALUES ('f1', 'acc', 'INBOX', 'INBOX'), ('ft', 'acc', 'Papierkorb', 'TRASH'), ('fa', 'acc', 'Archiv', 'ARCHIVE');",
         )
         .execute(&db)
         .await
         .unwrap();
         db
+    }
+
+    /// Records every move/expunge it is asked for; `fail_batches` makes any
+    /// call with more than one uid fail, `fail_uids` makes those uids fail
+    /// even on their own.
+    #[derive(Default)]
+    struct RecordingProvider {
+        calls: Vec<(String, String, Vec<u32>, Option<String>)>,
+        fail_batches: bool,
+        fail_uids: Vec<u32>,
+    }
+
+    fn unused<T>() -> Result<T, ProviderError> {
+        Err(ProviderError::Other("unused in test".into()))
+    }
+
+    #[async_trait::async_trait]
+    impl MailProvider for RecordingProvider {
+        async fn list_folders(&mut self) -> Result<Vec<crate::session::FolderInfo>, ProviderError> {
+            unused()
+        }
+        async fn folder_status(&mut self, _: &str) -> Result<provider::FolderStatus, ProviderError> {
+            unused()
+        }
+        async fn highest_uid(&mut self, _: &str) -> Result<Option<u32>, ProviderError> {
+            unused()
+        }
+        async fn fetch_flags(&mut self, _: &str, _: &str) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError> {
+            unused()
+        }
+        async fn fetch_headers(&mut self, _: &str, _: &str) -> Result<Vec<FetchedMessage>, ProviderError> {
+            unused()
+        }
+        async fn fetch_full(&mut self, _: &str, _: &str) -> Result<Vec<FetchedMessage>, ProviderError> {
+            unused()
+        }
+        async fn fetch_raw(&mut self, _: &str, _: u32) -> Result<Vec<u8>, ProviderError> {
+            unused()
+        }
+        async fn set_flag(&mut self, _: &str, _: u32, _: &str, _: bool) -> Result<(), ProviderError> {
+            unused()
+        }
+        async fn move_message(&mut self, src: &str, uid: u32, dest: &str) -> Result<(), ProviderError> {
+            self.move_messages(src, &[uid], dest).await
+        }
+        async fn move_messages(&mut self, src: &str, uids: &[u32], dest: &str) -> Result<(), ProviderError> {
+            self.calls.push(("move".into(), src.into(), uids.to_vec(), Some(dest.into())));
+            self.outcome(uids)
+        }
+        async fn delete_permanently(&mut self, folder: &str, uid: u32) -> Result<(), ProviderError> {
+            self.delete_permanently_many(folder, &[uid]).await
+        }
+        async fn delete_permanently_many(&mut self, folder: &str, uids: &[u32]) -> Result<(), ProviderError> {
+            self.calls.push(("expunge".into(), folder.into(), uids.to_vec(), None));
+            self.outcome(uids)
+        }
+        async fn append_sent(&mut self, _: &[u8]) -> Result<(), ProviderError> {
+            unused()
+        }
+        async fn close(&mut self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    impl RecordingProvider {
+        fn outcome(&self, uids: &[u32]) -> Result<(), ProviderError> {
+            if (self.fail_batches && uids.len() > 1) || uids.iter().any(|u| self.fail_uids.contains(u)) {
+                Err(ProviderError::Transport("connection reset".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    async fn queue_op(db: &sqlx::SqlitePool, folder: &str, uid: i64, op: &str, dest: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO pending_message_ops (account_id, folder_path, uid, op, dest_folder) VALUES ('acc', ?, ?, ?, ?)",
+        )
+        .bind(folder)
+        .bind(uid)
+        .bind(op)
+        .bind(dest)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    async fn pending(db: &sqlx::SqlitePool) -> Vec<(i64, i64)> {
+        sqlx::query_as("SELECT uid, attempts FROM pending_message_ops ORDER BY uid")
+            .fetch_all(db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn message_ops_of_one_folder_go_out_as_a_single_batch_and_are_cleared() {
+        let db = db().await;
+        for uid in [3, 1, 2] {
+            queue_op(&db, "Papierkorb", uid, "expunge", None).await;
+        }
+        queue_op(&db, "INBOX", 10, "move", Some("Archive")).await;
+        queue_op(&db, "INBOX", 11, "move", Some("Archive")).await;
+        queue_op(&db, "INBOX", 12, "move", Some("Trash")).await;
+        let mut provider = RecordingProvider::default();
+
+        flush_pending_message_ops("acc", &mut provider, &db).await;
+
+        assert_eq!(
+            provider.calls,
+            vec![
+                ("expunge".into(), "Papierkorb".into(), vec![3, 1, 2], None),
+                ("move".into(), "INBOX".into(), vec![10, 11], Some("Archiv".into())),
+                ("move".into(), "INBOX".into(), vec![12], Some("Papierkorb".into())),
+            ],
+            "one command per folder/op/destination run, logical destinations resolved by folder type"
+        );
+        assert!(pending(&db).await.is_empty(), "accepted ops leave the outbox");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_batch_is_retried_per_uid_and_only_the_bad_uid_stays_pending() {
+        let db = db().await;
+        for uid in [1, 2, 3] {
+            queue_op(&db, "Papierkorb", uid, "expunge", None).await;
+        }
+        let mut provider = RecordingProvider {
+            fail_batches: true,
+            fail_uids: vec![2],
+            ..Default::default()
+        };
+
+        flush_pending_message_ops("acc", &mut provider, &db).await;
+
+        assert_eq!(provider.calls.len(), 4, "the batch, then one call per uid");
+        assert_eq!(pending(&db).await, vec![(2, 1)], "uid 2 keeps its row with one attempt counted");
+    }
+
+    #[tokio::test]
+    async fn an_op_that_keeps_failing_is_dropped_and_its_message_shown_again() {
+        let db = db().await;
+        sqlx::query("INSERT INTO messages (id, account_id, folder_id, uid, is_deleted) VALUES ('m7', 'acc', 'ft', 7, 1)")
+            .execute(&db)
+            .await
+            .unwrap();
+        queue_op(&db, "Papierkorb", 7, "expunge", None).await;
+        sqlx::query("UPDATE pending_message_ops SET attempts = ?")
+            .bind(MAX_MESSAGE_OP_ATTEMPTS - 1)
+            .execute(&db)
+            .await
+            .unwrap();
+        let mut provider = RecordingProvider {
+            fail_uids: vec![7],
+            ..Default::default()
+        };
+
+        flush_pending_message_ops("acc", &mut provider, &db).await;
+
+        assert!(pending(&db).await.is_empty(), "retry budget spent: the op is dropped");
+        let hidden: bool = sqlx::query_scalar("SELECT is_deleted FROM messages WHERE id = 'm7'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(!hidden, "the local row is un-hidden so the user sees the delete did not happen");
     }
 
     async fn flags(db: &sqlx::SqlitePool, uid: i64) -> (bool, bool, bool) {

@@ -475,15 +475,37 @@ pub async fn mark_read(
     // Record the pending push *before* flipping the local flag: the flag
     // reconciliation treats a local value without a pending row as stale and
     // copies the server's (still old) value back over it.
-    queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", req.is_read).await;
-
-    sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
-        .bind(req.is_read)
-        .bind(&message_id)
-        .execute(&user_db)
-        .await?;
+    for id in message_and_copies(&user_db, &message_id).await? {
+        queue_imap_flag(&state, &user.0, &user_db, &id, "seen", req.is_read).await;
+        sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
+            .bind(req.is_read)
+            .bind(&id)
+            .execute(&user_db)
+            .await?;
+    }
 
     Ok(Json(json!({ "ok": true })))
+}
+
+/// `message_id` plus every other live row of the same account that stores the
+/// same message (same Message-ID in another folder: a mail that sits in INBOX
+/// and in the Archive at once, Gmail's All Mail, a server-side copy). A flag
+/// the user flips on one of them has to reach all of them, or the inbox shows
+/// the mail read while the archive still lists it unread.
+pub async fn message_and_copies(
+    db: &sqlx::SqlitePool,
+    message_id: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut ids: Vec<String> = sqlx::query_scalar(
+        "SELECT c.id FROM messages m JOIN messages c ON c.account_id = m.account_id AND c.message_id_header = m.message_id_header \
+         WHERE m.id = ? AND m.message_id_header IS NOT NULL AND m.message_id_header <> '' AND c.id <> ? AND c.is_deleted = 0",
+    )
+    .bind(message_id)
+    .bind(message_id)
+    .fetch_all(db)
+    .await?;
+    ids.insert(0, message_id.to_owned());
+    Ok(ids)
 }
 
 /// `PATCH /api/messages/{id}/flag`: set or clear the flagged (starred) flag;
@@ -498,21 +520,14 @@ pub async fn toggle_flag(
     require_message_exists(&user_db, &message_id).await?;
 
     // Pending row first, local flip second — see `mark_read`.
-    queue_imap_flag(
-        &state,
-        &user.0,
-        &user_db,
-        &message_id,
-        "flagged",
-        req.is_flagged,
-    )
-    .await;
-
-    sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
-        .bind(req.is_flagged)
-        .bind(&message_id)
-        .execute(&user_db)
-        .await?;
+    for id in message_and_copies(&user_db, &message_id).await? {
+        queue_imap_flag(&state, &user.0, &user_db, &id, "flagged", req.is_flagged).await;
+        sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
+            .bind(req.is_flagged)
+            .bind(&id)
+            .execute(&user_db)
+            .await?;
+    }
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -547,18 +562,16 @@ pub async fn archive_message(
         .execute(&user_db)
         .await?;
 
-    // Queue IMAP MOVE to Archive
-    state
-        .sync_manager
-        .queue_imap_move(
-            user.0.clone(),
-            account_id,
-            uid,
-            folder_full_path,
-            "Archive".into(),
-            false,
-        )
-        .await;
+    enqueue_message_op(
+        &state,
+        &user.0,
+        &user_db,
+        &account_id,
+        uid,
+        &folder_full_path,
+        Some("Archive"),
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -602,26 +615,18 @@ pub async fn delete_message(
         .execute(&user_db)
         .await?;
 
-    if is_trash {
-        // Hard delete — EXPUNGE
-        state
-            .sync_manager
-            .queue_imap_expunge(user.0.clone(), account_id, uid, folder_full_path)
-            .await;
-    } else {
-        // Soft delete — move to Trash
-        state
-            .sync_manager
-            .queue_imap_move(
-                user.0.clone(),
-                account_id,
-                uid,
-                folder_full_path,
-                "Trash".into(),
-                false,
-            )
-            .await;
-    }
+    // Hard delete (expunge) in the trash, soft delete (move to Trash) elsewhere.
+    let dest = if is_trash { None } else { Some("Trash") };
+    enqueue_message_op(
+        &state,
+        &user.0,
+        &user_db,
+        &account_id,
+        uid,
+        &folder_full_path,
+        dest,
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -656,17 +661,16 @@ pub async fn move_message(
         .execute(&user_db)
         .await?;
 
-    state
-        .sync_manager
-        .queue_imap_move(
-            user.0.clone(),
-            account_id.clone(),
-            uid,
-            src_folder,
-            dest_path,
-            false,
-        )
-        .await;
+    enqueue_message_op(
+        &state,
+        &user.0,
+        &user_db,
+        &account_id,
+        uid,
+        &src_folder,
+        Some(&dest_path),
+    )
+    .await;
     let _ = state.sync_manager.force_poll(&account_id).await;
 
     Ok(StatusCode::NO_CONTENT)
@@ -722,17 +726,16 @@ pub async fn mark_not_spam(
         .execute(&user_db)
         .await?;
 
-    state
-        .sync_manager
-        .queue_imap_move(
-            user.0.clone(),
-            account_id.clone(),
-            uid,
-            src_folder,
-            inbox_path,
-            false,
-        )
-        .await;
+    enqueue_message_op(
+        &state,
+        &user.0,
+        &user_db,
+        &account_id,
+        uid,
+        &src_folder,
+        Some(&inbox_path),
+    )
+    .await;
     let _ = state.sync_manager.force_poll(&account_id).await;
 
     Ok(StatusCode::NO_CONTENT)
@@ -976,6 +979,44 @@ pub async fn queue_imap_flag(
     }.await {
         enqueue_flag_op(state, user_id, db, &account_id, uid, &folder_path, flag, set).await;
     }
+}
+
+/// Persist a move or permanent delete for the sync task and nudge it.
+///
+/// Mirrors [`enqueue_flag_op`]: the row in `pending_message_ops` is what makes
+/// the action stick. It survives a missing sync task, a restart and a failed
+/// or throttled IMAP command, and the task pushes whole folders in one
+/// connection instead of logging in once per message. `dest` is a logical
+/// destination ("Trash", "Archive") or an explicit folder path; `None` means
+/// expunge in place.
+pub async fn enqueue_message_op(
+    state: &AppState,
+    user_id: &str,
+    db: &sqlx::SqlitePool,
+    account_id: &str,
+    uid: u32,
+    folder_path: &str,
+    dest: Option<&str>,
+) {
+    let op = if dest.is_some() { "move" } else { "expunge" };
+    let stored = sqlx::query(
+        "INSERT INTO pending_message_ops (account_id, folder_path, uid, op, dest_folder) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET op = excluded.op, dest_folder = excluded.dest_folder, attempts = 0",
+    )
+    .bind(account_id)
+    .bind(folder_path)
+    .bind(i64::from(uid))
+    .bind(op)
+    .bind(dest)
+    .execute(db)
+    .await;
+    if let Err(error) = stored {
+        tracing::warn!("pending message op not stored: server copy may stay: {error}");
+    }
+    state
+        .sync_manager
+        .queue_message_op_flush(user_id.to_owned(), account_id)
+        .await;
 }
 
 /// Record a flag change as pending and nudge the account's sync task to push it.

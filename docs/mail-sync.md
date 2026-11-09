@@ -31,8 +31,8 @@ the task forever; every chunk commits, so the next cycle resumes).
 
 `sync_account`:
 
-- pushes pending flag changes first (see below), so the reconciliation that
-  follows cannot revert them;
+- pushes pending flag changes and pending moves/expunges first (see below),
+  so the reconciliation that follows cannot revert them;
 - lists folders, upserts them into `folders` (new folders get the provider's
   default `sync_enabled`), and drops folders the server no longer lists
   unless they still hold local messages;
@@ -83,15 +83,35 @@ next reconciliation. The API therefore writes a row to `pending_flag_ops`
 Rows are deleted once the server accepts the flag; a flag the server keeps
 rejecting is dropped after 10 attempts.
 
+### Pending message ops
+
+Moves and permanent deletes get the same treatment in `pending_message_ops`
+(one row per message: `move` with a destination, or `expunge`). The API
+writes the row, hides the local row (`is_deleted = 1`) and nudges the task
+with `FlushMessageOps`. The task drains the table in order, grouping
+consecutive rows with the same folder, operation and destination into one
+provider call (`move_messages` / `delete_permanently_many`, at most 200 uids;
+IMAP sends a single `UID MOVE` or `UID STORE` + `EXPUNGE` over the set, the
+API providers loop on one connection). Logical destinations ("Trash",
+"Archive") resolve to the account's folder of that type at flush time. A
+rejected batch is retried uid by uid so one bad uid cannot block the rest;
+a row still failing after 10 attempts is dropped and its message un-hidden,
+so the user sees that the action did not happen. The table is also drained at
+the start of every sync cycle, which covers a lost nudge or a restart.
+
 ## Local actions
 
-Delete, archive, move and not-spam update the local row first (`is_deleted =
-1`) and only then queue the provider command (`IMapMove`, `IMapExpunge`).
-Queueing never blocks the HTTP handler: a full channel hands the send to a
-background task. The list therefore stays consistent immediately, and the
-server-side move lands when the task processes its queue. Messages already in
-Trash are expunged instead of moved. Bulk actions (`/mailbox/bulk`) apply one
-UPDATE and queue the provider commands from a background task.
+Delete, archive, move and not-spam write the pending op first, then hide the
+local row, then nudge the task. Nudging never blocks the HTTP handler: a full
+channel hands the send to a background task. The list therefore stays
+consistent immediately, and the server-side change lands when the task
+flushes the outbox. Messages already in Trash (by folder type) are expunged
+instead of moved. Bulk actions (`/mailbox/bulk`) insert the outbox rows and
+apply the UPDATE in one transaction, then nudge once per affected account.
+
+Read and flagged changes apply to every stored copy of the message (same
+Message-ID in another folder of the account, e.g. INBOX and Archive), each
+with its own pending flag op, so the copies never disagree.
 
 ## Status and events
 

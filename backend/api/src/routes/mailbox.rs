@@ -162,119 +162,85 @@ pub async fn bulk_action(
         (pred, binds)
     };
 
-    let set_sql = match req.action.as_str() {
-        "read" => "is_read = 1",
-        "flag" => "is_flagged = 1",
-        // Archive and delete both hide the rows locally now; IMAP MOVE (queued
-        // below) and the next sync reconcile their real location.
-        "archive" | "delete" => "is_deleted = 1",
+    // The outbox rows go in first, in the same transaction as the local
+    // change: whatever the UPDATE hides is guaranteed to have a server-side
+    // operation waiting, even if the process dies right after the commit.
+    // `messages` is the only table the predicate names, so the selected ids
+    // feed both statements through a sub-select.
+    let (outbox_sql, set_sql): (String, &str) = match req.action.as_str() {
+        "read" | "flag" => {
+            let flag = if req.action == "read" { "seen" } else { "flagged" };
+            (
+                format!(
+                    "INSERT INTO pending_flag_ops (account_id, folder_path, uid, flag, value) \
+                     SELECT m.account_id, f.full_path, m.uid, '{flag}', 1 FROM messages m JOIN folders f ON f.id = m.folder_id \
+                     WHERE m.is_local_draft = 0 AND m.id IN (SELECT id FROM messages WHERE {where_sql}) \
+                     ON CONFLICT(account_id, folder_path, uid, flag) DO UPDATE SET value = excluded.value, attempts = 0"
+                ),
+                if flag == "seen" { "is_read = 1" } else { "is_flagged = 1" },
+            )
+        }
+        // Archive and delete both hide the rows locally now; the queued move
+        // (or expunge for mail already in the trash — detected by folder
+        // type, since localized servers call it "Papierkorb", "Corbeille",
+        // etc.) and the next sync reconcile their real location.
+        "archive" | "delete" => {
+            let (op, dest) = if req.action == "archive" {
+                ("'move'", "'Archive'")
+            } else {
+                (
+                    "CASE WHEN f.folder_type = 'TRASH' THEN 'expunge' ELSE 'move' END",
+                    "CASE WHEN f.folder_type = 'TRASH' THEN NULL ELSE 'Trash' END",
+                )
+            };
+            (
+                format!(
+                    "INSERT INTO pending_message_ops (account_id, folder_path, uid, op, dest_folder) \
+                     SELECT m.account_id, f.full_path, m.uid, {op}, {dest} FROM messages m JOIN folders f ON f.id = m.folder_id \
+                     WHERE m.is_local_draft = 0 AND m.id IN (SELECT id FROM messages WHERE {where_sql}) \
+                     ON CONFLICT(account_id, folder_path, uid) DO UPDATE SET op = excluded.op, dest_folder = excluded.dest_folder, attempts = 0"
+                ),
+                "is_deleted = 1",
+            )
+        }
         _ => return Err(AppError::Unprocessable("invalid action".into())),
     };
+    let update_sql = format!("UPDATE messages SET {set_sql} WHERE {where_sql} RETURNING account_id");
 
-    let sql = format!(
-        "UPDATE messages SET {set_sql} WHERE {where_sql} RETURNING account_id, uid, folder_id"
-    );
-    let mut q = sqlx::query_as::<_, (String, i64, String)>(sqlx::AssertSqlSafe(sql.as_str()));
+    let mut tx = user_db.begin().await?;
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(outbox_sql.as_str()));
     for b in &binds {
         q = q.bind(b);
     }
-    let affected = q.fetch_all(&user_db).await?;
-    let affected_len = affected.len();
+    q.execute(&mut *tx).await?;
+    let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(update_sql.as_str()));
+    for b in &binds {
+        q = q.bind(b);
+    }
+    let affected = q.fetch_all(&mut *tx).await?;
+    tx.commit().await?;
 
-    // Propagate to IMAP in the background — queueing potentially thousands of
-    // commands must not block the response.
-    let action = req.action.clone();
-    let state2 = state.clone();
-    let user_id = user.0.clone();
-    let db2 = user_db.clone();
-    tokio::spawn(async move {
-        let mut folders: std::collections::HashMap<String, (String, Option<String>)> =
-            std::collections::HashMap::new();
-        for (account_id, uid, folder_id) in affected {
-            let (full_path, folder_type) = match folders.get(&folder_id) {
-                Some(v) => v.clone(),
-                None => {
-                    let v: (String, Option<String>) = sqlx::query_as(
-                        "SELECT full_path, folder_type FROM folders WHERE id = ?",
-                    )
-                    .bind(&folder_id)
-                    .fetch_one(&db2)
+    // One nudge per touched account; the sync task drains the whole outbox in
+    // a single pass over one connection.
+    let accounts: std::collections::HashSet<&String> = affected.iter().collect();
+    for account_id in accounts {
+        match req.action.as_str() {
+            "read" | "flag" => {
+                state
+                    .sync_manager
+                    .queue_flag_flush(user.0.clone(), account_id)
                     .await
-                    .unwrap_or_default();
-                    folders.insert(folder_id.clone(), v.clone());
-                    v
-                }
-            };
-            let uid = uid as u32;
-            match action.as_str() {
-                "read" => {
-                    crate::routes::messages::enqueue_flag_op(
-                        &state2,
-                        &user_id,
-                        &db2,
-                        &account_id,
-                        i64::from(uid),
-                        &full_path,
-                        "seen",
-                        true,
-                    )
+            }
+            _ => {
+                state
+                    .sync_manager
+                    .queue_message_op_flush(user.0.clone(), account_id)
                     .await
-                }
-                "flag" => {
-                    crate::routes::messages::enqueue_flag_op(
-                        &state2,
-                        &user_id,
-                        &db2,
-                        &account_id,
-                        i64::from(uid),
-                        &full_path,
-                        "flagged",
-                        true,
-                    )
-                    .await
-                }
-                "archive" => {
-                    state2
-                        .sync_manager
-                        .queue_imap_move(
-                            user_id.clone(),
-                            account_id,
-                            uid,
-                            full_path,
-                            "Archive".into(),
-                            false,
-                        )
-                        .await
-                }
-                "delete" => {
-                    // Already-in-trash means hard delete. Detect by the
-                    // folder's type, not its name — localized servers call
-                    // it "Papierkorb", "Corbeille", etc.
-                    if folder_type.as_deref() == Some("TRASH") {
-                        state2
-                            .sync_manager
-                            .queue_imap_expunge(user_id.clone(), account_id, uid, full_path)
-                            .await
-                    } else {
-                        state2
-                            .sync_manager
-                            .queue_imap_move(
-                                user_id.clone(),
-                                account_id,
-                                uid,
-                                full_path,
-                                "Trash".into(),
-                                false,
-                            )
-                            .await
-                    }
-                }
-                _ => {}
             }
         }
-    });
+    }
 
-    Ok(Json(json!({ "affected": affected_len })))
+    Ok(Json(json!({ "affected": affected.len() })))
 }
 
 /// `GET /api/accounts/{id}/folders`: folders of the account with unread counts

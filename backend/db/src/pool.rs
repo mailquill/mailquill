@@ -1,3 +1,6 @@
+//! Cache of per-user SQLite connection pools, opened on demand and evicted
+//! when idle.
+
 use crate::migrations::{connect_options, run_mail_migrations};
 use lru::LruCache;
 use sqlx::SqlitePool;
@@ -24,6 +27,9 @@ pub struct UserDbPool {
 }
 
 impl UserDbPool {
+    /// Create an empty cache. Each user's database lives at
+    /// `<data_dir>/users/<user_id>/mail.db` and is created, with migrations
+    /// applied, on first access.
     pub fn new(data_dir: impl Into<PathBuf>) -> Arc<Self> {
         Arc::new(Self {
             data_dir: data_dir.into(),
@@ -75,9 +81,12 @@ impl UserDbPool {
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Errors from opening a per-user database.
 pub enum PoolError {
     #[error("io: {0}")]
+    /// Creating the user's data directory failed.
     Io(#[from] std::io::Error),
     #[error("sqlx: {0}")]
+    /// Connecting or migrating failed; migration errors are wrapped as `sqlx::Error::Protocol`.
     Sqlx(#[from] sqlx::Error),
 }

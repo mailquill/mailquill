@@ -1,3 +1,5 @@
+//! HTTP route handlers, grouped by resource. Paths are wired in `main.rs`.
+
 pub mod accounts;
 pub mod auth;
 mod caldav_error;

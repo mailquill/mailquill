@@ -1,8 +1,25 @@
+//! Mailbox synchronisation for Mailquill.
+//!
+//! One background task per account pulls folders, headers, flags and bodies
+//! from the account's backend (IMAP, Gmail or Microsoft Graph, see
+//! [`provider`]) into the user's SQLite database and blob store, and pushes
+//! local moves, expunges and flag changes back. [`manager::SyncManager`] owns
+//! those tasks; the free functions in this module cover the one-off IMAP
+//! operations the api crate needs outside a running sync task.
+
+/// Per-account sync task registry, commands and status reporting.
 pub mod manager;
+/// MIME parsing into text/HTML bodies, attachments and snippets.
 pub mod mime;
+/// Backend-agnostic mailbox access ([`provider::MailProvider`]) and its
+/// IMAP, Gmail and Outlook implementations.
 pub mod provider;
+/// Low-level IMAP session helpers built on `async-imap`.
 pub mod session;
+/// The per-account sync loop: folder discovery, incremental fetch, flag
+/// reconciliation and command handling.
 pub mod sync;
+/// Conversation threading by `References`/`In-Reply-To` and subject.
 pub mod threading;
 
 use mailquill_core::blob::BlobStore;

@@ -1,24 +1,43 @@
+//! HTTP error type of the API. Each variant maps to a status code; internal
+//! errors are logged server-side and never expose their detail to clients.
+
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
+/// Error returned by route handlers, converted to a JSON `{ "error": ... }`
+/// response (plus `code` for coded bad-gateway errors).
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    /// 404: the requested resource does not exist or belongs to another user.
     #[error("not found")]
     NotFound,
+    /// 401: missing or invalid credentials.
     #[error("unauthorized")]
     Unauthorized,
+    /// 403: authenticated but not allowed to perform the action.
     #[error("forbidden")]
     Forbidden,
+    /// 409: the request conflicts with existing state (message is sent to the client).
     #[error("conflict: {0}")]
     Conflict(String),
+    /// 422: validation failure (message is sent to the client).
     #[error("unprocessable: {0}")]
     Unprocessable(String),
+    /// 502: an upstream mail/DAV/OAuth provider failed (message is sent to the client).
     #[error("bad gateway: {0}")]
     BadGateway(String),
+    /// 502 with a machine-readable `code` the frontend can act on (e.g. TLS prompts).
     #[error("bad gateway ({code}): {message}")]
-    BadGatewayWithCode { code: &'static str, message: String },
+    BadGatewayWithCode {
+        /// Stable identifier the client switches on (e.g. `tls_untrusted`).
+        code: &'static str,
+        /// Human-readable detail sent to the client.
+        message: String,
+    },
+    /// 429: the caller hit the login/registration throttle.
     #[error("too many attempts, try again later")]
     TooManyRequests,
+    /// 500: unexpected failure; the detail is logged, the client sees a generic message.
     #[error("internal: {0}")]
     Internal(String),
 }

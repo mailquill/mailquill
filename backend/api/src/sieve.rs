@@ -7,25 +7,37 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// One rule condition as stored in the rule's JSON.
 #[derive(Deserialize)]
 pub struct Cond {
+    /// Header to test (`from`, `to`, `subject`) or `body`.
     pub field: String,
+    /// Comparison: `contains` (default), `is` or `notContains`.
     pub op: String,
+    /// Value to compare against.
     pub value: String,
 }
 
+/// One rule action as stored in the rule's JSON.
 #[derive(Deserialize)]
 pub struct Act {
+    /// Action type: `move`, `markRead`, `star`, `delete` or `forward`.
     #[serde(rename = "type")]
     pub kind: String,
+    /// Target folder for `move` or address for `forward`.
     #[serde(default)]
     pub value: Option<String>,
 }
 
+/// A user rule ready for [`compile_sieve`].
 pub struct CompiledRule {
+    /// Rule name, emitted as a comment above the generated block.
     pub name: String,
+    /// Combine conditions with `allof` (true) or `anyof` (false).
     pub match_all: bool,
+    /// Conditions; an empty list matches every message.
     pub conditions: Vec<Cond>,
+    /// Actions executed when the conditions match.
     pub actions: Vec<Act>,
 }
 

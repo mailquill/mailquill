@@ -1,3 +1,5 @@
+//! Lenient decoding of RFC 2047 encoded-words in mail header values.
+
 /// Decode RFC 2047 encoded-words (for example `=?UTF-8?B?...?=`) in a
 /// header value while tolerating malformed boundaries emitted by some mail
 /// clients and IMAP servers.

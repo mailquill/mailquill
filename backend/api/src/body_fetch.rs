@@ -31,6 +31,8 @@ struct IdleSession {
     since: Instant,
 }
 
+/// Per-account semaphore plus a small pool of idle provider sessions for
+/// on-demand body downloads. Shared through `AppState`.
 #[derive(Default)]
 pub struct BodyFetchLimiter {
     per_account: Mutex<HashMap<String, Arc<Semaphore>>>,
@@ -38,6 +40,8 @@ pub struct BodyFetchLimiter {
 }
 
 impl BodyFetchLimiter {
+    /// Create an empty limiter; slots and idle pools are created per account on
+    /// first use.
     pub fn new() -> Self {
         Self::default()
     }

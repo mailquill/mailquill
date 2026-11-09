@@ -7,50 +7,78 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
+/// An authenticated IMAP session over implicit TLS.
 pub type ImapSession = Session<TlsStream<TcpStream>>;
 
+/// One selectable folder (or label) as reported by the provider.
 #[derive(Debug)]
 pub struct FolderInfo {
+    /// Display name.
     pub name: String,
+    /// Provider-native path/id used to address the folder on every call.
     pub full_path: String,
+    /// Normalized role: INBOX, SENT, DRAFTS, ARCHIVE, SPAM, TRASH or CUSTOM.
     pub folder_type: String,
 }
 
+/// Envelope, flags and optionally the body of one fetched message, as the
+/// sync pipeline persists it.
 #[derive(Debug, Default)]
 pub struct FetchedMessage {
+    /// Provider-native uid within its folder.
     pub uid: u32,
     /// Provider-native message id correlated during fetch. Gmail-over-IMAP
     /// supplies X-GM-MSGID here so the sync chunk can persist it atomically
     /// with the message instead of opening a separate SQLite transaction.
     pub remote_id: Option<String>,
+    /// `Message-ID` header, as sent (with angle brackets).
     pub message_id: Option<String>,
+    /// `In-Reply-To` header, as sent.
     pub in_reply_to: Option<String>,
+    /// `References` header, as sent.
     pub references: Option<String>,
+    /// `List-Id` header, as sent.
     pub list_id: Option<String>,
+    /// Subject with RFC 2047 encoded words decoded; empty if absent.
     pub subject: String,
+    /// First `From` address formatted as `Name <addr>` or `addr`.
     pub from_addr: String,
+    /// Comma-separated formatted `To` addresses.
     pub to_addrs: String,
+    /// Comma-separated formatted `Cc` addresses.
     pub cc_addrs: String,
+    /// Raw `Date` header, if present.
     pub date: Option<String>,
+    /// Server receive time as RFC 3339; falls back to now when unavailable.
     pub internal_date: String,
+    /// `\Seen` flag set on the server.
     pub is_seen: bool,
+    /// `\Flagged` flag set on the server.
     pub is_flagged: bool,
     /// Server has the `\Deleted` flag set (awaiting EXPUNGE) — import as hidden
     /// so a message moved-by-copy doesn't linger as a live duplicate.
     pub is_deleted: bool,
+    /// Full RFC 822 message on a full fetch; only the raw header block on a
+    /// header fetch (so phishing analysis can still inspect it).
     pub body: Option<Vec<u8>>,
 }
 
+/// Failure while connecting to or talking to an IMAP server.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    /// Protocol-level error reported by `async-imap`.
     #[error("IMAP error: {0}")]
     Imap(#[from] ImapError),
+    /// TLS setup failed (bad server name, handshake, certificate).
     #[error("TLS error: {0}")]
     Tls(String),
+    /// Socket-level failure.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// LOGIN or XOAUTH2 authentication was rejected or misconfigured.
     #[error("auth error: {0}")]
     Auth(String),
+    /// Anything else, e.g. a response missing an expected item.
     #[error("{0}")]
     Other(String),
 }

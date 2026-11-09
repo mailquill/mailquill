@@ -1,3 +1,6 @@
+//! Per-user settings, the public instance configuration, the remote-image
+//! sender allowlist and the user's brand list for phishing analysis.
+
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -8,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::AppError, middleware::UserId, state::AppState, validate};
 
+/// Settings returned by `GET /api/settings`.
 #[derive(Serialize)]
 pub struct UserSettingsResponse {
     pgp_discovery_wkd_enabled: bool,
@@ -16,12 +20,14 @@ pub struct UserSettingsResponse {
     default_calendar_id: Option<String>,
 }
 
+/// Instance flags exposed without authentication.
 #[derive(Serialize)]
 pub struct PublicConfigResponse {
     remote_image_proxy_enabled: bool,
     registration_enabled: bool,
 }
 
+/// Body of `PATCH /api/settings`; only present fields are changed.
 #[derive(Deserialize)]
 pub struct PatchSettingsRequest {
     pgp_discovery_wkd_enabled: Option<bool>,
@@ -30,6 +36,8 @@ pub struct PatchSettingsRequest {
     default_calendar_id: Option<String>,
 }
 
+/// `GET /api/settings`: the user's settings, with privacy-preserving defaults
+/// (everything off) when no row exists yet.
 pub async fn get_settings(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -50,6 +58,8 @@ pub async fn get_settings(
     }))
 }
 
+/// `GET /api/config/public`: whether the image proxy and registration are
+/// enabled on this instance. Unauthenticated.
 pub async fn public_config(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     Ok(Json(PublicConfigResponse {
         remote_image_proxy_enabled: state.remote_image_proxy_enabled,
@@ -57,6 +67,8 @@ pub async fn public_config(State(state): State<AppState>) -> Result<impl IntoRes
     }))
 }
 
+/// `PATCH /api/settings`: update the given settings (an empty
+/// `default_calendar_id` clears it) and return the full settings.
 pub async fn patch_settings(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -105,12 +117,14 @@ pub async fn patch_settings(
     get_settings(State(state), Extension(user)).await
 }
 
+/// Sender whose remote images load without asking.
 #[derive(Serialize)]
 pub struct AllowedSender {
     sender: String,
     created_at: String,
 }
 
+/// A domain-to-brand mapping used by the phishing scorer.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct BrandEntry {
     id: String,
@@ -118,17 +132,20 @@ pub struct BrandEntry {
     brand_name: String,
 }
 
+/// Body of `POST /api/settings/image-allowlist`.
 #[derive(Deserialize)]
 pub struct AddAllowedSenderRequest {
     sender: String,
 }
 
+/// Body of `POST /api/settings/brands`.
 #[derive(Deserialize)]
 pub struct AddBrandRequest {
     domain: String,
     brand_name: String,
 }
 
+/// `GET /api/settings/image-allowlist`: allowlisted senders sorted by address.
 pub async fn list_image_allowlist(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -147,6 +164,8 @@ pub async fn list_image_allowlist(
     ))
 }
 
+/// `POST /api/settings/image-allowlist`: allowlist a sender (lower-cased, must
+/// be a valid email). Idempotent; returns 204.
 pub async fn add_image_allowlist(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -166,6 +185,7 @@ pub async fn add_image_allowlist(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /api/settings/brands`: the user's brand entries sorted by name.
 pub async fn list_brands(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -179,6 +199,9 @@ pub async fn list_brands(
     Ok(Json(rows))
 }
 
+/// `POST /api/settings/brands`: add or rename a brand entry. The domain is
+/// normalised (scheme, `www.` and path stripped) and validated; `brand_name`
+/// must not be empty. Returns the entry.
 pub async fn add_brand(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -206,6 +229,7 @@ pub async fn add_brand(
     Ok(Json(entry))
 }
 
+/// `DELETE /api/settings/brands/{id}`: remove a brand entry; 204 or 404.
 pub async fn delete_brand(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -240,6 +264,8 @@ pub async fn reset_phishing_analysis(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `DELETE /api/settings/image-allowlist/{sender}`: remove a sender from the
+/// allowlist; the address must be valid. Returns 204 even if absent.
 pub async fn remove_image_allowlist(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

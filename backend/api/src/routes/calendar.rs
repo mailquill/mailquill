@@ -1,3 +1,7 @@
+//! Calendar accounts (CalDAV, Google, Microsoft Graph, Open-Xchange), calendars,
+//! events and meeting invitations. Event writes go to the provider first and
+//! are mirrored into the per-user database afterwards.
+
 use axum::{
     extract::{Extension, Path, Query, State},
     response::IntoResponse,
@@ -9,6 +13,7 @@ use serde_json::Value;
 
 use crate::{error::AppError, middleware::UserId, state::AppState};
 
+/// Calendar account as returned by the API; credentials are never included.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct CalendarAccount {
     id: String,
@@ -23,6 +28,7 @@ pub struct CalendarAccount {
     sync_error: Option<String>,
 }
 
+/// Body of `POST /api/calendar-accounts`.
 #[derive(Deserialize)]
 pub struct NewCalendarAccount {
     display_name: String,
@@ -39,6 +45,7 @@ pub struct NewCalendarAccount {
     sync_interval_secs: Option<i64>,
 }
 
+/// Sync state of a calendar account.
 #[derive(Serialize)]
 pub struct SyncStatus {
     status: String,
@@ -46,6 +53,7 @@ pub struct SyncStatus {
     error: Option<String>,
 }
 
+/// A calendar (local or provider-backed) with its account's provider type.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct Calendar {
     id: String,
@@ -58,6 +66,7 @@ pub struct Calendar {
     provider_type: Option<String>,
 }
 
+/// Body of `POST /api/calendars`.
 #[derive(Deserialize)]
 pub struct NewCalendar {
     account_id: Option<String>,
@@ -66,6 +75,8 @@ pub struct NewCalendar {
     dav_url: Option<String>,
 }
 
+/// Event row as returned by the API; `color` falls back to the calendar colour
+/// and `attendees` is a JSON string.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct CalendarEvent {
     id: String,
@@ -89,6 +100,7 @@ pub struct CalendarEvent {
     raw_ical: Option<String>,
 }
 
+/// Body of `POST /api/calendar/events`.
 #[derive(Deserialize)]
 pub struct NewEvent {
     calendar_id: String,
@@ -105,6 +117,7 @@ pub struct NewEvent {
     recurring_edit_scope: Option<String>,
 }
 
+/// Body of `PUT /api/calendar/events/{id}`; all fields replace the stored ones.
 #[derive(Deserialize)]
 pub struct UpdateEvent {
     title: String,
@@ -120,6 +133,8 @@ pub struct UpdateEvent {
     recurring_edit_scope: Option<String>,
 }
 
+/// Query of `GET /api/calendar/events`: `start`/`end` (preferred) or `from`/`to`
+/// bound the range; unset bounds are open.
 #[derive(Deserialize)]
 pub struct EventRange {
     from: Option<String>,
@@ -128,6 +143,7 @@ pub struct EventRange {
     end: Option<String>,
 }
 
+/// Meeting invitation parsed from an email, with the user's RSVP state.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct MeetingInvitation {
     id: String,
@@ -144,17 +160,27 @@ pub struct MeetingInvitation {
     ms_teams_url: Option<String>,
 }
 
+/// Query of `GET /api/meeting-invitations`: filter by `message_id`, otherwise by
+/// RSVP `status` (default `pending`).
 #[derive(Deserialize)]
 pub struct InvitationQuery {
     message_id: Option<String>,
     status: Option<String>,
 }
 
+/// Body of `POST /api/meeting-invitations/{id}/rsvp`.
 #[derive(Deserialize)]
 pub struct RsvpRequest {
     response: String,
 }
 
+/// `POST /api/calendar-accounts`: add a calendar account.
+///
+/// Validates the provider-specific requirements (base URL, credentials or
+/// access token), stores the encrypted credentials and runs a first sync. If
+/// that sync fails the account is removed again and the provider error is
+/// returned as 502 (curated for CalDAV, including TLS prompts); the TLS
+/// decision controls whether an invalid certificate is accepted and persisted.
 pub async fn create_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -255,6 +281,7 @@ pub(crate) async fn connect_google_account(
     sync_calendar_account(db, state, account_id).await
 }
 
+/// `GET /api/calendar-accounts`: all calendar accounts sorted by name.
 pub async fn list_accounts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -269,6 +296,8 @@ pub async fn list_accounts(
     Ok(Json(accounts))
 }
 
+/// `DELETE /api/calendar-accounts/{id}`: remove the account with its calendars
+/// and events; 404 when unknown.
 pub async fn delete_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -294,6 +323,8 @@ pub async fn delete_account(
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
+/// `GET /api/calendar-accounts/{id}/sync-status`: sync status, last sync time
+/// and error of the account; 404 when unknown.
 pub async fn account_sync_status(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -316,6 +347,8 @@ pub async fn account_sync_status(
     }))
 }
 
+/// `POST /api/calendar-accounts/{id}`: run a synchronous sync and return the
+/// resulting status; provider failures map to 502.
 pub async fn sync_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -328,6 +361,7 @@ pub async fn sync_account(
     account_sync_status(State(state), Extension(user), Path(id)).await
 }
 
+/// `GET /api/calendars`: all calendars sorted by name.
 pub async fn list_calendars(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -342,6 +376,8 @@ pub async fn list_calendars(
     Ok(Json(calendars))
 }
 
+/// `POST /api/calendars`: create a calendar row (default colour `#2563EB`) and
+/// return it.
 pub async fn create_calendar(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -367,6 +403,7 @@ pub async fn create_calendar(
     Ok(Json(calendar))
 }
 
+/// `PUT /api/calendars/{id}`: rename or recolour a calendar and return it.
 pub async fn update_calendar(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -392,12 +429,15 @@ pub async fn update_calendar(
     Ok(Json(calendar))
 }
 
+/// Body of `PUT /api/calendars/{id}`; unset fields keep their value.
 #[derive(Deserialize)]
 pub struct UpdateCalendar {
     name: Option<String>,
     color: Option<String>,
 }
 
+/// `DELETE /api/calendars/{id}`: delete the calendar row; succeeds even when
+/// the id is unknown.
 pub async fn delete_calendar(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -411,6 +451,8 @@ pub async fn delete_calendar(
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
+/// `GET /api/calendar/events`: non-deleted events overlapping the requested
+/// range, ordered by start.
 pub async fn list_events(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -433,6 +475,9 @@ pub async fn list_events(
     Ok(Json(events))
 }
 
+/// `POST /api/calendar/events`: build an iCalendar object, create it at the
+/// provider of the calendar, store the mirror row and expand its recurrence
+/// rule. Returns the new id.
 pub async fn create_event(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -499,6 +544,9 @@ pub async fn create_event(
     ))
 }
 
+/// `PUT /api/calendar/events/{id}`: rebuild the iCalendar object, update it at
+/// the provider (using the stored href and etag), update the mirror row and
+/// re-expand the recurrence rule. 404 when the event is unknown.
 pub async fn update_event(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -585,6 +633,8 @@ pub async fn update_event(
     ))
 }
 
+/// `DELETE /api/calendar/events/{id}`: delete the event at the provider, then
+/// remove it and any expanded occurrences locally. 404 when unknown.
 pub async fn delete_event(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -632,6 +682,8 @@ pub async fn delete_event(
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
+/// `GET /api/meeting-invitations`: invitations of one message, or all
+/// invitations in the given RSVP status.
 pub async fn list_invitations(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -659,6 +711,12 @@ pub async fn list_invitations(
     Ok(Json(rows))
 }
 
+/// `POST /api/meeting-invitations/{id}/rsvp`: record the user's answer.
+///
+/// `response` must be accepted, tentative or declined (422 otherwise). Accepted
+/// and tentative invitations are copied into the default calendar; an iMIP
+/// REPLY is emailed to the organizer on a best-effort basis. Returns the new
+/// status.
 pub async fn rsvp_invitation(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

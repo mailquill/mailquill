@@ -28,30 +28,51 @@ pub const SYNCED_MESSAGE_COUNT_SQL: &str =
 /// One conversation row as rendered in a mail list.
 #[derive(Serialize, Clone)]
 pub struct ThreadRow {
+    /// Id of the message that represents the conversation in this list.
     pub message_id: String,
+    /// Conversation id; `None` for messages that have not been threaded.
     pub thread_id: Option<String>,
+    /// Subject of the representative message.
     pub subject: String,
+    /// Sender address of the representative message.
     pub from_addr: String,
+    /// Short plain-text preview of the body.
     pub snippet: String,
+    /// IMAP internal date as stored; doubles as the pagination cursor.
     pub internal_date: String,
+    /// Whether the representative message has been read.
     pub is_read: bool,
+    /// Whether the representative message is starred.
     pub is_flagged: bool,
+    /// Email account the message belongs to.
     pub account_id: String,
+    /// Folder the row was rendered from; thread counts are scoped to it.
     pub folder_id: String,
+    /// Folder classification (inbox, sent, drafts, ...) from the folders table.
     pub folder_type: String,
+    /// Full IMAP path of the folder.
     pub folder_path: String,
+    /// Mailing-list identifier from the `List-Id` header, if any.
     pub list_id: Option<String>,
+    /// Verdict of the phishing analysis, if the message has been analysed.
     pub phishing_verdict: Option<String>,
+    /// True for drafts composed locally that exist only in the local database.
     pub is_local_draft: bool,
+    /// Distinct live messages of the thread in this folder; 1 when unthreaded.
     pub thread_size: i64,
+    /// Unread live messages of the thread in this folder.
     pub thread_unread: i64,
+    /// Up to three distinct sender addresses of the thread in this folder, oldest first.
     pub thread_participants: Vec<String>,
 }
 
 /// A page of conversations plus pagination metadata.
 pub struct Page {
+    /// Rows of this page, newest first.
     pub items: Vec<ThreadRow>,
+    /// Total live matches across all pages, taken from the trigger-maintained folder counters.
     pub total: i64,
+    /// `internal_date` of the last row, to pass as the cursor for the next page; `None` on the last page.
     pub next_cursor: Option<String>,
 }
 

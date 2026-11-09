@@ -9,25 +9,41 @@ use sqlx::SqlitePool;
 use tracing::{info, warn};
 
 const EXPIRY_SLACK_SECS: i64 = 300;
+/// Prefix of the error string returned when the user must sign in again;
+/// the provider name follows it. See [`is_reauth_required`].
 pub const REAUTH_REQUIRED_PREFIX: &str = "oauth_reauthentication_required:";
+/// OAuth scope required to sync Google contacts.
 pub const GOOGLE_CONTACTS_SCOPE: &str = "https://www.googleapis.com/auth/contacts";
+/// OAuth scope required to sync Microsoft (Graph) contacts.
 pub const MICROSOFT_CONTACTS_SCOPE: &str = "https://graph.microsoft.com/Contacts.ReadWrite";
 
+/// Whether an OAuth account's grant currently allows contact sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContactGrantState {
+    /// The contacts scope was granted and no re-authentication is pending.
     Ready,
+    /// The contacts scope is missing (or the provider is not an OAuth provider).
     ConsentRequired,
+    /// The refresh token was rejected; the user must sign in again.
     ReauthenticationRequired,
 }
 
+/// Why no contact access token could be produced for an account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContactTokenError {
+    /// The contacts scope has not been granted.
     ConsentRequired,
+    /// The stored refresh token no longer works.
     ReauthenticationRequired,
+    /// The account has no OAuth credentials at all.
     NotOAuth,
+    /// A transient failure (database, decryption or provider refresh).
     Temporary,
 }
 
+/// Derive the contact grant state from decrypted account credentials: a
+/// pending `oauth_reauth_required` flag wins, then the provider's contacts
+/// scope must appear among the granted scopes.
 pub fn contact_grant_state(credentials: &serde_json::Value) -> ContactGrantState {
     if credentials["oauth_reauth_required"]
         .as_bool()
@@ -51,6 +67,8 @@ pub fn contact_grant_state(credentials: &serde_json::Value) -> ContactGrantState
     }
 }
 
+/// Scopes granted to the account, from `oauth_granted_scopes` (array) or the
+/// space-separated legacy `oauth_scope` string.
 pub fn granted_scopes(credentials: &serde_json::Value) -> Vec<String> {
     if let Some(scopes) = credentials["oauth_granted_scopes"].as_array() {
         return scopes
@@ -64,6 +82,10 @@ pub fn granted_scopes(credentials: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A valid access token for contact sync of `account_id`.
+///
+/// Checks the grant state first so a missing scope or pending re-auth is
+/// reported precisely, then refreshes the token via [`fresh_access_token`].
 pub async fn fresh_contact_access_token(
     credential_key: &CredentialKey,
     user_db: &SqlitePool,
@@ -186,6 +208,8 @@ pub async fn fresh_access_token(
     }
 }
 
+/// Whether an error string from [`fresh_access_token`] signals that the user
+/// must re-authenticate with the provider.
 pub fn is_reauth_required(error: &str) -> bool {
     error.starts_with(REAUTH_REQUIRED_PREFIX)
 }

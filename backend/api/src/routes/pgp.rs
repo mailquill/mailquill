@@ -1,3 +1,7 @@
+//! OpenPGP key management: the user's own key pairs (private keys stay
+//! client-encrypted), stored public keys of correspondents and key discovery
+//! via WKD and keyservers.
+
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
@@ -9,6 +13,8 @@ use sha1::{Digest, Sha1};
 
 use crate::{error::AppError, middleware::UserId, state::AppState, validate};
 
+/// Body of `POST /api/pgp-keys`; the private key arrives already encrypted
+/// by the client as armored PGP ciphertext.
 #[derive(Deserialize)]
 pub struct CreatePgpKeyRequest {
     fingerprint: String,
@@ -18,6 +24,7 @@ pub struct CreatePgpKeyRequest {
     is_primary: Option<bool>,
 }
 
+/// One of the user's key pairs, without the private key blob.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct PgpKeyResponse {
     id: String,
@@ -28,17 +35,20 @@ pub struct PgpKeyResponse {
     created_at: String,
 }
 
+/// Client-encrypted private key of one key pair.
 #[derive(Serialize)]
 pub struct PgpKeyBlobResponse {
     id: String,
     private_key_encrypted_blob: String,
 }
 
+/// Query carrying the correspondent `email` to look up.
 #[derive(Deserialize)]
 pub struct EmailQuery {
     email: String,
 }
 
+/// Body of `POST /api/contact-keys`.
 #[derive(Deserialize)]
 pub struct CreateContactKeyRequest {
     email: String,
@@ -46,6 +56,7 @@ pub struct CreateContactKeyRequest {
     fingerprint: Option<String>,
 }
 
+/// Stored public key of a correspondent; `source` is `manual`, `wkd` or `keyserver`.
 #[derive(Serialize, sqlx::FromRow, Clone)]
 pub struct ContactKeyResponse {
     id: String,
@@ -56,6 +67,8 @@ pub struct ContactKeyResponse {
     fetched_at: String,
 }
 
+/// Result of `GET /api/keys/discover`: the key if found, whether it came from
+/// the local store, and which remote lookups were enabled.
 #[derive(Serialize)]
 pub struct DiscoveryResponse {
     found: bool,
@@ -65,6 +78,9 @@ pub struct DiscoveryResponse {
     keyserver_enabled: bool,
 }
 
+/// `POST /api/pgp-keys`: store a key pair. Validates the fingerprint, uid,
+/// armored public key and encrypted private blob (422); a primary key demotes
+/// the previous one. 409 when the fingerprint already exists; 201 with the key.
 pub async fn create_pgp_key(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -98,6 +114,7 @@ pub async fn create_pgp_key(
     Ok((StatusCode::CREATED, Json(row)))
 }
 
+/// `GET /api/pgp-keys`: the user's key pairs, primary first.
 pub async fn list_pgp_keys(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -111,6 +128,7 @@ pub async fn list_pgp_keys(
     Ok(Json(keys))
 }
 
+/// `GET /api/pgp-keys/{id}/blob`: the client-encrypted private key; 404 when unknown.
 pub async fn get_pgp_key_blob(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -131,6 +149,7 @@ pub async fn get_pgp_key_blob(
     }))
 }
 
+/// `DELETE /api/pgp-keys/{id}`: remove a key pair; 204 or 404.
 pub async fn delete_pgp_key(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -148,6 +167,8 @@ pub async fn delete_pgp_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /api/pgp-keys/{id}/primary`: make this key the primary one and return
+/// it; 404 when unknown.
 pub async fn set_primary_pgp_key(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -171,6 +192,9 @@ pub async fn set_primary_pgp_key(
     Ok(Json(get_pgp_key_row(&user_db, &id).await?))
 }
 
+/// `POST /api/contact-keys`: store a correspondent's armored public key
+/// (source `manual`). The email is normalised and validated; a missing
+/// fingerprint is replaced by a hash-based hint. Returns 201 with the key.
 pub async fn create_contact_key(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -195,6 +219,7 @@ pub async fn create_contact_key(
     Ok((StatusCode::CREATED, Json(key)))
 }
 
+/// `GET /api/contact-keys`: stored public keys for the given email.
 pub async fn get_contact_key(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -206,6 +231,9 @@ pub async fn get_contact_key(
     Ok(Json(keys))
 }
 
+/// `GET /api/keys/discover`: find a public key for the email. A stored key
+/// wins; otherwise WKD and then a keyserver are queried, each only when the
+/// user enabled it in settings, and a hit is stored for next time.
 pub async fn discover_key(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

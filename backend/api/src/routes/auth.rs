@@ -1,3 +1,6 @@
+//! Local account authentication: registration, password login, refresh-token
+//! rotation (HttpOnly cookie) and logout.
+
 use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
@@ -21,12 +24,14 @@ use crate::{
     state::AppState,
 };
 
+/// Body of `POST /api/auth/register`.
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     email: String,
     password: String,
 }
 
+/// Body of `POST /api/auth/login`.
 #[derive(Deserialize)]
 pub struct LoginRequest {
     email: String,
@@ -38,12 +43,20 @@ pub struct LoginRequest {
     remember: bool,
 }
 
+/// Access token returned by register, login and refresh; the refresh token
+/// travels in a `Set-Cookie` header instead.
 #[derive(Serialize)]
 pub struct AuthResponse {
     access_token: String,
     token_type: String,
 }
 
+/// `POST /api/auth/register`: create a local account.
+///
+/// Rejected with 403 when registration is disabled, 429 when the forwarded
+/// client address exceeded its sign-up budget, 422 for a malformed email or
+/// too-short password and 409 for an already registered email. On success
+/// returns 201 with an access token and a remembered refresh cookie.
 pub async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -112,6 +125,13 @@ pub async fn register(
     ))
 }
 
+/// `POST /api/auth/login`: verify email and password.
+///
+/// Blocked (429) once the account or client address reached the failure
+/// budget. Unknown accounts are verified against a dummy hash so timing does
+/// not reveal registered addresses. Returns an access token plus a refresh
+/// cookie whose lifetime follows the `remember` flag; failures count against
+/// the throttle and yield 401.
 pub async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -175,6 +195,12 @@ pub async fn login(
     ))
 }
 
+/// `POST /api/auth/refresh`: rotate the refresh cookie and mint a new access token.
+///
+/// The presented token must exist, be unexpired and either unrevoked or
+/// replaced within the last 60 seconds (concurrent-tab grace); any other
+/// revoked token is treated as reuse and rejected with 401. The new token
+/// keeps the original session's `remember` choice.
 pub async fn refresh(
     State(state): State<AppState>,
     req: Request,
@@ -233,6 +259,8 @@ pub async fn refresh(
     ))
 }
 
+/// `POST /api/auth/logout`: revoke the presented refresh token (if any) and
+/// clear the cookie. Always succeeds.
 pub async fn logout(
     State(state): State<AppState>,
     req: Request,
@@ -273,6 +301,8 @@ fn dummy_password_hash() -> &'static str {
     })
 }
 
+/// `GET /api/auth/me`: id and email of the authenticated user, 404 if the
+/// user row no longer exists.
 pub async fn me(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

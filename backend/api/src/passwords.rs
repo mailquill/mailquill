@@ -1,3 +1,6 @@
+//! Local-account password hashing and the operator password reset used by the
+//! `mailquill reset-password` command.
+
 use argon2::{
     password_hash::{PasswordHasher, SaltString},
     Argon2,
@@ -5,16 +8,22 @@ use argon2::{
 use argon2::password_hash::rand_core::OsRng;
 use sqlx::SqlitePool;
 
+/// Minimum accepted password length.
 pub const MIN_PASSWORD_LENGTH: usize = 8;
 
+/// Failure of a password hash or reset.
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordResetError {
+    /// The password is shorter than [`MIN_PASSWORD_LENGTH`].
     #[error("password must be at least {MIN_PASSWORD_LENGTH} characters")]
     TooShort,
+    /// No local account with the given email.
     #[error("account not found")]
     AccountNotFound,
+    /// Argon2 hashing failed.
     #[error("failed to hash password: {0}")]
     Hash(String),
+    /// A database query or transaction failed.
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }

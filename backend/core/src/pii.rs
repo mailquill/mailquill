@@ -1,3 +1,6 @@
+//! Redaction of personally identifiable information in log output,
+//! controlled by the `LOG_PII_MODE` environment variable.
+
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 

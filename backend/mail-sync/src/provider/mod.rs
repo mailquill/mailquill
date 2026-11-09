@@ -30,16 +30,27 @@ pub use outlook::OutlookProvider;
 use crate::session::{FetchedMessage, FolderInfo, SessionError};
 use async_trait::async_trait;
 
+/// Failure of a [`MailProvider`] operation, whatever the backend.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    /// Underlying IMAP session failure.
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// The backend has no equivalent of the requested operation.
     #[error("not implemented for this provider: {0}")]
     NotImplemented(&'static str),
+    /// A REST call returned a non-success status.
     #[error("http {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        /// HTTP status code returned by the API.
+        status: u16,
+        /// Response body, for diagnostics.
+        body: String,
+    },
+    /// Network-level failure before a response was received (retryable).
     #[error("transport error: {0}")]
     Transport(String),
+    /// Anything else: missing config, unmapped ids, malformed responses.
     #[error("{0}")]
     Other(String),
 }
@@ -48,15 +59,20 @@ pub enum ProviderError {
 /// account can choose the backend that should own sync and send behavior).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProviderKind {
+    /// Plain IMAP (and SMTP for sending); the default.
     #[default]
     Imap,
     /// Gmail over IMAP/SMTP+XOAUTH2 for mail, Gmail API for label handling.
     GmailImap,
+    /// Gmail REST API for everything, including sending.
     GmailApi,
+    /// Microsoft Graph (Outlook) REST API for everything, including sending.
     OutlookApi,
 }
 
 impl ProviderKind {
+    /// Parse the stored `provider_kind` string; unknown values fall back to
+    /// [`ProviderKind::Imap`].
     pub fn parse(value: &str) -> Self {
         match value {
             "gmail_imap" => Self::GmailImap,
@@ -66,6 +82,8 @@ impl ProviderKind {
         }
     }
 
+    /// The stable string form stored in the database (inverse of
+    /// [`ProviderKind::parse`]).
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Imap => "imap",
@@ -92,15 +110,24 @@ impl ProviderKind {
 /// plus the user DB handle + account id for their uid↔remote-id mapping.
 #[derive(Debug, Default, Clone)]
 pub struct ProviderConfig {
+    /// IMAP server hostname (unused by the API providers).
     pub host: String,
+    /// IMAP server port, implicit TLS.
     pub port: u16,
+    /// IMAP login name, also the identity for XOAUTH2.
     pub username: String,
+    /// IMAP password; empty when `auth_scheme` is `xoauth2`.
     pub password: String,
+    /// Current OAuth access token; required by XOAUTH2 and the API providers.
     pub oauth_access_token: Option<String>,
+    /// IMAP authentication scheme: `xoauth2` or anything else for LOGIN.
     pub auth_scheme: String,
+    /// User-approved DER certificate the IMAP TLS connection is pinned to;
+    /// `None` keeps strict WebPKI verification.
     pub trusted_cert_der: Option<Vec<u8>>,
     /// User mail DB — required for Gmail/Outlook (remote_message_ids table).
     pub db: Option<sqlx::SqlitePool>,
+    /// Account whose id mappings the API providers read and write.
     pub account_id: String,
 }
 

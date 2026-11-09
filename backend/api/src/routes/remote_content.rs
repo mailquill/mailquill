@@ -23,12 +23,19 @@ use crate::{error::AppError, state::AppState};
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
+/// Query of `GET /api/remote-content/image`: access token (images are loaded
+/// by `<img>` tags, which cannot set headers) and the remote URL.
 #[derive(Deserialize)]
 pub struct RemoteImageQuery {
     token: String,
     url: String,
 }
 
+/// `GET /api/remote-content/image`: fetch a remote email image through the
+/// backend. The token is validated (401); URLs that fail the scheme, host or
+/// private-address checks, oversize bodies and non-image responses yield an
+/// empty placeholder image rather than an error, so a broken image never
+/// leaks the reason to the sender.
 pub async fn remote_image(
     State(state): State<AppState>,
     Query(query): Query<RemoteImageQuery>,

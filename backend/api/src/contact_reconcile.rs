@@ -1,3 +1,8 @@
+//! Keeps the mailbox-managed contact source of an email account in step with
+//! the account's credentials: picks the contact provider (Google People,
+//! Microsoft Graph or CardDAV), derives its capability state and upserts the
+//! `contact_accounts` row through `contact_sync`.
+
 use contact_sync::{
     repository::{reconcile_mailbox_source, MailboxSource},
     ContactProvider, DavAuth,
@@ -8,13 +13,21 @@ use sqlx::SqlitePool;
 
 use crate::oauth_tokens::{contact_grant_state, ContactGrantState};
 
+/// Result of reconciling a mailbox's contact source, as returned to clients.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ManagedContactCapability {
+    /// Id of the `contact_accounts` row backing the mailbox source.
     pub source_id: String,
+    /// The email account the source belongs to.
     pub email_account_id: String,
+    /// Contact provider name (`google`, `graph`, `carddav`).
     pub provider: String,
+    /// Capability state: `disabled`, `pending`, `consent_required`,
+    /// `reauth_required` or `unavailable`.
     pub state: String,
+    /// Machine-readable reason for a non-ready state, if any.
     pub reason: Option<String>,
+    /// Whether syncing is enabled (never true for an `unavailable` source).
     pub enabled: bool,
 }
 
@@ -24,13 +37,27 @@ struct ProviderSelection {
     base_url: Option<String>,
 }
 
+/// Connection details for a mailbox-managed CardDAV source, built from the
+/// email account's IMAP credentials and TLS settings.
 pub struct ManagedCardDavContext {
+    /// CardDAV base URL of the source.
     pub base_url: String,
+    /// Basic auth derived from the mailbox username and password.
     pub auth: DavAuth,
+    /// Pinned server certificate (DER) taken from the IMAP or SMTP exception.
     pub trusted_cert_der: Option<Vec<u8>>,
+    /// Whether the account accepts invalid TLS certificates for DAV.
     pub accept_invalid_tls: bool,
 }
 
+/// Create or update the mailbox-managed contact source of `email_account_id`.
+///
+/// Decrypts the account credentials to select a provider (OAuth provider name
+/// first, otherwise CardDAV when a password or explicit CardDAV URL exists),
+/// defaults the CardDAV URL to the domain's `.well-known/carddav`, computes the
+/// capability state and persists the source. `enabled_override` replaces the
+/// stored enabled flag; without it the existing value (or `false`) is kept.
+/// Errors are returned as plain strings for the caller to map.
 pub async fn reconcile_mailbox_contact_source(
     db: &SqlitePool,
     credential_key: &CredentialKey,
@@ -166,6 +193,12 @@ fn decrypt_credentials(
     serde_json::from_slice(&decrypted).map_err(|error| error.to_string())
 }
 
+/// Load the CardDAV connection context of a mailbox-managed source.
+///
+/// Only sources with `management_mode = 'mailbox'` qualify; the username and
+/// password come from the mailbox credentials (falling back to the primary
+/// email as username). Fails when the source is missing or the credentials
+/// hold no password.
 pub async fn managed_carddav_context(
     db: &SqlitePool,
     credential_key: &CredentialKey,

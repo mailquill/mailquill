@@ -1,3 +1,6 @@
+//! Web Push subscriptions: VAPID key exposure, subscription storage and the
+//! notification payload sent by the sync manager.
+
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -9,28 +12,34 @@ use serde_json::json;
 
 use crate::{error::AppError, middleware::UserId, state::AppState};
 
+/// Public VAPID key for `PushManager.subscribe`; empty when push is not configured.
 #[derive(Serialize)]
 pub struct VapidPublicKeyResponse {
     public_key: String,
 }
 
+/// Body of `POST /api/push-subscriptions`: a browser `PushSubscription`.
 #[derive(Deserialize)]
 pub struct PushSubscriptionRequest {
     endpoint: String,
     keys: PushSubscriptionKeys,
 }
 
+/// Client keys of a push subscription.
 #[derive(Deserialize)]
 pub struct PushSubscriptionKeys {
     p256dh: String,
     auth: String,
 }
 
+/// Id of a stored subscription.
 #[derive(Serialize)]
 pub struct PushSubscriptionResponse {
     id: String,
 }
 
+/// `GET /api/push-subscriptions/vapid-public-key`: the server's VAPID public
+/// key, or an empty string (still 200) when web push is disabled.
 pub async fn vapid_public_key(State(state): State<AppState>) -> impl IntoResponse {
     // Web push is optional: when VAPID isn't configured, return an empty key
     // (HTTP 200) instead of an error. The client treats a missing key as
@@ -44,6 +53,8 @@ pub async fn vapid_public_key(State(state): State<AppState>) -> impl IntoRespons
     })
 }
 
+/// `POST /api/push-subscriptions`: store or refresh a subscription for the
+/// user (unique per endpoint). Endpoint and keys must be non-empty (422).
 pub async fn create_subscription(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -73,6 +84,8 @@ pub async fn create_subscription(
     Ok(Json(PushSubscriptionResponse { id }))
 }
 
+/// `DELETE /api/push-subscriptions/{id}`: remove the user's subscription; 204
+/// even if it did not exist.
 pub async fn delete_subscription(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -87,6 +100,8 @@ pub async fn delete_subscription(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Drop a subscription the push service rejected (gone or invalid). Failures
+/// are only logged.
 pub async fn delete_stale_subscription(state: &AppState, id: &str) {
     if let Err(e) = sqlx::query("DELETE FROM push_subscriptions WHERE id = ?")
         .bind(id)
@@ -97,6 +112,8 @@ pub async fn delete_stale_subscription(state: &AppState, id: &str) {
     }
 }
 
+/// Serialise the notification payload for a new message: title (sender), body
+/// (subject), account name and the in-app URL of the message.
 pub fn push_payload(
     message_id: &str,
     account_id: &str,

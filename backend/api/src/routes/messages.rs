@@ -1,3 +1,8 @@
+//! Single-message operations: detail view with on-demand body download,
+//! flag changes, archive, delete, move, spam handling, re-analysis and
+//! attachment download. Server-side changes are queued to the account's sync
+//! task; the local row is updated first so the UI reflects the action at once.
+
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -34,21 +39,30 @@ struct MessageRow {
     is_local_draft: bool,
 }
 
+/// Body of `POST /api/messages/{id}/move`: the destination folder id.
 #[derive(Deserialize)]
 pub struct MoveRequest {
     folder_id: String,
 }
 
+/// Body of `PATCH /api/messages/{id}/read`.
 #[derive(Deserialize)]
 pub struct ReadRequest {
     is_read: bool,
 }
 
+/// Body of `PATCH /api/messages/{id}/flag`.
 #[derive(Deserialize)]
 pub struct FlagRequest {
     is_flagged: bool,
 }
 
+/// `GET /api/messages/{id}`: full message detail.
+///
+/// Returns the headers, the HTML and text body (read from the blob store, or
+/// downloaded from the provider on demand for lazily synced messages, with
+/// `body_available: false` when neither works), phishing analysis, thread
+/// counts, attachments and draft recipients. 404 when the message is unknown.
 pub async fn get_message(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -446,6 +460,9 @@ pub async fn reanalyse_message(
     })))
 }
 
+/// `PATCH /api/messages/{id}/read`: set or clear the seen flag. The pending
+/// IMAP flag push is recorded before the local flag flips so flag
+/// reconciliation does not revert it. 404 when the message is unknown.
 pub async fn mark_read(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -469,6 +486,8 @@ pub async fn mark_read(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `PATCH /api/messages/{id}/flag`: set or clear the flagged (starred) flag;
+/// same ordering guarantees as [`mark_read`].
 pub async fn toggle_flag(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -498,6 +517,9 @@ pub async fn toggle_flag(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// `POST /api/messages/{id}/archive`: hide the message locally and queue an
+/// IMAP move to the Archive folder. Local drafts cannot be archived (422).
+/// Returns 204.
 pub async fn archive_message(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -541,6 +563,9 @@ pub async fn archive_message(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `DELETE /api/messages/{id}`: delete a message. Local drafts are removed
+/// outright; mail already in the trash folder (by folder type) is expunged;
+/// anything else is moved to Trash. The row is hidden locally first. Returns 204.
 pub async fn delete_message(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -601,6 +626,10 @@ pub async fn delete_message(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/messages/{id}/move`: move the message to another folder of the
+/// same account (404 when the folder is unknown or belongs to a different
+/// account). The row is hidden locally, the IMAP move queued and a poll
+/// forced. Returns 204.
 pub async fn move_message(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -643,6 +672,9 @@ pub async fn move_message(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/messages/{id}/not-spam`: trust the sender for future phishing
+/// analysis and, only when the message sits in the spam folder, move it back
+/// to the inbox. Messages elsewhere are left in place. Returns 204.
 pub async fn mark_not_spam(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -922,6 +954,9 @@ async fn load_stored_body(
     }
 }
 
+/// Look up the account, uid and folder of `message_id` and record the flag
+/// change as a pending IMAP operation via [`enqueue_flag_op`]. Unknown
+/// messages are ignored.
 pub async fn queue_imap_flag(
     state: &AppState,
     user_id: &str,

@@ -9,6 +9,7 @@ use crate::error::AppError;
 
 /// Auth schemes the backend is willing to attempt. Anything else is rejected.
 pub const AUTH_SCHEMES: &[&str] = &["plain", "login", "cram-md5", "oauth2", "xoauth2"];
+/// Body sync modes: `lazy` fetches bodies on demand, `full` stores them during sync.
 pub const BODY_SYNC_MODES: &[&str] = &["lazy", "full"];
 /// Account sync strategy: `idle` = IMAP push (IDLE), `interval` = periodic poll.
 pub const SYNC_MODES: &[&str] = &["idle", "interval"];

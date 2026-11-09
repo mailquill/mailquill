@@ -1,9 +1,14 @@
+//! Runtime configuration of the API server, loaded from `mailquill.toml` /
+//! `mailquill.yaml` and environment variables (see [`Settings::load`]).
+
 use figment::{
     providers::{Env, Format, Toml, Yaml},
     Figment,
 };
 use serde::Deserialize;
 
+/// Application settings. Required keys panic at startup when missing; the
+/// rest fall back to the defaults documented on each field.
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     /// AES-256-GCM key — 64 hex chars (32 bytes). Required.
@@ -22,20 +27,27 @@ pub struct Settings {
     /// Base URL used in OAuth redirect URIs.
     #[serde(default = "default_base_url")]
     pub app_base_url: String,
+    /// Google OAuth client id; Google sign-in is disabled when unset.
     pub google_oauth_client_id: Option<String>,
+    /// Google OAuth client secret.
     pub google_oauth_client_secret: Option<String>,
+    /// Microsoft OAuth client id; Microsoft sign-in is disabled when unset.
     pub microsoft_oauth_client_id: Option<String>,
+    /// Microsoft OAuth client secret.
     pub microsoft_oauth_client_secret: Option<String>,
     /// Web Push (VAPID). Generate with: npx web-push generate-vapid-keys.
     /// When unset, desktop notifications are disabled.
     pub vapid_public_key: Option<String>,
+    /// VAPID private key matching `vapid_public_key`.
     pub vapid_private_key: Option<String>,
+    /// VAPID subject (`mailto:` or https URL) sent to push services.
     #[serde(default = "default_vapid_subject")]
     pub vapid_subject: String,
     /// Periodically download the OpenPhish community feed for link-reputation
     /// checks (outbound GET only; no user data leaves the server).
     #[serde(default = "default_true")]
     pub openphish_enabled: bool,
+    /// URL of the OpenPhish feed downloaded when `openphish_enabled` is set.
     #[serde(default = "default_openphish_feed_url")]
     pub openphish_feed_url: String,
     /// Proxy remote email images through the backend after user approval.

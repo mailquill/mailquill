@@ -32,6 +32,7 @@ const PAGE_SIZE: u32 = 500;
 const MAX_DISCOVERY_PAGES: u32 = 20;
 const CONCURRENT_FETCHES: usize = 8;
 
+/// Gmail REST API backend; see the module docs for the label/uid model.
 pub struct GmailProvider {
     rest: Rest,
     ids: IdMap,
@@ -39,6 +40,9 @@ pub struct GmailProvider {
 }
 
 impl GmailProvider {
+    /// Build a provider from the account config. Fails with
+    /// [`ProviderError::Other`] when the OAuth access token or the user DB
+    /// handle is missing; no network call is made here.
     pub fn new(config: &ProviderConfig) -> Result<Self, ProviderError> {
         let token = config
             .oauth_access_token

@@ -1,3 +1,6 @@
+//! OAuth sign-in for Google and Microsoft mailboxes: authorization redirect
+//! with PKCE, callback handling and account creation or reconnection.
+
 use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Redirect},
@@ -16,12 +19,14 @@ use crate::{error::AppError, middleware::UserId, state::AppState};
 const PROVIDER_GOOGLE: &str = "google";
 const PROVIDER_MICROSOFT: &str = "microsoft";
 
+/// Query the provider appends to the callback redirect.
 #[derive(Deserialize)]
 pub struct OAuthCallbackQuery {
     code: String,
     state: String,
 }
 
+/// Query of `GET /api/auth/oauth/{provider}/start`.
 #[derive(Deserialize)]
 pub struct OAuthStartQuery {
     /// Short-lived access token, passed in the query because a full-page
@@ -57,6 +62,7 @@ pub type PkceStore = Mutex<
     >,
 >;
 
+/// Create an empty PKCE verifier store, shared with the routes as an extension.
 pub fn new_pkce_store() -> PkceStore {
     Mutex::new(HashMap::new())
 }
@@ -152,6 +158,14 @@ fn build_client(provider: &str, state: &AppState) -> Result<ConfiguredClient, Ap
         .set_redirect_uri(redirect_url))
 }
 
+/// `GET /api/auth/oauth/{provider}/start`: redirect the browser to the
+/// provider's consent page.
+///
+/// The access token in the query is validated (401). When reconnecting an
+/// existing account its stored provider must match (422). A PKCE verifier and
+/// the request context (user, account, calendar and contacts flags) are kept
+/// under the CSRF state until the callback. Google is asked for offline
+/// access so a refresh token is issued.
 pub async fn oauth_start(
     State(state): State<AppState>,
     Path(provider): Path<String>,
@@ -217,6 +231,14 @@ pub async fn oauth_start(
     Ok(Redirect::temporary(auth_url.as_str()))
 }
 
+/// `GET /api/auth/oauth/{provider}/callback`: finish the sign-in.
+///
+/// The CSRF state must match a pending start for the same provider (401).
+/// The code is exchanged for tokens (502 on failure), the profile email is
+/// fetched and validated, and the mailbox account is created or, for a
+/// reconnect, updated with the new credentials. Google Calendar and the
+/// contact source are connected when requested. Ends with a redirect to the
+/// frontend page that started the flow.
 pub async fn oauth_callback(
     State(state): State<AppState>,
     Path(provider): Path<String>,

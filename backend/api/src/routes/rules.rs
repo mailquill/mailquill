@@ -1,3 +1,5 @@
+//! Inbox rules: CRUD on stored rules and upload of the compiled Sieve script.
+
 use axum::{
     extract::{Extension, Path, State},
     response::IntoResponse,
@@ -20,6 +22,7 @@ struct RuleRow {
     actions: String,
 }
 
+/// Rule as returned by the API; `conditions` and `actions` are JSON arrays.
 #[derive(Serialize)]
 pub struct Rule {
     id: String,
@@ -47,6 +50,8 @@ impl From<RuleRow> for Rule {
     }
 }
 
+/// Body of `POST /api/rules` and `PUT /api/rules/{id}`. Defaults: enabled,
+/// engine `sieve`, match all conditions, empty condition and action lists.
 #[derive(Deserialize)]
 pub struct RuleInput {
     account_id: Option<String>,
@@ -60,6 +65,7 @@ pub struct RuleInput {
 
 const COLS: &str = "id, account_id, name, enabled, engine, match_all, conditions, actions";
 
+/// `GET /api/rules`: all rules, newest first.
 pub async fn list_rules(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -73,6 +79,7 @@ pub async fn list_rules(
     Ok(Json(rows.into_iter().map(Rule::from).collect::<Vec<_>>()))
 }
 
+/// `POST /api/rules`: store a rule and return it.
 pub async fn create_rule(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -95,6 +102,7 @@ pub async fn create_rule(
     fetch_one(&user_db, &id).await
 }
 
+/// `PUT /api/rules/{id}`: replace every field of the rule and return it.
 pub async fn update_rule(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -118,6 +126,7 @@ pub async fn update_rule(
     fetch_one(&user_db, &id).await
 }
 
+/// `DELETE /api/rules/{id}`: delete the rule; succeeds even when unknown.
 pub async fn delete_rule(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

@@ -22,6 +22,7 @@ const BASE: &str = "https://graph.microsoft.com/v1.0/me";
 const PAGE_SIZE: u32 = 100;
 const MAX_DISCOVERY_PAGES: u32 = 50;
 
+/// Microsoft Graph backend; see the module docs for the folder/uid model.
 pub struct OutlookProvider {
     rest: Rest,
     ids: IdMap,
@@ -29,6 +30,9 @@ pub struct OutlookProvider {
 }
 
 impl OutlookProvider {
+    /// Build a provider from the account config. Fails with
+    /// [`ProviderError::Other`] when the OAuth access token or the user DB
+    /// handle is missing; no network call is made here.
     pub fn new(config: &ProviderConfig) -> Result<Self, ProviderError> {
         let token = config
             .oauth_access_token

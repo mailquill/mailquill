@@ -32,14 +32,18 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 const ISPDB_BASE: &str = "https://autoconfig.thunderbird.net/v1.1";
 const ISPDB_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// Query of `GET /api/discover`: the address whose domain is probed.
 #[derive(Deserialize)]
 pub struct DiscoverQuery {
     email: String,
 }
 
+/// A discovered IMAP or SMTP endpoint.
 #[derive(Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct Endpoint {
+    /// Server hostname, validated before being returned.
     pub host: String,
+    /// TCP port.
     pub port: u16,
     /// `ssl` (implicit TLS) or `starttls`, matching the values the account
     /// form already uses.
@@ -48,10 +52,14 @@ pub struct Endpoint {
     pub source: &'static str,
 }
 
+/// Settings found in the Thunderbird ISPDB for a domain.
 #[derive(Default)]
 pub struct IspdbConfig {
+    /// Provider display name from the ISPDB entry.
     pub provider: Option<String>,
+    /// Recommended IMAP endpoint, if listed.
     pub imap: Option<Endpoint>,
+    /// Recommended SMTP submission endpoint, if listed.
     pub smtp: Option<Endpoint>,
 }
 
@@ -409,6 +417,11 @@ async fn mx_targets(resolver: &TokioResolver, domain: &str) -> Vec<String> {
     records.into_iter().map(|(_, h)| h).collect()
 }
 
+/// `GET /api/discover`: suggest IMAP and SMTP settings for an email address.
+///
+/// The address and its domain are validated (422), then SRV records, the
+/// ISPDB and TCP probes are tried in that order (see the module docs). Returns
+/// the endpoints found (possibly none) and the provider name when known.
 pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoResponse, AppError> {
     validate::email("email", &q.email)?;
     // The domain becomes part of outbound URLs and host names below; keep it

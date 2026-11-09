@@ -1,3 +1,6 @@
+//! Mailbox views: the cross-account unified inbox, per-folder message pages,
+//! folder lists and sync toggles, and server-side bulk actions.
+
 use axum::{
     extract::{Extension, Path, Query, State},
     response::IntoResponse,
@@ -10,6 +13,8 @@ use crate::{error::AppError, middleware::UserId, state::AppState};
 
 const PAGE_SIZE: i64 = 50;
 
+/// Query of the message list endpoints: opaque `cursor`, `limit` (default 50,
+/// max 100) and view filters.
 #[derive(Deserialize)]
 pub struct PaginationQuery {
     cursor: Option<String>,
@@ -25,6 +30,8 @@ pub struct PaginationQuery {
     unread: Option<bool>,
 }
 
+/// `GET /api/mailbox/unified`: a cursor-paged slice of the selected
+/// cross-account view, optionally scoped to one account or to unread mail.
 pub async fn unified_inbox(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -86,6 +93,7 @@ pub async fn unified_counts(
     })))
 }
 
+/// Body of `POST /api/mailbox/bulk`.
 #[derive(Deserialize)]
 pub struct BulkActionRequest {
     /// "read" | "archive" | "delete"
@@ -269,6 +277,8 @@ pub async fn bulk_action(
     Ok(Json(json!({ "affected": affected_len })))
 }
 
+/// `GET /api/accounts/{id}/folders`: folders of the account with unread counts
+/// and sync flags; 404 when the account is unknown.
 pub async fn list_folders(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -340,6 +350,7 @@ pub async fn list_folders(
     Ok(Json(folders))
 }
 
+/// Body of the folder sync toggles.
 #[derive(Deserialize)]
 pub struct FolderSyncRequest {
     sync_enabled: bool,
@@ -400,6 +411,9 @@ pub async fn set_all_folders_sync(
     Ok(Json(json!({ "sync_enabled": req.sync_enabled })))
 }
 
+/// `GET /api/accounts/{id}/folders/{folder}/messages`: a cursor-paged slice of
+/// one folder. The URL-encoded path is matched exactly, then
+/// case-insensitively; 404 when no folder matches.
 pub async fn list_folder_messages(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

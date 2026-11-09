@@ -1,17 +1,24 @@
+//! Symmetric encryption of stored account credentials plus the token
+//! generation and hashing helpers used for refresh tokens.
+
 use aes_gcm::{aead::AeadInOut, Aes256Gcm, Key, KeyInit, Nonce, Tag};
 
 #[derive(Debug, thiserror::Error)]
+/// Errors from [`CredentialKey`] encryption and decryption.
 pub enum CryptoError {
     #[error("credential encryption error: {0}")]
+    /// The AEAD encryption step failed.
     Encrypt(String),
     #[error("credential decryption error: {0}")]
+    /// Authentication failed: wrong key or tampered ciphertext.
     Decrypt(String),
     #[error("invalid ciphertext")]
+    /// The input is shorter than a nonce plus tag and cannot be a valid ciphertext.
     InvalidCiphertext,
 }
 
 /// AES-256-GCM credential key derived from CREDENTIAL_ENCRYPTION_KEY env var.
-/// Format: [nonce(12B)][ciphertext][tag(16B)]
+/// Format: `[nonce(12B)][ciphertext][tag(16B)]`
 pub struct CredentialKey(pub [u8; 32]);
 
 impl CredentialKey {
@@ -38,6 +45,8 @@ impl CredentialKey {
         Self(arr)
     }
 
+    /// Encrypt `plaintext` with a fresh random nonce. The output is
+    /// `[nonce (12 B)][ciphertext][tag (16 B)]`, as consumed by [`Self::decrypt`].
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let key = Key::<Aes256Gcm>::from(self.0);
         let cipher = Aes256Gcm::new(&key);
@@ -57,6 +66,9 @@ impl CredentialKey {
         Ok(out)
     }
 
+    /// Decrypt a buffer produced by [`Self::encrypt`]. Returns
+    /// [`CryptoError::InvalidCiphertext`] for inputs shorter than 28 bytes and
+    /// [`CryptoError::Decrypt`] when the authentication tag does not verify.
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if ciphertext.len() < 28 {
             return Err(CryptoError::InvalidCiphertext);

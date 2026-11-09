@@ -1,13 +1,23 @@
+//! Embedded sqlx migrations for the shared app database and the per-user
+//! mail databases, plus the connection options every pool is opened with.
+
 use sqlx::{
     migrate::MigrateError,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
     SqlitePool,
 };
 
+/// Apply the pending migrations under `migrations/app` to the shared
+/// application database (users, refresh tokens, push subscriptions, user
+/// settings). Safe to call on every startup; applied migrations are skipped.
 pub async fn run_app_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
     sqlx::migrate!("./migrations/app").run(pool).await
 }
 
+/// Apply the pending migrations under `migrations/mail` to one user's mail
+/// database. [`crate::pool::UserDbPool`] runs this whenever it opens a pool, so
+/// callers only need it for databases they connect to themselves (tests, the
+/// benchmark).
 pub async fn run_mail_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
     sqlx::migrate!("./migrations/mail").run(pool).await
 }

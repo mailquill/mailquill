@@ -1,3 +1,6 @@
+//! Outbound mail: validates a send request, then delivers it in the
+//! background over SMTP or the provider API and reports progress via SSE.
+
 use axum::{
     extract::{Extension, State},
     http::StatusCode,
@@ -14,6 +17,7 @@ use crate::{error::AppError, middleware::UserId, state::AppState};
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024; // 25 MB
 const BACKGROUND_SEND_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Body of `POST /api/send`.
 #[derive(Deserialize)]
 pub struct SendRequest {
     /// Local draft to remove after successful delivery.
@@ -45,6 +49,7 @@ pub struct SendRequest {
     attachments: Option<Vec<AttachmentInput>>,
 }
 
+/// Attachment to include in an outgoing message.
 #[derive(Deserialize)]
 pub struct AttachmentInput {
     filename: String,
@@ -53,6 +58,7 @@ pub struct AttachmentInput {
     data: String,
 }
 
+/// Acknowledgement of a queued send; progress arrives as SSE `send` events.
 #[derive(Serialize)]
 pub struct SendResponse {
     send_id: String,
@@ -75,6 +81,13 @@ struct SendAccount {
     provider_kind: String,
 }
 
+/// `POST /api/send`: queue an email for delivery.
+///
+/// Only cheap checks run before the response: the account (404) and optional
+/// draft (404) must exist, `from` must be the primary address or an alias
+/// (403), attachments may total at most 25 MB (422). Delivery, token refresh
+/// and the Sent-folder copy run in a background task with a timeout; the
+/// outcome is published to the user's SSE stream. Returns 202 with a send id.
 pub async fn send_email(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

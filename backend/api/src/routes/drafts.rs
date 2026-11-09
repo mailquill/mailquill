@@ -1,3 +1,5 @@
+//! Local, provider-neutral drafts stored in the user's mailbox database.
+
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -14,6 +16,7 @@ use crate::{error::AppError, middleware::UserId, state::AppState};
 
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
+/// Attachment of a draft with base64-encoded `data`.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct DraftAttachment {
     filename: String,
@@ -21,6 +24,7 @@ pub struct DraftAttachment {
     data: String,
 }
 
+/// Body of `POST /api/drafts`; `draft_id` updates an existing draft.
 #[derive(Deserialize)]
 pub struct SaveDraftRequest {
     draft_id: Option<String>,

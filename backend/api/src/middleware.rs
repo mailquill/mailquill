@@ -1,3 +1,5 @@
+//! Axum middleware: bearer-token authentication for protected routes.
+
 use axum::{
     extract::{Request, State},
     http::StatusCode,

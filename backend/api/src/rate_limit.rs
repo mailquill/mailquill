@@ -26,12 +26,15 @@ struct Entry {
     window_start: Instant,
 }
 
+/// Fixed-window failure counter keyed by arbitrary strings (e.g. `email:...`,
+/// `ip:...`). Safe to share across requests.
 #[derive(Default)]
 pub struct FailureLimiter {
     entries: Mutex<HashMap<String, Entry>>,
 }
 
 impl FailureLimiter {
+    /// Create a limiter with no tracked keys.
     pub fn new() -> Self {
         Self::default()
     }

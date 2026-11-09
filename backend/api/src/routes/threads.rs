@@ -1,3 +1,6 @@
+//! Conversation threads: load a thread and apply archive, delete or read
+//! actions to all of its messages.
+
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -11,11 +14,15 @@ use crate::{
     error::AppError, middleware::UserId, state::AppState,
 };
 
+/// Body of `PATCH /api/threads/{thread_id}/read`.
 #[derive(Deserialize)]
 pub struct ThreadReadRequest {
     is_read: bool,
 }
 
+/// `GET /api/threads/{thread_id}`: the non-deleted messages of the thread in
+/// date order (one entry per message even when it sits in several folders),
+/// plus size, unread count and participants. 404 when the thread is empty.
 pub async fn get_thread(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -118,6 +125,7 @@ pub async fn get_thread(
     })))
 }
 
+/// `POST /api/threads/{thread_id}/archive`: archive every message of the thread.
 pub async fn archive_thread(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -126,6 +134,7 @@ pub async fn archive_thread(
     bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::Archive).await
 }
 
+/// `POST /api/threads/{thread_id}/delete`: delete every message of the thread.
 pub async fn delete_thread(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -134,6 +143,8 @@ pub async fn delete_thread(
     bulk_thread_action(&state, &user.0, &thread_id, ThreadAction::Delete).await
 }
 
+/// `PATCH /api/threads/{thread_id}/read`: set the read flag on every message
+/// of the thread.
 pub async fn mark_thread_read(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

@@ -8,8 +8,11 @@ use tokio::{
 /// Status for a single account's sync task.
 #[derive(Clone, Debug)]
 pub struct SyncStatus {
+    /// Lifecycle state: `idle`, `pending`, `syncing`, `error` or `reauth_required`.
     pub state: String,
+    /// RFC 3339 time of the last successfully completed sync cycle, if any.
     pub last_synced_at: Option<String>,
+    /// Message of the error that ended the last cycle, cleared on success.
     pub error: Option<String>,
     /// Messages persisted so far in the current/last sync run.
     pub synced: i64,
@@ -31,22 +34,37 @@ impl Default for SyncStatus {
 
 /// Command sent to the sync task for an account.
 pub enum SyncCommand {
+    /// Stop the task after the current cycle.
     Shutdown,
+    /// Run a sync cycle now instead of waiting for the next tick.
     ForcePoll,
+    /// Move one message between folders on the server.
     IMapMove {
+        /// Owner of the account; selects the user database.
         user_id: String,
+        /// Provider-native uid of the message in `src_folder`.
         uid: u32,
+        /// Folder the message currently lives in.
         src_folder: String,
+        /// Folder to move the message into.
         dest_folder: String,
+        /// Expunge the source folder afterwards so the copy does not linger.
         expunge: bool,
     },
     /// Push every flag change queued in `pending_flag_ops` to the server.
     /// Carries no payload: the ops live in the user database, so a coalesced
     /// wake-up is enough and nothing is lost if this signal is dropped.
-    FlushFlags { user_id: String },
-    IMapExpunge {
+    FlushFlags {
+        /// Owner of the account; selects the user database.
         user_id: String,
+    },
+    /// Permanently delete one message (set `\Deleted` and expunge it).
+    IMapExpunge {
+        /// Owner of the account; selects the user database.
+        user_id: String,
+        /// Provider-native uid of the message in `folder`.
         uid: u32,
+        /// Folder containing the message.
         folder: String,
     },
 }
@@ -56,12 +74,19 @@ struct AccountTask {
     handle: JoinHandle<()>,
 }
 
+/// Registry of the running per-account sync tasks and their statuses.
+///
+/// Each account gets one Tokio task fed through a bounded command channel.
+/// The `queue_*` methods hand commands off without waiting for channel
+/// capacity, so HTTP handlers are never stalled by a task busy with a long
+/// sync cycle. Shared via `Arc` through [`SyncAppState::sync_manager`].
 pub struct SyncManager {
     tasks: Mutex<HashMap<String, AccountTask>>,
     statuses: Mutex<HashMap<String, SyncStatus>>,
 }
 
 impl SyncManager {
+    /// Create an empty registry with no running tasks.
     pub fn new() -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
@@ -122,6 +147,7 @@ impl SyncManager {
         self.statuses.lock().await.remove(account_id);
     }
 
+    /// Current status of an account; the default (`idle`) for unknown accounts.
     pub async fn account_status(&self, account_id: &str) -> SyncStatus {
         self.statuses
             .lock()
@@ -131,6 +157,8 @@ impl SyncManager {
             .unwrap_or_default()
     }
 
+    /// Replace an account's whole status (see [`Self::set_state`] and
+    /// [`Self::set_progress`] for partial updates).
     pub async fn update_status(&self, account_id: &str, status: SyncStatus) {
         self.statuses
             .lock()
@@ -271,32 +299,51 @@ impl SyncManager {
     }
 }
 
+/// A newly synced message worth telling the user about (SSE + web push).
 #[derive(Clone, Debug)]
 pub struct NewMessageNotification {
+    /// Local database id of the message row.
     pub message_id: String,
+    /// Account that received the message.
     pub account_id: String,
+    /// Display name of the account, for the notification body.
     pub account_name: String,
+    /// Formatted `From` address.
     pub sender: String,
+    /// Decoded subject line.
     pub subject: String,
 }
 
+/// Serialised snapshot of a [`SyncStatus`] pushed to clients over SSE.
 #[derive(Clone, Debug, Serialize)]
 pub struct SyncStatusNotification {
+    /// Account the status belongs to.
     pub account_id: String,
+    /// Lifecycle state, as in [`SyncStatus::state`].
     pub state: String,
+    /// RFC 3339 time of the last successful sync, if any.
     pub last_synced_at: Option<String>,
+    /// Error message of the last failed cycle, if any.
     pub error: Option<String>,
+    /// Messages persisted so far in the current/last run.
     pub synced: i64,
+    /// Total messages reported by the server across all folders.
     pub total: i64,
 }
 
 /// Trait implemented by AppState so mail-sync doesn't depend on api types.
 #[async_trait::async_trait]
 pub trait SyncAppState: Send + Sync + 'static {
+    /// Open (or fetch the pooled) SQLite database of the given user.
     async fn user_db(&self, user_id: &str) -> Result<sqlx::SqlitePool, String>;
+    /// Store for message bodies and attachments.
     fn blob_store(&self) -> Arc<dyn mailquill_core::blob::BlobStore>;
+    /// Key that decrypts the account credentials stored in the user database.
     fn credential_key(&self) -> Arc<mailquill_core::crypto::CredentialKey>;
+    /// The registry the sync tasks report their status to.
     fn sync_manager(&self) -> Arc<SyncManager>;
+    /// Deliver a new-message notification to the user. The default does
+    /// nothing; the api crate broadcasts it over SSE and web push.
     async fn notify_new_message(
         &self,
         _user_id: &str,
@@ -305,6 +352,8 @@ pub trait SyncAppState: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Publish a sync status change to the user. The default does nothing;
+    /// the api crate broadcasts it over SSE.
     async fn notify_sync_status(
         &self,
         _user_id: &str,

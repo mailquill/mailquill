@@ -10,11 +10,15 @@ use p256::elliptic_curve::sec1::ToSec1Point;
 use p256::elliptic_curve::Generate;
 use p256::SecretKey;
 
+/// A freshly generated VAPID key pair, both halves URL-safe base64 without padding.
 pub struct VapidKeyPair {
+    /// Uncompressed P-256 public point (65 bytes).
     pub public_key: String,
+    /// P-256 private scalar (32 bytes).
     pub private_key: String,
 }
 
+/// Generate a random P-256 key pair using the system RNG.
 pub fn generate() -> VapidKeyPair {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let secret = SecretKey::try_generate().expect("system RNG unavailable");

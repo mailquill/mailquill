@@ -9,22 +9,29 @@ use std::collections::HashSet;
 
 const ASSIGN_BATCH_SIZE: usize = 500;
 
+/// Per-account view of the `remote_message_ids` table.
 pub struct IdMap {
     db: SqlitePool,
     account_id: String,
 }
 
+/// Where initial id discovery for a folder stopped, so a bounded pass can
+/// resume on the next sync tick.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BackfillState {
+    /// Provider page token to continue from; `None` starts from the top.
     pub page_token: Option<String>,
+    /// Every existing message in the folder has been assigned a uid.
     pub complete: bool,
 }
 
 impl IdMap {
+    /// Create a map over `db` scoped to `account_id`.
     pub fn new(db: SqlitePool, account_id: String) -> Self {
         Self { db, account_id }
     }
 
+    /// All remote ids already mapped in `folder`.
     pub async fn known_ids(&self, folder: &str) -> Result<HashSet<String>, ProviderError> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT remote_id FROM remote_message_ids WHERE account_id = ? AND folder_path = ?",
@@ -37,6 +44,8 @@ impl IdMap {
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
+    /// Persisted discovery cursor for `folder`. Errors if the folder row does
+    /// not exist yet.
     pub async fn backfill_state(&self, folder: &str) -> Result<BackfillState, ProviderError> {
         let state: Option<(Option<String>, bool)> = sqlx::query_as(
             "SELECT remote_backfill_page_token, remote_backfill_complete FROM folders WHERE account_id = ? AND full_path = ?",
@@ -55,6 +64,7 @@ impl IdMap {
         })
     }
 
+    /// Store the discovery cursor for `folder` on its `folders` row.
     pub async fn set_backfill_state(
         &self,
         folder: &str,
@@ -74,6 +84,7 @@ impl IdMap {
         Ok(())
     }
 
+    /// Highest uid assigned in `folder`, or 0 when nothing is mapped yet.
     pub async fn max_uid(&self, folder: &str) -> Result<u32, ProviderError> {
         let max: Option<i64> = sqlx::query_scalar(
             "SELECT MAX(uid) FROM remote_message_ids WHERE account_id = ? AND folder_path = ?",
@@ -121,7 +132,7 @@ impl IdMap {
         self.max_uid(folder).await
     }
 
-    /// Store a specific (folder, uid) → remote_id mapping. Unlike [`assign`],
+    /// Store a specific (folder, uid) → remote_id mapping. Unlike [`Self::assign`],
     /// the uid is given by the caller (the IMAP uid), not auto-incremented —
     /// used by the Gmail-over-IMAP hybrid to bind IMAP uids to Gmail message ids
     /// (hex X-GM-MSGID). Overwrites any prior remote_id for that uid.
@@ -158,6 +169,7 @@ impl IdMap {
         Ok(())
     }
 
+    /// Look up the remote id behind a `(folder, uid)`; errors when unmapped.
     pub async fn remote_id(&self, folder: &str, uid: u32) -> Result<String, ProviderError> {
         let id: Option<String> = sqlx::query_scalar(
             "SELECT remote_id FROM remote_message_ids WHERE account_id = ? AND folder_path = ? AND uid = ?",

@@ -1,19 +1,26 @@
+//! User decisions on untrusted TLS certificates during account setup.
+
 use serde::Deserialize;
 
 /// Explicit user response to a TLS certificate verification failure.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsDecision {
+    /// Trust the certificate for this attempt only.
     Accept,
+    /// Trust the certificate and pin it on the account.
     AcceptAlways,
+    /// Reject the certificate; the operation is aborted.
     Deny,
 }
 
 impl TlsDecision {
+    /// Whether the connection should be retried with the certificate trusted.
     pub fn permits_retry(self) -> bool {
         matches!(self, Self::Accept | Self::AcceptAlways)
     }
 
+    /// Whether the certificate exception should be stored on the account.
     pub fn persists_exception(self) -> bool {
         matches!(self, Self::AcceptAlways)
     }

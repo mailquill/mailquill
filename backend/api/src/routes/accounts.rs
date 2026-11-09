@@ -1,3 +1,6 @@
+//! Email account management: create, read, update, delete and reorder
+//! accounts, trigger and inspect sync, and manage sender aliases.
+
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -9,6 +12,7 @@ use serde_json::json;
 
 use crate::{error::AppError, middleware::UserId, state::AppState, tls::TlsDecision, validate};
 
+/// Body of `POST /api/accounts`.
 #[derive(Deserialize)]
 pub struct AddAccountRequest {
     display_name: String,
@@ -44,6 +48,8 @@ pub struct AddAccountRequest {
     color: Option<String>,
 }
 
+/// Body of `PUT /api/accounts/{id}`; every field is optional and unset fields
+/// keep their stored value.
 #[derive(Deserialize)]
 pub struct UpdateAccountRequest {
     display_name: Option<String>,
@@ -72,12 +78,15 @@ pub struct UpdateAccountRequest {
     color: Option<String>,
 }
 
+/// Body of `PUT /api/accounts/order`.
 #[derive(Deserialize)]
 pub struct ReorderAccountsRequest {
     /// Every account id of the user, in the desired sidebar order.
     account_ids: Vec<String>,
 }
 
+/// Contact-sync status of an account's mailbox-managed contact source, embedded
+/// in [`AccountResponse`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ContactCapabilitySummary {
     source_id: String,
@@ -89,6 +98,7 @@ pub struct ContactCapabilitySummary {
     cache_retained: bool,
 }
 
+/// Account as returned by the API; credentials are never included.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct AccountResponse {
     id: String,
@@ -116,17 +126,27 @@ pub struct AccountResponse {
     contacts: Option<ContactCapabilitySummary>,
 }
 
+/// Body of `POST /api/accounts/{id}/aliases`.
 #[derive(Deserialize)]
 pub struct AddAliasRequest {
     email: String,
     display_name: Option<String>,
 }
 
+/// Body of `PATCH /api/accounts/{id}/aliases/{alias_id}`.
 #[derive(Deserialize)]
 pub struct UpdateAliasRequest {
     display_name: Option<String>,
 }
 
+/// `POST /api/accounts`: add a mail account.
+///
+/// Validates every field server-side, rejects a duplicate primary email with
+/// 409, then tests the IMAP connection before persisting. An untrusted TLS
+/// certificate yields a 502 `tls_untrusted` payload carrying the certificate
+/// so the client can ask the user; the exception is stored only for
+/// `accept_always`. Credentials are encrypted, the sync task is started, the
+/// contact source is reconciled, and the new account is returned with 201.
 pub async fn add_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -308,6 +328,8 @@ pub async fn add_account(
     Ok((StatusCode::CREATED, Json(row)).into_response())
 }
 
+/// `GET /api/accounts`: all accounts of the user in sidebar order, each with
+/// its contact capability summary.
 pub async fn list_accounts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -326,6 +348,7 @@ pub async fn list_accounts(
     Ok(Json(rows))
 }
 
+/// `GET /api/accounts/{id}`: one account, 404 when unknown.
 pub async fn get_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -336,6 +359,13 @@ pub async fn get_account(
     Ok(Json(row))
 }
 
+/// `PUT /api/accounts/{id}`: partially update an account.
+///
+/// Provided fields are validated; credentials are merged into the encrypted
+/// blob. The IMAP connection is re-tested only when host, port, scheme or
+/// credentials changed (not for XOAUTH2), with the same TLS prompt flow as
+/// [`add_account`]. The sync task is restarted and the contact source
+/// reconciled. Returns the updated account.
 pub async fn update_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -572,6 +602,8 @@ fn tls_untrusted_json(error: &str, host: &str, port: u16, der: &[u8]) -> serde_j
     })
 }
 
+/// `DELETE /api/accounts/{id}`: stop mail and contact sync for the account and
+/// delete it (dependent rows cascade). 204 on success, 404 when unknown.
 pub async fn delete_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -607,6 +639,8 @@ pub async fn delete_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /api/accounts/{id}/sync-status`: current sync state, last sync time,
+/// error and synced/total message counts for the account.
 pub async fn sync_status(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -700,6 +734,8 @@ mod sync_progress_tests {
     }
 }
 
+/// `POST /api/accounts/{id}/sync`: force an immediate poll, starting the sync
+/// task first if it is not running. Returns 202.
 pub async fn trigger_sync(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -728,6 +764,8 @@ pub async fn trigger_sync(
 
 // ── Aliases ───────────────────────────────────────────────────────────────────
 
+/// `POST /api/accounts/{id}/aliases`: add a sender alias to the account.
+/// Requires an `@` in the address; returns the alias with 201.
 pub async fn add_alias(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -767,6 +805,7 @@ pub async fn add_alias(
     ))
 }
 
+/// `GET /api/accounts/{id}/aliases`: aliases of the account in creation order.
 pub async fn list_aliases(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -799,6 +838,8 @@ pub async fn list_aliases(
     Ok(Json(aliases))
 }
 
+/// `PATCH /api/accounts/{id}/aliases/{alias_id}`: change the alias display name
+/// and return the updated alias.
 pub async fn update_alias(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -834,6 +875,8 @@ pub async fn update_alias(
     ))
 }
 
+/// `DELETE /api/accounts/{id}/aliases/{alias_id}`: remove an alias; 204 on
+/// success, 404 when it does not belong to the account.
 pub async fn delete_alias(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

@@ -1,3 +1,7 @@
+//! Implements `mail_sync::manager::SyncAppState` for [`AppState`] so the sync
+//! manager can reach per-user databases, refresh OAuth tokens and deliver
+//! new-message notifications via Web Push and SSE.
+
 use std::sync::Arc;
 
 use mail_sync::manager::{

@@ -7,12 +7,16 @@ use async_trait::async_trait;
 use super::{FolderStatus, MailProvider, ProviderConfig, ProviderError};
 use crate::session::{self, FetchedMessage, FolderInfo, ImapSession};
 
+/// Plain IMAP backend wrapping one authenticated [`ImapSession`].
 pub struct ImapProvider {
     session: ImapSession,
     selected: Option<String>,
 }
 
 impl ImapProvider {
+    /// Connect over TLS and authenticate with the config's credentials
+    /// (LOGIN, or XOAUTH2 when `auth_scheme` is `xoauth2`). No folder is
+    /// selected yet.
     pub async fn connect(config: &ProviderConfig) -> Result<Self, ProviderError> {
         let session = session::connect_imap(
             &config.host,

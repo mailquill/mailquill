@@ -1,3 +1,6 @@
+//! CalDAV/CardDAV helpers tied to an email account: autodiscovery of the
+//! account's calendars and a combined DAV sync trigger.
+
 use axum::{
     extract::{Extension, Path, Query, State},
     response::IntoResponse,
@@ -14,6 +17,8 @@ struct DiscoveredCalendarResponse {
     color: Option<String>,
 }
 
+/// Query of `GET /api/accounts/{id}/caldav-discover`: whether an invalid TLS
+/// certificate may be accepted for the probe.
 #[derive(serde::Deserialize)]
 pub struct CaldavDiscoverQuery {
     accept_invalid_tls: Option<bool>,

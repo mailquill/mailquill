@@ -20,11 +20,15 @@ use tokio_stream::StreamExt;
 
 use crate::{error::AppError, state::AppState};
 
+/// Query of `GET /api/events`: the access token (EventSource cannot set headers).
 #[derive(Deserialize)]
 pub struct EventsQuery {
     token: String,
 }
 
+/// `GET /api/events`: an SSE stream of the user's events (`message`, `sync`,
+/// ...). The token is validated here (401 on failure); events of other users
+/// are filtered out and a keep-alive is sent every 30 seconds.
 pub async fn events_stream(
     State(state): State<AppState>,
     Query(query): Query<EventsQuery>,

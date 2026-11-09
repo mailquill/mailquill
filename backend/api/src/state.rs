@@ -1,3 +1,5 @@
+//! Shared application state handed to every axum handler.
+
 use contact_sync::ContactSyncManager;
 use db::pool::UserDbPool;
 use mail_sync::manager::SyncManager;
@@ -6,10 +8,14 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// Web Push (VAPID) key pair and subject used to sign push requests.
 #[derive(Clone)]
 pub struct VapidConfig {
+    /// URL-safe base64 P-256 public key, also handed to browsers.
     pub public_key: String,
+    /// URL-safe base64 P-256 private key.
     pub private_key: String,
+    /// `mailto:` or https contact URL sent to the push service.
     pub subject: String,
 }
 
@@ -17,6 +23,7 @@ pub struct VapidConfig {
 /// foreground notifications when web push isn't available (e.g. Brave).
 #[derive(Clone)]
 pub struct UserEvent {
+    /// Recipient user; clients only receive events for their own id.
     pub user_id: String,
     /// SSE event name (`message`, `sync`, ...).
     pub event_type: String,
@@ -24,6 +31,8 @@ pub struct UserEvent {
     pub payload: String,
 }
 
+/// Process-wide dependencies: databases, sync managers, keys and limiters.
+/// Cheap to clone; everything heavy is behind an `Arc`.
 #[derive(Clone)]
 pub struct AppState {
     /// app.db — users, refresh_tokens, user_settings

@@ -1,3 +1,5 @@
+//! Full-text and metadata search over the user's messages.
+
 use axum::{
     extract::{Extension, Query, State},
     response::IntoResponse,
@@ -8,6 +10,8 @@ use serde_json::json;
 
 use crate::{error::AppError, middleware::UserId, state::AppState};
 
+/// Query of `GET /api/search`: free text `q` (FTS) plus header, date, folder,
+/// account and flag filters, with cursor paging (`limit` capped at 50).
 #[derive(Deserialize)]
 pub struct SearchQuery {
     q: Option<String>,
@@ -26,6 +30,8 @@ pub struct SearchQuery {
     limit: Option<i64>,
 }
 
+/// `GET /api/search`: messages matching the filters, newest first, as a
+/// cursor-paged list. Deleted messages are excluded.
 pub async fn search(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,

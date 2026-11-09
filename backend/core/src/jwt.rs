@@ -1,24 +1,35 @@
+//! Short-lived HS256 access tokens for API authentication.
+
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
+/// Errors from issuing or validating access tokens.
 pub enum JwtError {
     #[error("jwt encode error: {0}")]
+    /// Signing the token failed.
     Encode(String),
     #[error("jwt decode error: {0}")]
+    /// The token is malformed, expired or signed with a different secret.
     Decode(String),
     #[error("JWT_SECRET env var required")]
+    /// The `JWT_SECRET` environment variable is not set.
     MissingSecret,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// Payload of an access token.
 pub struct Claims {
+    /// Subject: the authenticated user's id.
     pub sub: String, // user_id
+    /// Expiry as a Unix timestamp in seconds.
     pub exp: i64,
+    /// Issue time as a Unix timestamp in seconds.
     pub iat: i64,
 }
 
+/// Symmetric signing key used both to issue and to validate tokens.
 pub struct JwtKey {
     encoding: EncodingKey,
     decoding: DecodingKey,
@@ -32,6 +43,7 @@ impl JwtKey {
         Self::from_secret(secret.as_bytes())
     }
 
+    /// Build a key from raw secret bytes. Used by [`Self::from_env`] and directly in tests.
     pub fn from_secret(secret: &[u8]) -> Self {
         Self {
             encoding: EncodingKey::from_secret(secret),

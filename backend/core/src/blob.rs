@@ -1,32 +1,53 @@
+//! Key-value blob storage for message bodies and attachments, with a local
+//! filesystem backend, an S3-compatible backend and an optional AES-256-GCM
+//! encrypting wrapper. [`create_blob_store`] picks the combination from
+//! environment variables at startup.
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::NaiveDate;
 use std::sync::Arc;
 
+/// Result alias used throughout the blob module.
 pub type Result<T> = std::result::Result<T, BlobError>;
 
 #[derive(Debug, thiserror::Error)]
+/// Errors returned by [`BlobStore`] implementations.
 pub enum BlobError {
     #[error("blob not found: {0}")]
+    /// No blob is stored under the requested key.
     NotFound(String),
     #[error("io error: {0}")]
+    /// Filesystem error from the local backend.
     Io(#[from] std::io::Error),
     #[error("storage error: {0}")]
+    /// Error reported by the remote object store.
     Storage(String),
     #[error("encryption error: {0}")]
+    /// Encryption or decryption failed, or the stored blob is too short to carry a nonce and tag.
     Encryption(String),
 }
 
 #[async_trait]
+/// Backend-agnostic byte store addressed by slash-separated keys such as the
+/// ones built by [`blob_key_body`] and [`blob_key_attachment`]. Implementations
+/// are shared across the process as `Arc<dyn BlobStore>`.
 pub trait BlobStore: Send + Sync {
+    /// Store `data` under `key`, replacing any existing blob.
     async fn put(&self, key: &str, data: Bytes) -> Result<()>;
+    /// Fetch the blob stored under `key`, or [`BlobError::NotFound`] if there is none.
     async fn get(&self, key: &str) -> Result<Bytes>;
+    /// Remove the blob under `key`. Deleting a key that does not exist succeeds.
     async fn delete(&self, key: &str) -> Result<()>;
+    /// Report whether a blob is stored under `key`.
     async fn exists(&self, key: &str) -> Result<bool>;
 }
 
 // ── Key helpers ──────────────────────────────────────────────────────────────
 
+/// Build the storage key for a message body:
+/// `mail/{account_id}/{yyyy}/{mm}/{dd}/{uid}/body`. The date components come
+/// from the message's IMAP internal date so blobs are grouped per day.
 pub fn blob_key_body(account_id: &str, uid: u32, internal_date: NaiveDate) -> String {
     format!(
         "mail/{}/{}/{}/{}/{}/body",
@@ -38,6 +59,8 @@ pub fn blob_key_body(account_id: &str, uid: u32, internal_date: NaiveDate) -> St
     )
 }
 
+/// Build the storage key for the `n`-th attachment of a message, next to its
+/// body key: `mail/{account_id}/{yyyy}/{mm}/{dd}/{uid}/attach/{n}`.
 pub fn blob_key_attachment(
     account_id: &str,
     uid: u32,
@@ -57,11 +80,14 @@ pub fn blob_key_attachment(
 
 // ── Local filesystem backend ─────────────────────────────────────────────────
 
+/// [`BlobStore`] backed by a directory on the local filesystem. Keys map
+/// directly to relative paths under the root directory.
 pub struct LocalBlobStore {
     root: std::path::PathBuf,
 }
 
 impl LocalBlobStore {
+    /// Create a store rooted at `root`. Directories are created lazily on the first `put`.
     pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -106,12 +132,17 @@ impl BlobStore for LocalBlobStore {
 
 // ── S3-compatible backend ─────────────────────────────────────────────────────
 
+/// [`BlobStore`] backed by an S3-compatible bucket through `object_store`.
 pub struct S3BlobStore {
     store: object_store::aws::AmazonS3,
     _bucket: String,
 }
 
 impl S3BlobStore {
+    /// Build the store from `S3_BUCKET`, `S3_REGION`, `AWS_ACCESS_KEY_ID` and
+    /// `AWS_SECRET_ACCESS_KEY`, plus the optional `S3_ENDPOINT` for non-AWS
+    /// services. The error is a human-readable message naming the missing
+    /// variable or the client build failure.
     pub fn from_env() -> std::result::Result<Self, String> {
         let bucket = std::env::var("S3_BUCKET")
             .map_err(|_| "S3_BUCKET env var required when BLOB_BACKEND=s3".to_string())?;
@@ -195,12 +226,17 @@ impl BlobStore for S3BlobStore {
 
 // ── Encrypting wrapper ────────────────────────────────────────────────────────
 
+/// Wrapper that encrypts blobs with AES-256-GCM before handing them to the
+/// inner store and decrypts them on the way back. Each `put` uses a fresh
+/// random nonce and stores `[nonce (12 B)][ciphertext][tag (16 B)]`; `delete`
+/// and `exists` pass straight through to the inner store.
 pub struct EncryptingBlobStore {
     inner: Arc<dyn BlobStore>,
     key: aes_gcm::Key<aes_gcm::Aes256Gcm>,
 }
 
 impl EncryptingBlobStore {
+    /// Wrap `inner` with the given 32-byte AES-256 key.
     pub fn new(inner: Arc<dyn BlobStore>, key_bytes: &[u8; 32]) -> Self {
         use aes_gcm::Key;
         Self {
@@ -269,6 +305,11 @@ impl BlobStore for EncryptingBlobStore {
 
 // ── Factory ───────────────────────────────────────────────────────────────────
 
+/// Build the process-wide blob store from environment variables: `BLOB_BACKEND`
+/// (`s3`, anything else means local), `BLOB_LOCAL_PATH` (default
+/// `./data/blobs`) and, when `BLOB_ENCRYPTION=true`, `BLOB_ENCRYPTION_KEY` as
+/// 64 hex characters for the encrypting wrapper. Panics on a missing or
+/// malformed setting because this runs once at startup.
 pub fn create_blob_store() -> Arc<dyn BlobStore> {
     let backend = std::env::var("BLOB_BACKEND").unwrap_or_else(|_| "local".to_string());
 

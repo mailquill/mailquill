@@ -1,3 +1,8 @@
+//! Contact sources (standalone CardDAV accounts and mailbox-managed Google,
+//! Microsoft Graph or CardDAV sources), address books, contacts, groups and
+//! recipient autocompletion. Contact writes go to the provider first and the
+//! local cache is updated afterwards.
+
 use std::collections::HashSet;
 
 use axum::{
@@ -27,6 +32,7 @@ use uuid::Uuid;
 
 use crate::{error::AppError, middleware::UserId, state::AppState};
 
+/// Contact source as returned by the API; credentials are never included.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct ContactAccount {
     id: String,
@@ -47,6 +53,7 @@ pub struct ContactAccount {
     cache_retained: bool,
 }
 
+/// Address book discovered on a contact source.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct ContactBookResponse {
     id: String,
@@ -58,6 +65,7 @@ pub struct ContactBookResponse {
     is_writable: bool,
 }
 
+/// Body of `POST /api/contact-accounts`.
 #[derive(Deserialize)]
 pub struct NewContactAccount {
     display_name: String,
@@ -71,6 +79,7 @@ pub struct NewContactAccount {
     refresh_token: Option<String>,
 }
 
+/// Sync or capability state of a contact source.
 #[derive(Serialize)]
 pub struct SyncStatus {
     status: String,
@@ -78,12 +87,14 @@ pub struct SyncStatus {
     error: Option<String>,
 }
 
+/// Body of `POST /api/accounts/{id}/contacts/disable`.
 #[derive(Deserialize)]
 pub struct DisableContactsRequest {
     #[serde(default = "default_true")]
     keep_downloaded_contacts: bool,
 }
 
+/// Body of `POST /api/accounts/{id}/contacts/discover`.
 #[derive(Default, Deserialize)]
 pub struct DiscoverContactsRequest {
     selected_book_remote_ids: Option<Vec<String>>,
@@ -96,6 +107,8 @@ fn default_true() -> bool {
     true
 }
 
+/// Contact as returned by the API, including its source's capability flags
+/// and group memberships.
 #[derive(Serialize)]
 pub struct Contact {
     id: String,
@@ -126,6 +139,7 @@ pub struct Contact {
     groups: Vec<ContactGroup>,
 }
 
+/// Group membership of a contact.
 #[derive(Serialize)]
 pub struct ContactGroup {
     id: String,
@@ -133,6 +147,7 @@ pub struct ContactGroup {
     remote_id: Option<String>,
 }
 
+/// Contact group with its member count, as listed by `GET /api/contact-groups`.
 #[derive(Serialize, sqlx::FromRow)]
 pub struct ContactGroupSummary {
     id: String,
@@ -143,6 +158,7 @@ pub struct ContactGroupSummary {
     member_count: i64,
 }
 
+/// One page of contacts with the total match count.
 #[derive(Serialize)]
 pub struct ContactPage {
     items: Vec<Contact>,
@@ -151,6 +167,8 @@ pub struct ContactPage {
     offset: i64,
 }
 
+/// Autocomplete entry for the compose recipient field; `source` is `contact`
+/// or `sender`.
 #[derive(Serialize)]
 pub struct RecipientSuggestion {
     id: String,
@@ -183,6 +201,8 @@ struct ContactRow {
     photo_content_type: Option<String>,
 }
 
+/// Query of the contact list, search and suggestion endpoints: free-text `q`
+/// plus optional source, mailbox, book and group filters and paging.
 #[derive(Deserialize)]
 pub struct ContactQuery {
     q: Option<String>,
@@ -194,6 +214,7 @@ pub struct ContactQuery {
     offset: Option<i64>,
 }
 
+/// Query of `GET /api/contact-groups`: optional source, mailbox and book filters.
 #[derive(Deserialize)]
 pub struct ContactGroupQuery {
     account_id: Option<String>,
@@ -201,6 +222,7 @@ pub struct ContactGroupQuery {
     book_id: Option<String>,
 }
 
+/// Body of `POST /api/contacts`.
 #[derive(Deserialize)]
 pub struct NewContact {
     account_id: String,
@@ -216,6 +238,7 @@ pub struct NewContact {
     notes: Option<String>,
 }
 
+/// Body of `PUT /api/contacts/{id}`; unset fields keep their stored value.
 #[derive(Deserialize)]
 pub struct UpdateContact {
     display_name: Option<String>,
@@ -233,6 +256,13 @@ const SELECT_CONTACT: &str = "id, account_id, uid, display_name, given_name, fam
 const SELECT_CONTACT_QUALIFIED: &str = "c.id, c.account_id, c.uid, c.display_name, c.given_name, c.family_name, c.org, c.title, c.emails, c.phones, c.addresses, c.notes, c.photo_blob_key, c.raw_vcard, c.synced_at, c.book_id, c.remote_version, c.photo_reference, c.photo_version, c.photo_content_type";
 const CONTACT_SYNC_INTERVAL_SECS: u64 = 300;
 
+/// `POST /api/contact-accounts`: add a standalone CardDAV contact source.
+///
+/// Only `cardav` is accepted here (Google and Microsoft contacts are enabled
+/// from their mailbox); a base URL and credentials are required. The
+/// credentials are encrypted, a first sync runs synchronously and the source is
+/// removed again with 422 if it fails. On success the periodic sync task is
+/// started and the source returned.
 pub async fn create_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -289,6 +319,7 @@ pub async fn create_account(
     Ok(Json(fetch_account(&user_db, &id).await?))
 }
 
+/// `GET /api/contact-accounts`: all contact sources sorted by name.
 pub async fn list_accounts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -304,6 +335,8 @@ pub async fn list_accounts(
     Ok(Json(accounts))
 }
 
+/// `DELETE /api/contact-accounts/{id}`: stop sync and delete a standalone
+/// source. Mailbox-managed sources are refused with 409; 404 when unknown.
 pub async fn delete_account(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -336,6 +369,8 @@ pub async fn delete_account(
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
+/// `GET /api/contact-accounts/{id}/sync-status`: capability state, last sync
+/// time and reason of the source; 404 when unknown.
 pub async fn account_sync_status(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -358,6 +393,8 @@ pub async fn account_sync_status(
     }))
 }
 
+/// `GET /api/contact-accounts/{id}/books`: address books of the source, default
+/// book first; 404 when the source is unknown.
 pub async fn list_contact_books(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -376,6 +413,8 @@ pub async fn list_contact_books(
     Ok(Json(books))
 }
 
+/// `POST /api/contact-accounts/{id}/sync`: mark the source as syncing and
+/// (re)start its sync task with an immediate run. Returns the `syncing` status.
 pub async fn trigger_sync(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -397,6 +436,9 @@ pub async fn trigger_sync(
     }))
 }
 
+/// `POST /api/accounts/{id}/contacts/enable`: enable the mailbox-managed
+/// contact source of an email account, reconciling provider and capability
+/// state; a `pending` source starts syncing right away. Returns the source.
 pub async fn enable_mailbox_contacts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -417,6 +459,10 @@ pub async fn enable_mailbox_contacts(
     Ok(Json(fetch_account(&user_db, &capability.source_id).await?))
 }
 
+/// `POST /api/accounts/{id}/contacts/disable`: stop and disable the mailbox's
+/// contact source. Downloaded contacts, groups and books are kept unless
+/// `keep_downloaded_contacts` is false. Returns the source; 404 when the
+/// mailbox has none.
 pub async fn disable_mailbox_contacts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -466,6 +512,13 @@ pub async fn disable_mailbox_contacts(
     Ok(Json(fetch_account(&user_db, &source_id).await?))
 }
 
+/// `POST /api/accounts/{id}/contacts/discover`: list the address books offered
+/// by the mailbox's contact provider and optionally store the selection.
+///
+/// An accepting TLS decision lets the CardDAV probe tolerate an invalid
+/// certificate and, for `accept_always`, records the exception on the mailbox.
+/// A selection must name at least one discovered book (422 otherwise). TLS
+/// verification failures are reported as 502 `carddav_tls_certificate_invalid`.
 pub async fn discover_mailbox_contacts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -561,6 +614,8 @@ async fn enable_mailbox_dav_tls_exception(
     Ok(())
 }
 
+/// `GET /api/contacts`: a page of contacts matching the query (default 50,
+/// at most 200 per page) with the total count.
 pub async fn list_contacts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -570,6 +625,7 @@ pub async fn list_contacts(
     Ok(Json(contact_page(&user_db, &query, false).await?))
 }
 
+/// `GET /api/contact-groups`: groups matching the filters with member counts.
 pub async fn list_contact_groups(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -606,6 +662,8 @@ async fn contact_groups(
     Ok(groups)
 }
 
+/// `GET /api/contacts/search`: up to 10 contacts matching `q`, ranked by
+/// which field matched; an empty query yields an empty list.
 pub async fn search_contacts(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -627,6 +685,9 @@ pub async fn search_contacts(
     ))
 }
 
+/// `GET /api/recipient-suggestions`: up to 12 recipient suggestions for `q`:
+/// matching contact addresses first (contacts of `mailbox_id` preferred), then
+/// frequent senders from the mail archive, excluding the user's own addresses.
 pub async fn recipient_suggestions(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -744,6 +805,9 @@ fn valid_sender_email(email: &str) -> bool {
         && !email.chars().any(char::is_whitespace)
 }
 
+/// `POST /api/contacts`: create a contact in a writable book of the source.
+/// Requires a display name or name part (422). The contact is created at the
+/// provider first; provider failures map to 409/422/502.
 pub async fn create_contact(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -786,6 +850,9 @@ pub async fn create_contact(
     ))
 }
 
+/// `PUT /api/contacts/{id}`: merge the given fields into the contact and push
+/// the result to the provider (optimistic on the remote version). Returns the
+/// updated contact; 404 when unknown.
 pub async fn update_contact(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -826,6 +893,8 @@ pub async fn update_contact(
     Ok(Json(fetch_contact(&user_db, &id).await?))
 }
 
+/// `DELETE /api/contacts/{id}`: delete the contact at the provider and from
+/// the cache; 404 when unknown.
 pub async fn delete_contact(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -850,6 +919,9 @@ pub async fn delete_contact(
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
+/// `GET /api/contacts/{id}/photo`: the contact photo as binary. Served from the
+/// blob store when cached, otherwise fetched from the provider or extracted
+/// from the vCard and cached; 404 when the contact has no photo.
 pub async fn get_photo(
     State(state): State<AppState>,
     Extension(user): Extension<UserId>,
@@ -937,6 +1009,12 @@ async fn sync_contact_account(
     sync_contact_account_inner(db, state, account_id).await
 }
 
+/// Start (or restart) the background sync loop of a contact source.
+///
+/// The loop syncs every five minutes, or immediately when `run_immediately` is
+/// set, applies the retry policy with backoff on failures, pauses on errors
+/// that need user action (consent, re-authentication) and records the
+/// resulting status on the source.
 pub async fn spawn_contact_sync_task(
     state: AppState,
     user_id: String,

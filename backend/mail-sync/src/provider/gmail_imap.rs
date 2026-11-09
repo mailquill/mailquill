@@ -31,6 +31,7 @@ use crate::session::{self, FetchedMessage, FolderInfo};
 
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 
+/// Gmail hybrid backend: IMAP for sync, Gmail REST API for label operations.
 pub struct GmailImapProvider {
     imap: ImapProvider,
     rest: Rest,
@@ -42,6 +43,9 @@ pub struct GmailImapProvider {
 }
 
 impl GmailImapProvider {
+    /// Open the IMAP+XOAUTH2 session and prepare the REST client. Fails with
+    /// [`ProviderError::Other`] when the OAuth token or user DB handle is
+    /// missing, or with the IMAP connection error.
     pub async fn connect(config: &ProviderConfig) -> Result<Self, ProviderError> {
         let token = config.oauth_access_token.clone().ok_or_else(|| {
             ProviderError::Other("gmail_imap requires an OAuth access token".into())

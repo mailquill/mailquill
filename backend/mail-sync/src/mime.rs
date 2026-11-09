@@ -2,22 +2,32 @@
 /// Extracts text/plain, text/html, and attachments from RFC 2822 messages.
 use mailparse::{MailHeaderMap, ParsedMail};
 
+/// Body parts extracted from one message by [`parse_mime`].
 #[derive(Debug, Default)]
 pub struct ParsedBody {
+    /// First `text/plain` part, decoded to a string.
     pub text: Option<String>,
+    /// First `text/html` part, decoded to a string.
     pub html: Option<String>,
+    /// Attachments and inline (`cid:`) parts, in document order.
     pub attachments: Vec<Attachment>,
+    /// Whether any `text/calendar` part was found (inline or attached).
     pub has_calendar: bool,
+    /// Decoded contents of each non-empty `text/calendar` part.
     pub calendar_parts: Vec<String>,
 }
 
+/// One attached or inline MIME part with its raw decoded bytes.
 #[derive(Debug)]
 pub struct Attachment {
+    /// Name from `Content-Disposition` or the `name` content-type parameter.
     pub filename: Option<String>,
+    /// Lower-cased MIME type of the part.
     pub content_type: String,
     /// MIME Content-ID (without angle brackets) for inline parts that the
     /// HTML body references as `cid:` URLs.
     pub content_id: Option<String>,
+    /// Decoded (transfer-encoding removed) part body.
     pub data: Vec<u8>,
 }
 

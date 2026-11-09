@@ -64,6 +64,11 @@ const TOOLBAR: { command: RichCommand; tkey: string; icon: typeof Bold }[] = [
   { command: 'insertOrderedList', tkey: 'compose.numberedList', icon: ListOrdered },
 ]
 
+/**
+ * Modal message editor: sender identity picker, recipient chips, subject, rich-text or plain editor with formatting toolbar, attachments, PGP sign/encrypt options, draft saving and send. Replies and forwards quote the source message according to `initialState.mode`.
+ * @param props - `open` shows the dialog; `initialState` seeds mode, source message and recipients; `onClose` is called when the user dismisses it; `onSendQueued` reports the queued send (id and subject) so the layout can show progress toasts.
+ * @returns The compose dialog, or nothing when closed.
+ */
 export function ComposeDialog({ open, initialState, onClose, onSendQueued }: ComposeDialogProps) {
   const { t } = useTranslation()
   const editorRef = useRef<HTMLDivElement | null>(null)

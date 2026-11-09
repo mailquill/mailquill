@@ -609,6 +609,11 @@ function UnifiedSection() {
   )
 }
 
+/**
+ * Left navigation of the mail client: compose button, module switcher (mail, calendar, contacts), unified views with badge counts, one collapsible section per account with its folder tree, and drag-and-drop reordering of accounts. Width comes from the UI preferences.
+ * @param props - `onCompose` opens the compose dialog for a new message.
+ * @returns The sidebar.
+ */
 export function Sidebar({ onCompose }: SidebarProps) {
   const { t } = useTranslation()
   const { pathname } = useLocation()

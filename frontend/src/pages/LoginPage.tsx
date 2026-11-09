@@ -18,6 +18,10 @@ const schema = z.object({
 })
 type FormData = z.infer<typeof schema>
 
+/**
+ * Sign-in page: email/password form with "remember me", validation messages and a link to registration when the server allows it. A successful login stores the session and navigates to the mailbox.
+ * @returns The login form.
+ */
 export function LoginPage() {
   const navigate = useNavigate()
   const { t } = useTranslation()

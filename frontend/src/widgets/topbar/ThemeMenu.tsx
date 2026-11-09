@@ -12,6 +12,10 @@ const OPTIONS: { value: ThemePref; labelKey: string; icon: LucideIcon }[] = [
   { value: 'dark', labelKey: 'settings.dark', icon: Moon },
 ]
 
+/**
+ * Top-bar toggle for the colour theme preference (system, light, dark), showing the icon of the active choice.
+ * @returns The theme button with its dropdown.
+ */
 export function ThemeMenu() {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)

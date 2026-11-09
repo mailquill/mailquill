@@ -11,6 +11,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/**
+ * Plain `fetch`-based JSON transport against `VITE_API_BASE` (same origin by
+ * default). Every method parses the JSON body and throws on a non-2xx status.
+ * Note that the authenticated API layer lives in `@/shared/api`; this
+ * transport is the unauthenticated counterpart selected when not running
+ * inside Tauri.
+ */
 export const http = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body: unknown) =>

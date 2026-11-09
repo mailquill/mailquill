@@ -46,6 +46,10 @@ function ProgressBar({ phase, synced, total }: { phase: Phase; synced: number; t
   )
 }
 
+/**
+ * Top-bar indicator of background mail sync: colour reflects syncing, error or re-authentication needed; the dropdown shows per-account progress, last sync time and a button to trigger a sync.
+ * @returns The status button with its dropdown.
+ */
 export function SyncStatusMenu() {
   const { t, i18n } = useTranslation()
   const [open, setOpen] = useState(false)

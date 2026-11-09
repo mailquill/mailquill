@@ -90,6 +90,10 @@ function ToolButton({
   )
 }
 
+/**
+ * Placeholder shown in the reading pane when no conversation is selected.
+ * @returns A centred icon with the "select a conversation" hint.
+ */
 export function ReadingPaneEmpty() {
   const { t } = useTranslation()
   return (
@@ -103,6 +107,11 @@ export function ReadingPaneEmpty() {
   )
 }
 
+/**
+ * Reading pane for one conversation: thread toolbar (archive, delete, mark read, not spam), phishing and spam banners, and one expandable card per message with its sandboxed HTML body, attachments, PGP panel and reply/forward actions. The most recent unread message (else the last one) starts expanded.
+ * @param props - `threadId` selects the conversation; `onThreadGone` is called after the thread was archived, deleted or otherwise removed from the current view so the page can clear its selection.
+ * @returns The conversation view, a loading state, or `ReadingPaneEmpty` when no thread id is given.
+ */
 export function ThreadDetail({ threadId, onThreadGone }: { threadId: string; onThreadGone?: () => void }) {
   const { t } = useTranslation()
   const { data, isLoading } = useThread(threadId)

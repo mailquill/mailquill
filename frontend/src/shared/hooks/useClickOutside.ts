@@ -2,7 +2,9 @@ import { useEffect, useRef } from 'react'
 
 /**
  * Close a popover/menu when the user clicks outside it or presses Escape.
- * Returns a ref to attach to the popover's outermost element.
+ * @param onClose - Called on an outside mousedown or on Escape.
+ * @param active - Listen only while true, typically while the popover is open.
+ * @returns A ref to attach to the popover's outermost element.
  */
 export function useClickOutside<T extends HTMLElement>(onClose: () => void, active = true) {
   const ref = useRef<T | null>(null)

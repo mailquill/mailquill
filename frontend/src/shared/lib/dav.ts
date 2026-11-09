@@ -23,6 +23,14 @@ const PROVIDERS: Record<string, (email: string) => DavUrls> = {
   }),
 }
 
+/**
+ * Guess the CardDAV and CalDAV collection URLs for a mail account.
+ *
+ * Known providers (Google, iCloud, Fastmail) get their documented endpoints; Outlook/Office 365 accounts get empty strings because they expose no DAV endpoints and the user must fill the fields in by hand; everything else falls back to the RFC 6764 `/.well-known/` URIs on the email domain.
+ * @param email - Address of the account; its domain selects the provider.
+ * @param imapHost - Already-known IMAP host, used to recognise Microsoft-hosted domains that do not end in outlook.com.
+ * @returns The CardDAV and CalDAV URLs (either may be empty).
+ */
 export function davDefaults(email: string, imapHost?: string): DavUrls {
   const domain = (email.split('@')[1] ?? '').toLowerCase()
   if (PROVIDERS[domain]) return PROVIDERS[domain](email)

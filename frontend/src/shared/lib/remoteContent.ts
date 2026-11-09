@@ -7,11 +7,21 @@
 const REMOTE_URL = /^\s*(?:https?:)?\/\//i
 const CSS_REMOTE_URL = /url\(\s*(['"]?)\s*((?:https?:)?\/\/[^)'"]*)\1\s*\)/gi
 
+/**
+ * Outcome of `blockRemoteContent`.
+ * @property html - Serialised document with remote references removed.
+ * @property blocked - Whether anything was stripped, i.e. whether the "load remote content" banner is warranted.
+ */
 export interface RemoteBlockResult {
   html: string
   blocked: boolean
 }
 
+/**
+ * Remove every remote resource reference from a message body: `src`/`poster`/`data`/`srcset` on media and embed elements, legacy `background` attributes, `<link>` elements and `url()` references in inline and `<style>` CSS. Inline `cid:` and `data:` references are kept.
+ * @param html - Raw message HTML.
+ * @returns The sanitised document and whether anything was blocked.
+ */
 export function blockRemoteContent(html: string): RemoteBlockResult {
   const doc = new DOMParser().parseFromString(html, 'text/html')
   let blocked = false
@@ -65,6 +75,12 @@ export function blockRemoteContent(html: string): RemoteBlockResult {
   return { html: `<!DOCTYPE html>${doc.documentElement.outerHTML}`, blocked }
 }
 
+/**
+ * Rewrite remote image-like references so they load through the backend proxy (`/api/remote-content/image`), which hides the reader's IP from the sender. Remote `<link>` elements are dropped since they cannot be proxied.
+ * @param html - Raw message HTML.
+ * @param token - Proxy access token for the current session; when `null` the HTML is returned untouched.
+ * @returns Serialised document with proxied URLs.
+ */
 export function proxyRemoteContent(html: string, token: string | null): string {
   if (!token) return html
 

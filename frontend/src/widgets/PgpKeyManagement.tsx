@@ -27,6 +27,10 @@ import {
 
 type Mode = 'generate' | 'import'
 
+/**
+ * Settings section for OpenPGP: lists the user's keys with primary/unlock/delete actions, generates a new key pair or imports an existing private key (passphrase protected), and registers contacts' public keys.
+ * @returns The key list and the generate/import forms.
+ */
 export function PgpKeyManagement() {
   const { t } = useTranslation()
   const { data: keys = [] } = usePgpKeys()

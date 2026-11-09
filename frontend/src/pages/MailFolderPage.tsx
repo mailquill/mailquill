@@ -11,6 +11,10 @@ import { LIST_WIDTH, useUiPrefs } from '@/shared/hooks/useUiPrefs'
 import { PaneResizer } from '@/shared/components/PaneResizer'
 import type { Message } from '@/shared/types'
 
+/**
+ * Route `/mail/:accountId/:folder/:threadId?`: the message list of one IMAP folder with the all/unread filter, and the reading pane for the thread named in the URL. Selecting a row navigates to its thread; removing the thread navigates back to the folder.
+ * @returns The two-pane folder layout.
+ */
 export function MailFolderPage() {
   const navigate = useNavigate()
   const { t } = useTranslation()

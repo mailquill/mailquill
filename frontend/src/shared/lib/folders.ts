@@ -47,14 +47,29 @@ const FOLDER_ICONS: Record<string, ElementType> = {
   CUSTOM: FolderIcon,
 }
 
+/**
+ * Icon component for a folder based on its standard type (inbox, sent, trash, ...).
+ * @param folder - Folder whose `folder_type` picks the icon.
+ * @returns A lucide icon component; custom folders get the generic folder icon.
+ */
 export function folderIcon(folder: Folder): ElementType {
   return FOLDER_ICONS[folder.folder_type] ?? FolderIcon
 }
 
+/**
+ * Sort rank of a folder: standard folders have fixed positions (INBOX first, then Sent, Drafts, Spam/Junk, Trash).
+ * @param folder - Folder whose `folder_type` is ranked.
+ * @returns A small integer; custom folders share the lowest priority rank (5).
+ */
 export function folderRank(folder: Folder): number {
   return FOLDER_ORDER[folder.folder_type] ?? 5
 }
 
+/**
+ * Order folders the way the sidebar and move-to menu show them: standard folders first by rank, then everything else alphabetically by display path.
+ * @param folders - Folders to order; the input array is not mutated.
+ * @returns A new sorted array.
+ */
 export function sortFolders(folders: Folder[]): Folder[] {
   return [...folders].sort(
     (a, b) => folderRank(a) - folderRank(b) || folderTreePath(a).localeCompare(folderTreePath(b)),
@@ -73,6 +88,12 @@ export function folderLeafLabel(folder: Folder, t: (key: string) => string): str
   return key ? t(key) : folder.folder_name
 }
 
+/**
+ * Node of the folder hierarchy built by `buildFolderTree`.
+ * @property folder - The folder itself.
+ * @property depth - Nesting level, 0 for root folders.
+ * @property children - Direct sub-folders in sidebar order.
+ */
 export interface FolderNode {
   folder: Folder
   depth: number

@@ -66,6 +66,10 @@ const EMPTY_DRAFT: ContactDraft = {
   notes: '',
 }
 
+/**
+ * Contacts module: searchable list filtered by the sidebar selection (all, favourites, an account or a group), a detail/edit panel for the selected contact, and the dialog for adding contact accounts.
+ * @returns The contacts list and detail layout.
+ */
 export function ContactsPage() {
   const { t } = useTranslation()
   const { contactGroup } = useModuleNav()

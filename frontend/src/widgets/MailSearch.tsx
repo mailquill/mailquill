@@ -79,6 +79,10 @@ function buildParams(searchText: string, f: SearchFilter): URLSearchParams {
   return params
 }
 
+/**
+ * Top-bar search box with a structured filter dropdown (sender, recipient, subject, words to include or exclude, date range, attachments, unread). Submitting navigates to the search page with the query and filters in the URL; clearing returns to the view the user came from.
+ * @returns The search input with its filter menu.
+ */
 export function MailSearch() {
   const { t } = useTranslation()
   const navigate = useNavigate()

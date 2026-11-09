@@ -57,6 +57,10 @@ function iso(d: Date) {
   return d.toISOString()
 }
 
+/**
+ * Calendar module: month, week, day and agenda views over the visible calendars, event creation and editing dialogs, and the add-calendar dialog opened via `?new=1`.
+ * @returns The calendar toolbar, grid and dialogs.
+ */
 export function CalendarPage() {
   const { t } = useTranslation()
   const [view, setView] = useState<ViewMode>('month')

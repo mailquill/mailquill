@@ -29,6 +29,15 @@ import {
   type Security,
 } from '@/shared/lib/serverDiscovery'
 
+/**
+ * Editable fields of the account editor, shared by the add wizard and the settings card. Ports are kept as strings because they come straight from text inputs.
+ * @property short - Short label shown in the sidebar instead of the full name.
+ * @property initials - One or two characters for the account badge.
+ * @property initialsTouched - Set once the user edits the initials, so autodetection stops overwriting them.
+ * @property composeFormat - Default editor mode for new messages from this account.
+ * @property hasJunk - Whether the server provides a Junk/Spam folder.
+ * @property signature - Plain-text signature appended to new messages.
+ */
 export interface AccountFormState {
   name: string
   short: string
@@ -55,10 +64,16 @@ export interface AccountFormState {
   caldavUrl: string
 }
 
+/** Name of a field in `AccountFormState`, used by the `onField` change callback. */
 export type AccountField = keyof AccountFormState
 
 // ── primitives ──────────────────────────────────────────────────────────────
 
+/**
+ * Label row above a form control in the account editor, with an optional muted hint to its right.
+ * @param props - `children` is the label text; `hint` is secondary text such as "optional".
+ * @returns The label block.
+ */
 export function FieldLabel({ children, hint }: { children: ReactNode; hint?: ReactNode }) {
   return (
     <div className="mb-1.5">
@@ -122,6 +137,11 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
   )
 }
 
+/**
+ * Row of colour swatches for choosing the account colour from `ACCT_COLORS`.
+ * @param props - `value` is the selected hex colour (highlighted with a ring); `onChange` receives the clicked colour.
+ * @returns A flex-wrapped row of swatch buttons.
+ */
 export function Swatches({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <div className="flex flex-wrap gap-2">
@@ -144,6 +164,11 @@ export function Swatches({ value, onChange }: { value: string; onChange: (v: str
   )
 }
 
+/**
+ * Labelled wrapper for a single server-settings input (host, port, security, ...), with an optional width class and inline error text.
+ * @param props - `label` is the caption; `children` the control; `w` an optional width utility class; `error` a validation message rendered below; `htmlFor` makes the caption a `<label>` bound to the control id.
+ * @returns The labelled field.
+ */
 export function SrvField({
   label,
   children,
@@ -169,6 +194,11 @@ export function SrvField({
   )
 }
 
+/**
+ * Titled group of server fields (IMAP, SMTP, Contacts, Calendar) with an icon heading and indented body.
+ * @param props - `title` is the heading; `icon` the lucide icon shown before it; `children` the fields.
+ * @returns The group block.
+ */
 export function ServerGroup({ title, icon: Icon, children }: { title: string; icon: typeof Inbox; children: ReactNode }) {
   return (
     <div>
@@ -196,6 +226,11 @@ const secOptKeys: [Security, string][] = [
   ['none', 'settings.secNone'],
 ]
 
+/**
+ * The shared account editor body used by both the add wizard and the settings account card: identity fields (name, short label, email, initials, colour), compose preferences, signature, and a collapsible server section with autodetection and OAuth sign-in for Google/Microsoft.
+ * @param props - `data` is the current form state; `onField` is called with the field name and new value on every change; `onOauth` starts a provider sign-in when the detected provider supports it.
+ * @returns The editor fields; the surrounding form and submit controls are provided by the caller.
+ */
 export function AccountFields({ data, onField, onOauth }: AccountFieldsProps) {
   const { t } = useTranslation()
   const [srvOpen, setSrvOpen] = useState(false)

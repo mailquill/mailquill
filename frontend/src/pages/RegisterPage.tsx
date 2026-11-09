@@ -21,6 +21,10 @@ const schema = z.object({
 })
 type FormData = z.infer<typeof schema>
 
+/**
+ * Account registration page: email, password and confirmation with validation; shows a notice instead of the form when the server has registration disabled. Success stores the session and navigates to the mailbox.
+ * @returns The registration form.
+ */
 export function RegisterPage() {
   const navigate = useNavigate()
   const { t } = useTranslation()

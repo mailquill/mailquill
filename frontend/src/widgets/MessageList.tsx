@@ -53,9 +53,13 @@ function Checkbox({ checked }: { checked: boolean }) {
   )
 }
 
-// Memoised: the list re-renders on every selection change and on each
-// drag-select mousemove, and only the rows whose props changed should repaint.
-// Every callback handed down keeps a stable identity (see MessageList).
+/**
+ * One conversation row of the message list: checkbox, sender avatar and name, subject with snippet, date, star toggle and flags such as attachment or phishing warning.
+ *
+ * Memoised because the list re-renders on every selection change and on each drag-select mousemove, and only rows whose props changed should repaint; every callback handed down must keep a stable identity (see `MessageList`).
+ * @param props - The message, its index, active/checked state and the row interaction callbacks (select, toggle check, toggle flag, context menu, drag-select start, hover prefetch warm/cool).
+ * @returns The row element.
+ */
 export const MessageRow = memo(function MessageRow({
   message,
   index,
@@ -278,6 +282,11 @@ const DENSITY_ESTIMATE: Record<string, number> = {
   roomy: 112,
 }
 
+/**
+ * Virtualised, infinitely scrolling conversation list with multi-select (click, shift-click, drag), a bulk action bar (mark read, archive, delete, "select all N matching"), hover prefetch of message bodies, keyboard navigation and a right-click context menu.
+ * @param props - `messages` are the loaded rows; `activeId` marks the open conversation; `onSelect` opens one; `loading`, `onLoadMore`, `hasMore` and `loadingMore` drive the initial and infinite loading states; `total` and `scope` enable server-side select-all bulk actions.
+ * @returns The scrollable list with its selection toolbar, or the loading/empty state.
+ */
 export function MessageList({
   messages,
   activeId,

@@ -46,12 +46,22 @@ function messageDate(message: Message): Date | null {
 
 const domainOf = (email: string) => email.split('@')[1] || 'localhost'
 
+/**
+ * Plain-text body of a message: the stored text part, else the HTML part converted to text, else the snippet.
+ * @param message - Stored message.
+ * @returns Plain text, possibly empty.
+ */
 export function messagePlain(message: Message): string {
   if (message.body_text) return message.body_text
   if (message.body_html) return htmlToPlainText(message.body_html)
   return message.snippet ?? ''
 }
 
+/**
+ * HTML body of a message. When the message has no HTML part, the plain text is wrapped in a minimal document with one `<p>` per paragraph and `<br>` per line so the reader shows the same line structure as the original.
+ * @param message - Stored message.
+ * @returns A complete HTML document string.
+ */
 export function messageHtml(message: Message): string {
   if (message.body_html) return message.body_html
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -73,6 +83,7 @@ ${paras}
 </html>`
 }
 
+/** A single message header as a name/value pair, in the order it appears in the raw message. */
 export type Header = [name: string, value: string]
 
 /**
@@ -129,6 +140,11 @@ function boundary(seed: string) {
   return '----=_MT_' + hex(seed + 'bound', 20)
 }
 
+/**
+ * Build a raw RFC 5322 `.eml` representation of a message: the synthesised headers followed by a `multipart/alternative` body with the plain-text and HTML parts.
+ * @param message - Stored message.
+ * @returns The raw message text.
+ */
 export function messageRawEml(message: Message): string {
   const { email } = parseFromAddr(message.from_addr)
   const date = message.date ?? message.internal_date
@@ -156,6 +172,12 @@ ${messageHtml(message)}
 --${b}--`
 }
 
+/**
+ * Trigger a browser download of a raw message as a `.eml` file.
+ * @param raw - Raw message text, e.g. from `messageRawEml`.
+ * @param subject - Message subject used for the file name; unsafe characters are replaced and the name is capped at 60 characters, falling back to `message`.
+ * @returns Nothing; the download is started as a side effect.
+ */
 export function downloadEml(raw: string, subject: string) {
   const blob = new Blob([raw], { type: 'message/rfc822' })
   const url = URL.createObjectURL(blob)

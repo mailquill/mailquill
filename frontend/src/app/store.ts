@@ -10,6 +10,12 @@ interface AuthState {
   clearAuth: () => void
 }
 
+/**
+ * Session store persisted to `localStorage` under `mailquill-auth`: the
+ * short-lived access token plus the signed-in user's id and e-mail. `setAuth`
+ * and `clearAuth` keep the API client's in-memory token in sync, and token
+ * refreshes from the API client are written back through the subscriber below.
+ */
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({

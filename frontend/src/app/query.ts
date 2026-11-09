@@ -1,6 +1,11 @@
 import { QueryClient } from '@tanstack/react-query'
 import { ApiError } from '@/shared/api'
 
+/**
+ * The app-wide TanStack Query client. Queries are fresh for 30 s and retry
+ * once, except on 4xx (a retry cannot succeed) and on 502/503/504 (the
+ * backend or dev proxy is down; retrying every mounted query only adds noise).
+ */
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

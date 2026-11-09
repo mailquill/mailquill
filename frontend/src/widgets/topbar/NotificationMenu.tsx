@@ -56,6 +56,10 @@ function buildNotifications(
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
 }
 
+/**
+ * Bell button in the top bar with an unread badge; the dropdown lists recent unified-inbox messages as notifications (all/unread tabs), lets the user dismiss them and navigates to the message on click.
+ * @returns The bell button with its dropdown.
+ */
 export function NotificationMenu() {
   const navigate = useNavigate()
   const { t } = useTranslation()

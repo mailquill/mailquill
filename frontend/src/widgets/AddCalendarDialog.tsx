@@ -15,6 +15,11 @@ import { TlsCertificateDecisionDialog } from '@/shared/components'
 
 type CalKind = 'local' | 'caldav'
 
+/**
+ * Dialog for creating a calendar: either a local one, or a CalDAV calendar discovered from an account's server (with untrusted-certificate handling) or entered by URL. A newly created CalDAV calendar is synced immediately.
+ * @param props - `open` shows the dialog; `onClose` is called when it is dismissed or after creation.
+ * @returns The dialog.
+ */
 export function AddCalendarDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useTranslation()
   const { data: accounts = [] } = useAccounts()

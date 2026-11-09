@@ -3,14 +3,29 @@ const BASE = '/api'
 let accessToken: string | null = null
 let refreshSubscriber: ((token: string | null) => void) | null = null
 
+/**
+ * Store the bearer token that every following API request sends. Pass null on
+ * logout so requests go out unauthenticated.
+ * @param token - The access token, or null to clear it.
+ */
 export function setAccessToken(token: string | null) {
   accessToken = token
 }
 
+/**
+ * Read the access token currently held in memory, without checking its expiry.
+ * @returns The stored token, or null when nobody is signed in.
+ */
 export function getAccessToken() {
   return accessToken
 }
 
+/**
+ * Register the single listener told about tokens produced by the refresh flow:
+ * the new token after a successful refresh, or null when the server rejected
+ * the refresh cookie. The auth store uses it to persist or drop the session.
+ * @param subscriber - Receives the new token, or null on a genuine logout.
+ */
 export function setRefreshSubscriber(subscriber: (token: string | null) => void) {
   refreshSubscriber = subscriber
 }
@@ -19,6 +34,10 @@ let refreshInFlight: Promise<string | null> | null = null
 
 const ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60
 
+/**
+ * Decode the JWT payload locally and report whether `exp` falls within the
+ * given number of seconds. Malformed tokens count as not expiring.
+ */
 function accessTokenExpiresWithin(token: string, seconds: number): boolean {
   try {
     const payload = token.split('.')[1]
@@ -47,6 +66,14 @@ export async function ensureFreshAccessToken(): Promise<string | null> {
   return accessToken
 }
 
+/**
+ * Exchange the HTTP-only refresh cookie for a new access token through
+ * `POST /auth/refresh`. Concurrent callers share one in-flight request so the
+ * rotating refresh token is spent only once.
+ * @returns The new access token, or null when no token could be obtained. The
+ *   session is dropped (subscriber told with null) only on a 401; network and
+ *   server errors leave the current token in place for a later retry.
+ */
 export async function refreshAccessToken(): Promise<string | null> {
   // Single-flight: when the access token expires the app fires many requests at
   // once, each hitting 401. The refresh token rotates server-side (the old one
@@ -59,6 +86,7 @@ export async function refreshAccessToken(): Promise<string | null> {
   return refreshInFlight
 }
 
+/** The actual refresh request; see the error handling for when a failure logs out. */
 async function doRefresh(): Promise<string | null> {
   try {
     const res = await fetch(`${BASE}/auth/refresh`, {
@@ -93,6 +121,14 @@ async function doRefresh(): Promise<string | null> {
   }
 }
 
+/**
+ * `fetch` against the `/api` base: adds the JSON content type and the bearer
+ * header, sends cookies, and on a 401 refreshes the token once and replays the
+ * request.
+ * @param path - Path relative to the API base, for example `/messages/123`.
+ * @param options - Standard `fetch` options; headers are merged over the defaults.
+ * @returns The raw response, non-2xx ones included; callers decide how to parse it.
+ */
 export async function apiFetch(
   path: string,
   options: RequestInit = {},
@@ -138,17 +174,35 @@ async function parseResponse<T>(res: Response): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+/**
+ * GET a JSON resource.
+ * @param path - Path relative to the API base.
+ * @returns The parsed response body; a 204 or empty body resolves to undefined.
+ * @throws {ApiError} When the response status is not 2xx.
+ */
 export async function apiGet<T>(path: string): Promise<T> {
   return parseResponse(await apiFetch(path))
 }
 
-/// Binary fetch (attachments, inline images) — bypasses the JSON parsing.
+/**
+ * GET a binary resource (attachments, inline images) without JSON parsing.
+ * @param path - Path relative to the API base.
+ * @returns The response body as a Blob.
+ * @throws {ApiError} When the response status is not 2xx.
+ */
 export async function apiGetBlob(path: string): Promise<Blob> {
   const res = await apiFetch(path)
   if (!res.ok) throw new ApiError(res.status, await res.text())
   return res.blob()
 }
 
+/**
+ * POST a JSON body and parse the JSON reply.
+ * @param path - Path relative to the API base.
+ * @param body - Serialised with `JSON.stringify`; the request has no body when undefined.
+ * @returns The parsed response body; a 204 or empty body resolves to undefined.
+ * @throws {ApiError} When the response status is not 2xx.
+ */
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const res = await apiFetch(path, {
     method: 'POST',
@@ -157,6 +211,13 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return parseResponse(res)
 }
 
+/**
+ * PATCH a JSON body and parse the JSON reply.
+ * @param path - Path relative to the API base.
+ * @param body - Serialised with `JSON.stringify`; the request has no body when undefined.
+ * @returns The parsed response body; a 204 or empty body resolves to undefined.
+ * @throws {ApiError} When the response status is not 2xx.
+ */
 export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   const res = await apiFetch(path, {
     method: 'PATCH',
@@ -165,6 +226,13 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   return parseResponse(res)
 }
 
+/**
+ * PUT a JSON body and parse the JSON reply.
+ * @param path - Path relative to the API base.
+ * @param body - Serialised with `JSON.stringify`; the request has no body when undefined.
+ * @returns The parsed response body; a 204 or empty body resolves to undefined.
+ * @throws {ApiError} When the response status is not 2xx.
+ */
 export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
   const res = await apiFetch(path, {
     method: 'PUT',
@@ -173,11 +241,22 @@ export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
   return parseResponse(res)
 }
 
+/**
+ * DELETE a resource. The reply body is ignored, so a 204 and a 200 both succeed.
+ * @param path - Path relative to the API base.
+ * @returns Resolves once the server has accepted the deletion.
+ * @throws {ApiError} When the response status is not 2xx.
+ */
 export async function apiDelete(path: string): Promise<void> {
   const res = await apiFetch(path, { method: 'DELETE' })
   if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text())
 }
 
+/**
+ * Error thrown by the `api*` helpers for a non-2xx response. `message` holds
+ * the raw response body; the getters decode the server's JSON error envelope.
+ * @property status - HTTP status code of the failed response.
+ */
 export class ApiError extends Error {
   status: number
 

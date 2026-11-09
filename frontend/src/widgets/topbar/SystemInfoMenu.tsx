@@ -38,6 +38,10 @@ const CHANGE_BADGE: Record<ChangeType, string> = {
   fixed: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
 }
 
+/**
+ * Top-bar info button whose dropdown shows the app version with the changelog (current release highlighted) and the third-party licence notices.
+ * @returns The info button with its dropdown.
+ */
 export function SystemInfoMenu() {
   const { t, i18n } = useTranslation()
   const [open, setOpen] = useState(false)

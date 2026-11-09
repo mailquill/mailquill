@@ -15,6 +15,10 @@ import { Sidebar } from '@/widgets/Sidebar'
 
 const ComposeDialog = lazy(() => import('@/features/compose').then((module) => ({ default: module.ComposeDialog })))
 
+/**
+ * Context handed to mail routes via `useOutletContext`.
+ * @property openCompose - Open the compose dialog, optionally seeded with a reply/forward/draft state; defaults to a blank message.
+ */
 export interface MailOutletContext {
   openCompose: (state?: ComposeInitialState) => void
 }
@@ -30,6 +34,10 @@ function PageLoadingFallback() {
   )
 }
 
+/**
+ * App shell for the signed-in area: sidebar with resizer, top bar, the routed page in an `Outlet`, the lazily loaded compose dialog, toasts for send progress, an offline banner, and the app-wide SSE listeners for sync activity and notifications.
+ * @returns The full-height layout.
+ */
 export function MailLayout() {
   const isOnline = useOnlineStatus()
   const navigate = useNavigate()

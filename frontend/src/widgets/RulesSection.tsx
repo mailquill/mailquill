@@ -42,6 +42,10 @@ function summarise(rule: Rule): string {
   return `If ${conds || '…'} then ${acts || '…'}`
 }
 
+/**
+ * Settings section for mail filter rules: lists rules with enable toggles, edit and delete, opens an editor for conditions and actions (Sieve or Exchange engine) and can push the compiled Sieve script to the server. A `from` query parameter pre-fills a new rule for that sender.
+ * @returns The rule list and, while editing, the rule form.
+ */
 export function RulesSection() {
   const { t } = useTranslation()
   const { data: rules = [] } = useRules()

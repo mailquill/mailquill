@@ -7,6 +7,12 @@ interface ModuleNavState {
   toggleCalendar: (id: string) => void
 }
 
+/**
+ * In-memory navigation state shared between the sidebar and the contacts and
+ * calendar modules: which contact group is selected and which calendars are
+ * hidden. Not persisted; it resets on reload.
+ * @returns The store hook exposing `contactGroup`, `hiddenCalendars` and their setters.
+ */
 export const useModuleNav = create<ModuleNavState>((set) => ({
   contactGroup: 'all',
   hiddenCalendars: [],

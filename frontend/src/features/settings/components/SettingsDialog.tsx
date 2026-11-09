@@ -26,6 +26,11 @@ interface SettingsDialogProps {
   onClose: () => void
 }
 
+/**
+ * Modal settings panel with an inline edit form per mail account, the PGP key-discovery privacy switches (WKD, keyserver) and the desktop push-notification toggle.
+ * @param props - `open` shows the dialog; `onClose` is called when it is dismissed.
+ * @returns The settings dialog.
+ */
 export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const { data: accounts = [] } = useAccounts()
   const { data: settings } = useSettings()

@@ -7,8 +7,16 @@
 
 import { apiGet } from '@/shared/api'
 
+/** Transport security of a mail server connection. */
 export type Security = 'ssl' | 'starttls' | 'none'
 
+/**
+ * IMAP, SMTP and DAV connection settings for an account form.
+ * @property imapUser - Login name for IMAP, normally the full address.
+ * @property smtpUser - Login name for SMTP, normally the full address.
+ * @property carddavUrl - CardDAV collection URL, empty when unknown.
+ * @property caldavUrl - CalDAV collection URL, empty when unknown.
+ */
 export interface ServerConfig {
   imapHost: string
   imapPort: number
@@ -22,8 +30,15 @@ export interface ServerConfig {
   caldavUrl: string
 }
 
+/** How a server configuration was found: static provider table, Exchange autodiscover, backend DNS/ISPDB lookup, or the `imap.`/`smtp.` naming convention. */
 export type DiscoverSource = 'provider' | 'exchange' | 'dns' | 'autoconfig'
 
+/**
+ * Discovered server settings plus provenance.
+ * @property source - Which discovery step produced the result.
+ * @property provider - Human-readable provider name, or the bare domain for guesses.
+ * @property oauth - Whether the provider supports OAuth sign-in instead of a password.
+ */
 export interface DiscoverResult extends ServerConfig {
   source: DiscoverSource
   provider: string
@@ -43,8 +58,10 @@ interface ProviderDef {
   caldavUrl: string
 }
 
+/** Provider choice in the add-account form: `auto` discovers by domain, `imap` forces the generic naming-convention guess. */
 export type ProviderPresetId = 'auto' | 'gmail' | 'outlook' | 'yahoo' | 'webde' | 'gmxde' | 'gmxnet' | 'imap'
 
+/** Entry of the provider dropdown in the add-account form. */
 export interface ProviderPresetOption {
   id: ProviderPresetId
   label: string
@@ -88,6 +105,7 @@ const PRESET_PROVIDER_KEYS: Record<Exclude<ProviderPresetId, 'auto' | 'imap'>, s
   gmxnet: 'gmx.net',
 }
 
+/** Provider dropdown entries in display order. */
 export const PROVIDER_PRESET_OPTIONS: ProviderPresetOption[] = [
   { id: 'auto', label: 'Auto' },
   { id: 'gmail', label: 'Gmail / Google Workspace' },
@@ -99,10 +117,18 @@ export const PROVIDER_PRESET_OPTIONS: ProviderPresetOption[] = [
   { id: 'imap', label: 'Regular IMAP' },
 ]
 
+/** Swatch colours offered when the user picks an account colour. */
 export const ACCT_COLORS = ['#2563EB', '#DC2626', '#EA580C', '#D97706', '#16A34A', '#0D9488', '#0EA5E9', '#7C3AED', '#DB2777', '#475569']
 
+/** Address pattern used by the account forms; requires a TLD of at least two characters. */
 export const SETTINGS_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 
+/**
+ * Initials for an account avatar derived from the display name, falling back to the address.
+ * @param name - Display name; may be empty.
+ * @param email - Address used when the name is empty.
+ * @returns Two upper-case characters: the first letters of the first two words (split on whitespace, `.`, `@`, `_`, `-`), else the first two characters.
+ */
 export function deriveInitials(name: string, email: string): string {
   const src = (name || email || '?').trim()
   const parts = src.split(/[\s.@_-]+/).filter(Boolean)
@@ -110,6 +136,12 @@ export function deriveInitials(name: string, email: string): string {
   return src.slice(0, 2).toUpperCase()
 }
 
+/**
+ * Synchronous server discovery from the static provider table.
+ * @param email - Account address; its domain is looked up.
+ * @param isExchange - Treat an unknown domain as Microsoft 365 hosted.
+ * @returns Provider settings when the domain is known, the Outlook settings for Exchange, else an `autoconfig` guess (`imap.`/`smtp.` hosts, `dav.` URLs).
+ */
 export function discoverServers(email: string, isExchange = false): DiscoverResult {
   const domain = (email.split('@')[1] || '').toLowerCase()
   const sub = (s: string) => (s || '').replace(/\{email\}/g, email).replace(/\{domain\}/g, domain)
@@ -128,6 +160,12 @@ export function discoverServers(email: string, isExchange = false): DiscoverResu
   }
 }
 
+/**
+ * Server settings for an explicitly chosen provider preset.
+ * @param email - Account address, used as login and for template substitution.
+ * @param preset - Chosen provider; `auto` delegates to `discoverServers`, `imap` returns the naming-convention guess.
+ * @returns The settings for that provider with `source: 'provider'`.
+ */
 export function discoverServersForProvider(email: string, preset: ProviderPresetId): DiscoverResult {
   if (preset === 'auto') return discoverServers(email)
   if (preset === 'imap') {
@@ -164,9 +202,12 @@ interface RemoteDiscoverResponse {
   smtp: RemoteEndpoint | null
 }
 
-// Full discovery: static provider table first, then the backend DNS lookup
-// (RFC 6186 SRV records, MX-guided reachability probe). Falls back to the
-// static autoconfig guess when the backend finds nothing or is unreachable.
+/**
+ * Full discovery: the static provider table first, then the backend lookup (RFC 6186 SRV records, Thunderbird ISPDB, MX-guided reachability probe) for unknown domains. Falls back to the static autoconfig guess when the backend finds nothing or is unreachable.
+ * @param email - Account address.
+ * @param isExchange - Treat an unknown domain as Microsoft 365 hosted.
+ * @returns The best available settings; `source` is `dns` when the backend supplied them.
+ */
 export async function discoverServersAsync(email: string, isExchange = false): Promise<DiscoverResult> {
   const local = discoverServers(email, isExchange)
   if (local.source !== 'autoconfig') return local
@@ -191,6 +232,12 @@ export async function discoverServersAsync(email: string, isExchange = false): P
   return local
 }
 
+/**
+ * Initial server fields for an account form, without provenance.
+ * @param email - Account address; an empty string yields placeholder defaults for `example.com`.
+ * @param isExchange - Treat an unknown domain as Microsoft 365 hosted.
+ * @returns Connection settings suitable for pre-filling the form.
+ */
 export function serverDefaults(email: string, isExchange = false): ServerConfig {
   const d = discoverServers(email || 'name@example.com', isExchange)
   return {
@@ -200,6 +247,13 @@ export function serverDefaults(email: string, isExchange = false): ServerConfig 
   }
 }
 
+/**
+ * What the add-account form shows about the detected provider.
+ * @property name - Provider name, or `IMAP` for an unknown domain.
+ * @property oauth - Whether OAuth sign-in is available.
+ * @property known - Whether the domain matched a known provider (not a guess).
+ * @property source - The discovery step that produced the result.
+ */
 export interface ProviderSummary {
   name: string
   oauth: boolean
@@ -207,6 +261,12 @@ export interface ProviderSummary {
   source: DiscoverSource
 }
 
+/**
+ * Summarise the statically detected provider for an address.
+ * @param email - Account address; empty falls back to a placeholder domain.
+ * @param isExchange - Treat an unknown domain as Microsoft 365 hosted.
+ * @returns Provider name, OAuth support and whether the domain was recognised.
+ */
 export function providerInfo(email: string, isExchange = false): ProviderSummary {
   const d = discoverServers(email || 'name@example.com', isExchange)
   return { name: d.source === 'autoconfig' ? 'IMAP' : d.provider, oauth: d.oauth, known: d.source !== 'autoconfig', source: d.source }

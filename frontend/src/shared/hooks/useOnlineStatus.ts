@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react'
 
+/**
+ * Track the browser's connectivity through `navigator.onLine` and the window
+ * `online`/`offline` events.
+ * @returns True while the browser reports a network connection.
+ */
 export function useOnlineStatus() {
   const [isOnline, setIsOnline] = useState(() => navigator.onLine)
 

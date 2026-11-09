@@ -13,6 +13,11 @@ function formatters() {
   return dateFormatters
 }
 
+/**
+ * Compact date label for a message-list row, relative to now: the time of day for today, the short weekday within the last week, and "month day" otherwise.
+ * @param dateStr - Date string parseable by `Date`, typically the message's ISO date.
+ * @returns The formatted label in the browser locale, or an empty string for a missing or invalid date.
+ */
 export function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return ''
   const date = new Date(dateStr)
@@ -39,12 +44,24 @@ export function relativeFromNow(dateStr: string | null | undefined, locale?: str
   return rtf.format(Math.round(sec / 86400), 'day')
 }
 
+/**
+ * Split an RFC 5322 mailbox such as `Jane Doe <jane@example.org>` into display name and address.
+ * @param addr - Raw `From`/`To` header value for a single mailbox.
+ * @returns The trimmed name and address; a bare address yields the same value for both fields.
+ */
 export function parseFromAddr(addr: string): { name: string; email: string } {
   const match = addr.match(/^(.+?)\s*<(.+)>$/)
   if (match) return { name: match[1].trim(), email: match[2].trim() }
   return { name: addr, email: addr }
 }
 
+/**
+ * Human-readable mailing-list name from a `List-Id` header (RFC 2919).
+ *
+ * Keeps the optional phrase in front of the bracketed id, stripping quotes and a trailing dot. Phrases that are opaque tokens (base64, long numeric or hex ids) are treated as noise.
+ * @param listId - Raw `List-Id` header value.
+ * @returns The list name, or `null` when the header is missing or carries no friendly name.
+ */
 export function listIdToName(listId: string | null | undefined): string | null {
   if (!listId) return null
   // RFC 2919: an optional human-readable phrase followed by <list-label.host>.

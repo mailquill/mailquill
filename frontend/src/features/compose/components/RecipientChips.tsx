@@ -17,6 +17,11 @@ interface RecipientChipsProps {
   mailboxId?: string
 }
 
+/**
+ * Recipient input for one address field (To/Cc/Bcc): committed addresses render as removable chips with an avatar, typing shows contact suggestions, and invalid or over-limit entries are flagged. Enter, comma, semicolon, space, Tab or blur commits the typed address.
+ * @param props - `label` is the field caption; `value` the committed addresses; `onChange` receives the updated list; `accessory` an optional trailing control (e.g. the Cc/Bcc toggle); `autoFocus` focuses the input on mount; `mailboxId` scopes contact suggestions to one account.
+ * @returns The chip list and text input.
+ */
 export function RecipientChips({ label, value, onChange, accessory, autoFocus, mailboxId }: RecipientChipsProps) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState('')

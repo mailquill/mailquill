@@ -12,6 +12,7 @@ export const REFRESH_MAX_WAIT_MS = 2_000
  */
 export const PROGRESS_REFRESH_INTERVAL_MS = 3_000
 
+/** Handle returned by `createMailRefreshScheduler` for requesting and cancelling coalesced list refreshes. */
 export interface MailRefreshScheduler {
   /**
    * Ask for a refresh. Debounced, capped by the max wait, and never earlier

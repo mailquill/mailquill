@@ -55,6 +55,11 @@ function emptyAccountForm(): AccountFormState {
   }
 }
 
+/**
+ * Three-step wizard for connecting a mailbox: (1) identity and address with provider autodetection, (2) review and adjust the discovered IMAP/SMTP/DAV settings or sign in via OAuth, (3) credentials and creation, including the untrusted-TLS-certificate prompt and optional contact sync setup.
+ * @param props - `onCancel` closes the wizard without saving; `onCreated` is called after the account has been created.
+ * @returns The wizard with step indicator, current step and navigation buttons.
+ */
 export function AddAccountForm({ onCancel, onCreated }: AddAccountFormProps) {
   const { t } = useTranslation()
   const createAccount = useCreateAccount()

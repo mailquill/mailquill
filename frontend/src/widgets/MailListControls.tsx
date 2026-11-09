@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/shared/lib/utils'
 
+/** Quick filter of a message list: every conversation or only unread ones. */
 export type MailFilter = 'all' | 'unread'
 
 /**

@@ -7,6 +7,15 @@ interface ProtectedRouteProps {
   children: ReactNode
 }
 
+/**
+ * Gate for the signed-in part of the app. Renders its children when an access
+ * token is present; otherwise tries one silent refresh through the HttpOnly
+ * refresh cookie (showing a brief "checking session" screen meanwhile) and,
+ * if that fails, redirects to the login page with the attempted location in
+ * router state so login can return there.
+ * @param props - `children`: the protected route content.
+ * @returns The children, the interim session check, or a redirect to `/login`.
+ */
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const location = useLocation()
   const accessToken = useAuthStore((state) => state.accessToken)

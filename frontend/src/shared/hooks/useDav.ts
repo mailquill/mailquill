@@ -7,7 +7,12 @@ interface DavSyncResult {
   errors: string[]
 }
 
-/** Trigger CardDAV/CalDAV sync for one account, refreshing contacts + calendar data. */
+/**
+ * Trigger CardDAV/CalDAV sync for one mail account through
+ * `POST /accounts/:id/sync-dav`, then refetch contacts, calendars and events.
+ * @returns A mutation taking the account id and resolving to how many contacts
+ *   and events were synced plus any per-collection errors.
+ */
 export function useSyncDav() {
   const qc = useQueryClient()
   return useMutation({

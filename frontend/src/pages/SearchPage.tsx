@@ -6,6 +6,10 @@ import { ThreadDetail } from '@/widgets/ReadingPane'
 import { useSearchMessages } from '@/shared/hooks/useMessages'
 import type { Message } from '@/shared/types'
 
+/**
+ * Route `/mail/search`: results of the top-bar search. `q` is the free-text query, `thread` the opened conversation, and every other query parameter is passed through as a structured filter, so selecting a result keeps the search intact and back/forward works.
+ * @returns The results list beside the reading pane.
+ */
 export function SearchPage() {
   const { t } = useTranslation()
   const [searchParams, setSearchParams] = useSearchParams()

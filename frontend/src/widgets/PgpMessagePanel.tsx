@@ -19,6 +19,11 @@ import {
   verifyDetachedPgp,
 } from '@/shared/lib/pgpCrypto'
 
+/**
+ * Banner inside a message card for PGP-encrypted or signed mail (inline or PGP/MIME): shows the encryption/signature status, decrypts with the user's key (prompting for the passphrase when locked), verifies signatures against known or discovered sender keys, and can reveal the decrypted plaintext.
+ * @param props - `message` is the message to inspect; the panel renders nothing when it carries no PGP content.
+ * @returns The status panel with its actions, or `null`.
+ */
 export function PgpMessagePanel({ message }: { message: Message }) {
   const { t } = useTranslation()
   const { data: keys = [] } = usePgpKeys()

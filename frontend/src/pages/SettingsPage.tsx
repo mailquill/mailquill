@@ -101,6 +101,10 @@ function updateAccountErrorMessage(error: unknown): string {
   return error instanceof ApiError ? error.detail ?? error.message : String(error)
 }
 
+/**
+ * Full-page settings with a section nav (accounts, calendar, appearance, composing, rules, notifications, privacy); `?section=` selects the initial section.
+ * @returns The settings header, navigation and active section.
+ */
 export function SettingsPage() {
   const navigate = useNavigate()
   const { t } = useTranslation()
@@ -294,6 +298,11 @@ const accountEditSchema = z.object({
 type AccountEditInput = z.input<typeof accountEditSchema>
 type AccountEditData = z.output<typeof accountEditSchema>
 
+/**
+ * Expandable card for one mail account in the settings: identity and colour, sync mode and interval, IMAP/SMTP/DAV server fields with autodetection, credential changes (blank password keeps the stored one), untrusted-certificate retry, contact sync capability, and account deletion.
+ * @param props - `account` is the account to edit; `autoFocusCredentials` opens the card and its server section immediately, used when a re-authentication is required.
+ * @returns The account card.
+ */
 export function AccountCard({
   account,
   autoFocusCredentials = false,
@@ -641,6 +650,11 @@ export function AccountCard({
   )
 }
 
+/**
+ * Row in the account card that manages contact sync for the account: enable (with CardDAV discovery, address-book selection and certificate decision), sync now, or disable with the option to keep cached contacts. Shows the provider (Google, Microsoft or CardDAV) and the current state or error.
+ * @param props - `account` is the account whose contact capability is shown.
+ * @returns The capability row with its dialogs.
+ */
 export function ContactCapabilityRow({ account }: { account: Account }) {
   const { t } = useTranslation()
   const enable = useEnableMailboxContacts()

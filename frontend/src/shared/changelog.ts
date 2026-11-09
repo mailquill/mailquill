@@ -1,13 +1,20 @@
 /** Injected from package.json at build time (see vite.config.ts). */
 export const APP_VERSION: string = __APP_VERSION__
 
+/** Category badge of a changelog entry. */
 export type ChangeType = 'new' | 'improved' | 'fixed'
 
+/**
+ * One line of a release's changelog.
+ * @property type - Badge category.
+ * @property text - Human-readable description shown as-is.
+ */
 export interface ChangelogEntry {
   type: ChangeType
   text: string
 }
 
+/** A released version with its changelog entries. */
 export interface ChangelogRelease {
   version: string
   /** ISO date — formatted for display in the active locale. */

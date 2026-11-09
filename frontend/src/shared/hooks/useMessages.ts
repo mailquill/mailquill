@@ -18,6 +18,16 @@ import {
   optimisticToggleFlag,
 } from '@/shared/lib/mailListCache'
 
+/**
+ * Infinite, cursor-paged message list for one cross-account view (inbox,
+ * starred, sent, drafts, archive, spam or trash) from `GET /mailbox/unified`.
+ * Cached under `['unified', view, accountId, unread]`; the pages are flattened
+ * so consumers keep reading `data.messages` and `data.total`.
+ * @param view - Which unified view to list; defaults to the inbox.
+ * @param accountId - Restrict the view to one account; omit for all accounts.
+ * @param unread - Only list unread messages.
+ * @returns An infinite query whose data is `{ messages, total }` over all loaded pages.
+ */
 export function useUnifiedInbox(view: UnifiedView = 'inbox', accountId?: string, unread = false) {
   return useInfiniteQuery({
     queryKey: ['unified', view, accountId ?? null, unread],
@@ -45,6 +55,12 @@ export function useUnifiedInbox(view: UnifiedView = 'inbox', accountId?: string,
   })
 }
 
+/**
+ * Badge counts per unified view from `GET /mailbox/unified/counts`, cached
+ * under `['unified-counts']`. Every read, flag, move and delete mutation in
+ * this module invalidates it alongside the lists.
+ * @returns A query for the `UnifiedCounts` record.
+ */
 export function useUnifiedCounts() {
   return useQuery({
     queryKey: ['unified-counts'],
@@ -52,6 +68,16 @@ export function useUnifiedCounts() {
   })
 }
 
+/**
+ * Infinite, cursor-paged list of one folder's messages from
+ * `GET /accounts/:id/folders/:folder/messages`, cached under
+ * `['folder-messages', accountId, folder, unread]`. Disabled until both the
+ * account and the folder are known.
+ * @param accountId - Owning account.
+ * @param folder - Full folder path; URL-encoded for the request.
+ * @param unread - Only list unread messages.
+ * @returns An infinite query whose data is `{ messages, total }` over all loaded pages.
+ */
 export function useFolderMessages(accountId: string, folder: string, unread = false) {
   return useInfiniteQuery({
     queryKey: ['folder-messages', accountId, folder, unread],
@@ -75,6 +101,12 @@ export function useFolderMessages(accountId: string, folder: string, unread = fa
   })
 }
 
+/**
+ * One message with its full body from `GET /messages/:id`, cached under
+ * `['message', id]`, the same key {@link prefetchMessage} warms.
+ * @param id - Message id; the query stays disabled while it is empty.
+ * @returns A query for the `Message`.
+ */
 export function useMessage(id: string) {
   return useQuery({
     queryKey: ['message', id],
@@ -83,7 +115,12 @@ export function useMessage(id: string) {
   })
 }
 
-/** Warm the detail cache before a message is opened in the reading pane. */
+/**
+ * Warm the detail cache before a message is opened in the reading pane.
+ * @param queryClient - The query client holding the `['message', id]` cache.
+ * @param id - Message to prefetch.
+ * @returns A promise that settles once the prefetch finishes; it never rejects.
+ */
 export function prefetchMessage(queryClient: QueryClient, id: string) {
   return queryClient.prefetchQuery({
     queryKey: ['message', id],
@@ -92,6 +129,12 @@ export function prefetchMessage(queryClient: QueryClient, id: string) {
   })
 }
 
+/**
+ * All messages of a conversation from `GET /threads/:id`, cached under
+ * `['thread', threadId]`. The reading pane renders its collapsed cards from it.
+ * @param threadId - Thread id; the query stays disabled while it is empty.
+ * @returns A query for `{ messages }`.
+ */
 export function useThread(threadId: string) {
   return useQuery({
     queryKey: ['thread', threadId],
@@ -125,6 +168,13 @@ function invalidateMessageViews(qc: QueryClient, id: string) {
   invalidateMailLists(qc)
 }
 
+/**
+ * Mark one message read or unread through `PATCH /messages/:id/read`. The
+ * change is applied optimistically to every cached list and the unread badges,
+ * rolled back with an error toast on failure, and the message, thread, list
+ * and count queries are invalidated once it settles.
+ * @returns A mutation taking `{ id, is_read }`.
+ */
 export function useMarkRead() {
   const qc = useQueryClient()
   return useMutation({
@@ -139,6 +189,13 @@ export function useMarkRead() {
   })
 }
 
+/**
+ * Star or unstar one message through `PATCH /messages/:id/flag`. The flag is
+ * set optimistically in every cached list (unflagging drops the row from the
+ * starred view), rolled back with an error toast on failure, and the message,
+ * thread, list and count queries are invalidated once it settles.
+ * @returns A mutation taking `{ id, is_flagged }`.
+ */
 export function useToggleFlag() {
   const qc = useQueryClient()
   return useMutation({
@@ -153,6 +210,12 @@ export function useToggleFlag() {
   })
 }
 
+/**
+ * Archive one message through `POST /messages/:id/archive`. The row leaves
+ * every cached list at once and returns with an error toast if the request
+ * fails; lists, folders and counts are invalidated once it settles.
+ * @returns A mutation taking the message id.
+ */
 export function useArchiveMessage() {
   const qc = useQueryClient()
   return useMutation({
@@ -166,6 +229,12 @@ export function useArchiveMessage() {
   })
 }
 
+/**
+ * Move one message to another folder through `POST /messages/:id/move`. The
+ * row leaves every cached list at once and returns with an error toast if the
+ * request fails; lists, folders and counts are invalidated once it settles.
+ * @returns A mutation taking `{ id, folder_id }`.
+ */
 export function useMoveMessage() {
   const qc = useQueryClient()
   return useMutation({
@@ -180,6 +249,14 @@ export function useMoveMessage() {
   })
 }
 
+/**
+ * Rescue a message from the spam view through `POST /messages/:id/not-spam`.
+ * The row leaves every cached list at once (it moves back to the inbox) and
+ * returns with an error toast on failure; thread, list and count queries are
+ * invalidated once it settles. For the in-place variant see
+ * {@link useNotSpamInPlace}.
+ * @returns A mutation taking the message id.
+ */
 export function useNotSpamMessage() {
   const qc = useQueryClient()
   return useMutation({
@@ -199,7 +276,9 @@ export function useNotSpamMessage() {
 /**
  * "Not spam" from the phishing banner: teaches the filter (sender becomes
  * trusted, verdicts clear server-side) while the message stays where it is —
- * so no optimistic list removal, unlike {@link useNotSpamMessage}.
+ * so no optimistic list removal, unlike {@link useNotSpamMessage}. The message,
+ * thread, list and count queries are invalidated once it settles.
+ * @returns A mutation taking the message id.
  */
 export function useNotSpamInPlace() {
   const qc = useQueryClient()
@@ -209,6 +288,12 @@ export function useNotSpamInPlace() {
   })
 }
 
+/**
+ * Re-run the phishing analysis of one message through
+ * `POST /messages/:id/reanalyse`, then refresh the message, thread, list and
+ * count queries so the new verdict shows everywhere. No optimistic update.
+ * @returns A mutation taking the message id.
+ */
 export function useReanalyseMessage() {
   const qc = useQueryClient()
   return useMutation({
@@ -217,6 +302,12 @@ export function useReanalyseMessage() {
   })
 }
 
+/**
+ * Delete (or trash, server-side) one message through `DELETE /messages/:id`.
+ * The row leaves every cached list at once and returns with an error toast on
+ * failure; thread, list and count queries are invalidated once it settles.
+ * @returns A mutation taking the message id.
+ */
 export function useDeleteMessage() {
   const qc = useQueryClient()
   return useMutation({
@@ -233,14 +324,27 @@ export function useDeleteMessage() {
   })
 }
 
+/**
+ * Which messages a server-side bulk action covers. Mirrors the list that is
+ * open: a unified view, optionally narrowed to one account, or a single folder.
+ * @property view - Unified view name, for example `inbox` or `starred`.
+ * @property accountId - Restrict the action to this account.
+ * @property folder - Full folder path when acting on one folder.
+ */
 export interface BulkScope {
   view?: string
   accountId?: string
   folder?: string
 }
 
-// Server-side "select all": acts on a whole view/folder without the client
-// enumerating ids. Use for the "select all N conversations" path.
+/**
+ * Server-side "select all" through `POST /mailbox/bulk`: acts on a whole
+ * view/folder without the client enumerating ids. Use for the "select all N
+ * conversations" path. There is no optimistic update; a failure shows an error
+ * toast and the thread, list and count queries are invalidated once it settles.
+ * @returns A mutation taking `{ action, view?, accountId?, folder? }` where
+ *   `action` is `read`, `archive`, `delete` or `flag`.
+ */
 export function useBulkAction() {
   const qc = useQueryClient()
   return useMutation({
@@ -259,6 +363,12 @@ export function useBulkAction() {
   })
 }
 
+/**
+ * Archive a whole conversation through `POST /threads/:id/archive`. Every row
+ * of the thread leaves the cached lists at once and returns with an error
+ * toast on failure; lists, folders and counts are invalidated once it settles.
+ * @returns A mutation taking the thread id.
+ */
 export function useArchiveThread() {
   const qc = useQueryClient()
   return useMutation({
@@ -272,6 +382,12 @@ export function useArchiveThread() {
   })
 }
 
+/**
+ * Delete a whole conversation through `POST /threads/:id/delete`. Every row
+ * of the thread leaves the cached lists at once and returns with an error
+ * toast on failure; lists, folders and counts are invalidated once it settles.
+ * @returns A mutation taking the thread id.
+ */
 export function useDeleteThread() {
   const qc = useQueryClient()
   return useMutation({
@@ -285,6 +401,13 @@ export function useDeleteThread() {
   })
 }
 
+/**
+ * Mark every message of a conversation read or unread through
+ * `PATCH /threads/:id/read`. The rows flip optimistically in every cached list
+ * together with the unread badges, roll back with an error toast on failure,
+ * and the thread, list and count queries are invalidated once it settles.
+ * @returns A mutation taking `{ threadId, is_read }`.
+ */
 export function useMarkThreadRead() {
   const qc = useQueryClient()
   return useMutation({
@@ -302,6 +425,14 @@ export function useMarkThreadRead() {
   })
 }
 
+/**
+ * Infinite, cursor-paged search through `GET /search`, cached under
+ * `['search', query, filters]`. Runs only once the query is longer than one
+ * character or at least one filter is set.
+ * @param query - Free-text search terms, sent as `q`.
+ * @param filters - Extra query-string parameters passed through verbatim.
+ * @returns An infinite query whose data is `{ messages }` over all loaded pages.
+ */
 export function useSearchMessages(query: string, filters?: Record<string, string>) {
   const hasFilters = !!filters && Object.keys(filters).length > 0
   return useInfiniteQuery({
@@ -321,6 +452,13 @@ export function useSearchMessages(query: string, filters?: Record<string, string
   })
 }
 
+/**
+ * Queue an outgoing message through `POST /send`. Success only means the
+ * server accepted it; the SSE `send` event later reports delivery and refreshes
+ * the mail lists, so this mutation touches no cache itself.
+ * @returns A mutation taking a `SendMessageInput` and resolving to
+ *   `{ send_id, status: 'queued' }`.
+ */
 export function useSendMessage() {
   return useMutation({
     mutationFn: (message: SendMessageInput) =>
@@ -330,7 +468,11 @@ export function useSendMessage() {
   })
 }
 
-/** Persist a provider-neutral local draft and refresh draft lists. */
+/**
+ * Persist a provider-neutral local draft through `POST /drafts` and refresh the
+ * mail lists, folders and counts so the drafts view picks it up.
+ * @returns A mutation taking a `SaveDraftInput` and resolving to the draft `{ id }`.
+ */
 export function useSaveDraft() {
   const qc = useQueryClient()
   return useMutation({
@@ -339,8 +481,10 @@ export function useSaveDraft() {
   })
 }
 
+/** Wire shape of a list row: older endpoints send `message_id` instead of `id`. */
 type ApiMessage = Message & { message_id?: string }
 
+/** Accept both `messages` and `items` page shapes and guarantee every row has an `id`. */
 function normalizeMessagePage(page: {
   messages?: ApiMessage[]
   items?: ApiMessage[]

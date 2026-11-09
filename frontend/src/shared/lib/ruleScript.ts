@@ -30,6 +30,11 @@ function sieveAction(a: RuleAction): string {
   }
 }
 
+/**
+ * Render a filter rule as a Sieve script (RFC 5228 with `fileinto` and `imap4flags`). Conditions are joined with `allof`/`anyof` according to `match_all`; a rule without conditions matches everything.
+ * @param rule - Rule to compile.
+ * @returns The complete script text, ending in `stop;`.
+ */
 export function compileSieve(rule: Rule): string {
   const tests = rule.conditions.map(sieveTest)
   const join = rule.match_all ? 'allof' : 'anyof'
@@ -46,6 +51,11 @@ export function compileSieve(rule: Rule): string {
   ].join('\n')
 }
 
+/**
+ * Render a filter rule as an Exchange Online PowerShell `New-InboxRule` command. Conditions and actions without an Exchange equivalent (e.g. `star`) are skipped.
+ * @param rule - Rule to compile.
+ * @returns The command with one parameter per line.
+ */
 export function compileExchange(rule: Rule): string {
   const parts = [`New-InboxRule -Name ${JSON.stringify(rule.name)}`]
   for (const c of rule.conditions) {
@@ -63,6 +73,11 @@ export function compileExchange(rule: Rule): string {
   return parts.join(' `\n  ')
 }
 
+/**
+ * Compile a rule for its configured engine.
+ * @param rule - Rule whose `engine` selects Sieve or Exchange output.
+ * @returns The script or command text.
+ */
 export function compileRule(rule: Rule): string {
   return rule.engine === 'exchange' ? compileExchange(rule) : compileSieve(rule)
 }

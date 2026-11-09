@@ -11,6 +11,10 @@ import { PaneResizer } from '@/shared/components/PaneResizer'
 import { UNIFIED_LABEL_KEY, isUnifiedView } from '@/shared/lib/unifiedViews'
 import type { Message } from '@/shared/types'
 
+/**
+ * Route `/mail/unified/:view`: a cross-account view (inbox, starred, sent, ...) optionally scoped to one account via `?account=`, with the all/unread filter, infinite message list and reading pane split by a resizable divider. The open thread is cleared when the view or account scope changes.
+ * @returns The two-pane mailbox layout.
+ */
 export function UnifiedMailboxPage() {
   const { t } = useTranslation()
   const { view: viewParam } = useParams()

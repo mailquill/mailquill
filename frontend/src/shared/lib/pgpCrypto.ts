@@ -2,6 +2,13 @@ import { argon2id } from 'hash-wasm'
 
 const SESSION_PREFIX = 'mailquill:pgp:unlocked:'
 
+/**
+ * Result of generating or importing a PGP key pair, in the shape the backend stores.
+ * @property fingerprint - Upper-case hex fingerprint of the key.
+ * @property uid - Primary user id (`Name <email>`).
+ * @property publicKeyArmored - ASCII-armored public key.
+ * @property privateKeyEncryptedBlob - Private key wrapped with a passphrase-derived key; never usable without the passphrase.
+ */
 export interface GeneratedPgpKey {
   fingerprint: string
   uid: string
@@ -9,6 +16,11 @@ export interface GeneratedPgpKey {
   privateKeyEncryptedBlob: string
 }
 
+/**
+ * A private key decrypted for the current browser session.
+ * @property fingerprint - Upper-case hex fingerprint.
+ * @property privateKeyArmored - ASCII-armored, decrypted private key.
+ */
 export interface UnlockedPgpKey {
   fingerprint: string
   privateKeyArmored: string
@@ -20,23 +32,48 @@ async function openpgp(): Promise<OpenPgpModule> {
   return import('openpgp')
 }
 
+/**
+ * Whether a body contains an inline (PGP/INLINE) encrypted message block.
+ * @param value - Message body text.
+ * @returns `true` when a `BEGIN PGP MESSAGE` marker is present.
+ */
 export function hasInlinePgpMessage(value?: string | null): boolean {
   return Boolean(value?.includes('-----BEGIN PGP MESSAGE-----'))
 }
 
+/**
+ * Whether a body contains an inline clear-signed message.
+ * @param value - Message body text.
+ * @returns `true` when a `BEGIN PGP SIGNED MESSAGE` marker is present.
+ */
 export function hasInlinePgpSignature(value?: string | null): boolean {
   return Boolean(value?.includes('-----BEGIN PGP SIGNED MESSAGE-----'))
 }
 
+/**
+ * Whether a Content-Type (or raw header text) indicates PGP/MIME encryption or signing.
+ * @param value - Content-Type header value or raw source.
+ * @returns `true` for `multipart/encrypted` or `multipart/signed`.
+ */
 export function hasPgpMime(value?: string | null): boolean {
   const lower = value?.toLowerCase() ?? ''
   return lower.includes('multipart/encrypted') || lower.includes('multipart/signed')
 }
 
+/**
+ * `sessionStorage` key under which an unlocked private key is cached.
+ * @param fingerprint - Key fingerprint, normalised to upper case.
+ * @returns The namespaced storage key.
+ */
 export function sessionKeyId(fingerprint: string): string {
   return `${SESSION_PREFIX}${fingerprint.toUpperCase()}`
 }
 
+/**
+ * Read an unlocked private key from the session cache. A corrupt entry is removed and treated as absent.
+ * @param fingerprint - Fingerprint of the key.
+ * @returns The cached key, or `null` when the key has not been unlocked this session.
+ */
 export function getUnlockedKey(fingerprint: string): UnlockedPgpKey | null {
   const raw = sessionStorage.getItem(sessionKeyId(fingerprint))
   if (!raw) return null
@@ -48,14 +85,32 @@ export function getUnlockedKey(fingerprint: string): UnlockedPgpKey | null {
   }
 }
 
+/**
+ * Store an unlocked private key in `sessionStorage` so later decrypt/sign calls do not prompt for the passphrase again.
+ * @param key - The unlocked key.
+ * @returns Nothing.
+ */
 export function cacheUnlockedKey(key: UnlockedPgpKey): void {
   sessionStorage.setItem(sessionKeyId(key.fingerprint), JSON.stringify(key))
 }
 
+/**
+ * Forget an unlocked private key (lock it again).
+ * @param fingerprint - Fingerprint of the key to remove from the session cache.
+ * @returns Nothing.
+ */
 export function clearUnlockedKey(fingerprint: string): void {
   sessionStorage.removeItem(sessionKeyId(fingerprint))
 }
 
+/**
+ * Generate a new ECC key pair for an identity and wrap the private key for storage.
+ * @param name - Display name for the user id.
+ * @param email - Address for the user id.
+ * @param passphrase - Protects the private key; must satisfy `assertStrongPassphrase`.
+ * @returns The fingerprint, user id, armored public key and wrapped private key.
+ * @throws Error `pgp.passphraseWeak` when the passphrase is too short.
+ */
 export async function generatePgpKey(name: string, email: string, passphrase: string): Promise<GeneratedPgpKey> {
   assertStrongPassphrase(passphrase)
   const pgp = await openpgp()
@@ -72,6 +127,13 @@ export async function generatePgpKey(name: string, email: string, passphrase: st
   return { fingerprint, uid, publicKeyArmored: publicKey, privateKeyEncryptedBlob }
 }
 
+/**
+ * Import an existing armored private key, verify the passphrase opens it, wrap it for storage and cache the unlocked key for this session.
+ * @param armoredPrivateKey - ASCII-armored private key.
+ * @param passphrase - Passphrase of the key; must satisfy `assertStrongPassphrase`.
+ * @returns The key in storable form.
+ * @throws Error when the passphrase is weak or does not decrypt the key.
+ */
 export async function importPgpPrivateKey(armoredPrivateKey: string, passphrase: string): Promise<GeneratedPgpKey> {
   assertStrongPassphrase(passphrase)
   const pgp = await openpgp()
@@ -86,6 +148,14 @@ export async function importPgpPrivateKey(armoredPrivateKey: string, passphrase:
   return { fingerprint, uid, publicKeyArmored: publicKey, privateKeyEncryptedBlob }
 }
 
+/**
+ * Unwrap a stored private key with its passphrase and cache it for the session.
+ * @param fingerprint - Fingerprint of the key (salts the wrapping key).
+ * @param privateKeyEncryptedBlob - Wrapped private key as stored by the backend.
+ * @param passphrase - User's passphrase.
+ * @returns The unlocked key.
+ * @throws Error when the passphrase is wrong.
+ */
 export async function unlockPrivateKey(
   fingerprint: string,
   privateKeyEncryptedBlob: string,
@@ -102,6 +172,12 @@ export async function unlockPrivateKey(
   return key
 }
 
+/**
+ * Decrypt an armored PGP message.
+ * @param armoredMessage - The `BEGIN PGP MESSAGE` block.
+ * @param privateKeyArmored - Unlocked private key able to decrypt it.
+ * @returns The decrypted text.
+ */
 export async function decryptInlinePgp(armoredMessage: string, privateKeyArmored: string): Promise<string> {
   const pgp = await openpgp()
   const message = await pgp.readMessage({ armoredMessage })
@@ -110,6 +186,13 @@ export async function decryptInlinePgp(armoredMessage: string, privateKeyArmored
   return String(data)
 }
 
+/**
+ * Verify a clear-signed (inline) message against a sender's public key.
+ * @param cleartextMessage - The `BEGIN PGP SIGNED MESSAGE` block.
+ * @param publicKeyArmored - Armored public key of the expected signer.
+ * @returns `verified: true` with the signing key id when the signature checks out, `verified: false` when the message carries no signature.
+ * @throws Error when a signature is present but invalid.
+ */
 export async function verifyInlinePgp(
   cleartextMessage: string,
   publicKeyArmored: string,
@@ -124,6 +207,14 @@ export async function verifyInlinePgp(
   return { verified: true, fingerprint: signature.keyID.toHex().toUpperCase() }
 }
 
+/**
+ * Verify a detached signature (PGP/MIME `multipart/signed`) over a text part.
+ * @param text - The signed text exactly as transmitted.
+ * @param armoredSignature - The armored detached signature.
+ * @param publicKeyArmored - Armored public key of the expected signer.
+ * @returns `verified: true` with the signing key id when the signature checks out, `verified: false` when no signature is present.
+ * @throws Error when a signature is present but invalid.
+ */
 export async function verifyDetachedPgp(
   text: string,
   armoredSignature: string,
@@ -140,6 +231,12 @@ export async function verifyDetachedPgp(
   return { verified: true, fingerprint: result.keyID.toHex().toUpperCase() }
 }
 
+/**
+ * Clear-sign text (inline signature).
+ * @param text - Text to sign.
+ * @param privateKeyArmored - Unlocked private signing key.
+ * @returns The armored clear-signed message.
+ */
 export async function signText(text: string, privateKeyArmored: string): Promise<string> {
   const pgp = await openpgp()
   const privateKey = await pgp.readPrivateKey({ armoredKey: privateKeyArmored })
@@ -147,6 +244,12 @@ export async function signText(text: string, privateKeyArmored: string): Promise
   return pgp.sign({ message, signingKeys: privateKey, format: 'armored' }) as Promise<string>
 }
 
+/**
+ * Create a detached signature over text, for PGP/MIME signed mail.
+ * @param text - Text to sign.
+ * @param privateKeyArmored - Unlocked private signing key.
+ * @returns The armored detached signature.
+ */
 export async function signDetachedText(text: string, privateKeyArmored: string): Promise<string> {
   const pgp = await openpgp()
   const privateKey = await pgp.readPrivateKey({ armoredKey: privateKeyArmored })
@@ -154,6 +257,13 @@ export async function signDetachedText(text: string, privateKeyArmored: string):
   return pgp.sign({ message, signingKeys: privateKey, detached: true, format: 'armored' }) as Promise<string>
 }
 
+/**
+ * Encrypt text for one or more recipients, optionally signing it.
+ * @param text - Plain text to encrypt.
+ * @param publicKeysArmored - Armored public keys of all recipients.
+ * @param privateKeyArmored - Unlocked private key to sign with; omit for an unsigned message.
+ * @returns The armored encrypted message.
+ */
 export async function encryptText(
   text: string,
   publicKeysArmored: string[],
@@ -166,10 +276,21 @@ export async function encryptText(
   return pgp.encrypt({ message, encryptionKeys, signingKeys, format: 'armored' }) as Promise<string>
 }
 
+/**
+ * Cut the armored PGP message block out of surrounding body text.
+ * @param value - Body text that may contain a `BEGIN PGP MESSAGE` block.
+ * @returns The block including its begin/end markers, or `null` when none is found.
+ */
 export function extractInlinePgpMessage(value: string): string | null {
   return extractArmor(value, 'PGP MESSAGE')
 }
 
+/**
+ * Enforce the minimum passphrase length (12 characters) for key generation and import.
+ * @param passphrase - Candidate passphrase.
+ * @returns Nothing.
+ * @throws Error with message `pgp.passphraseWeak` (an i18n key) when too short.
+ */
 export function assertStrongPassphrase(passphrase: string): void {
   if (passphrase.length < 12) {
     throw new Error('pgp.passphraseWeak')

@@ -16,12 +16,23 @@ import { parseFromAddr } from '@/shared/lib/format'
 import { buildFolderTree, flattenFolderTree, folderLeafLabel, folderIcon } from '@/shared/lib/folders'
 import type { Message } from '@/shared/types'
 
+/**
+ * Where and for which message the row context menu is open.
+ * @property x - Viewport x position of the pointer.
+ * @property y - Viewport y position of the pointer.
+ * @property message - The right-clicked message.
+ */
 export interface ContextMenuState {
   x: number
   y: number
   message: Message
 }
 
+/**
+ * Right-click menu for a message row: mark read/unread, archive, delete, move to a folder (submenu of the account's folder tree), mark as not spam, and "create rule from sender" which opens the rules settings pre-filled with the sender address.
+ * @param props - `state` gives the pointer position and target message; `onClose` is called after an action or on outside click.
+ * @returns The positioned menu.
+ */
 export function MessageContextMenu({ state, onClose }: { state: ContextMenuState; onClose: () => void }) {
   const { t } = useTranslation()
   const navigate = useNavigate()

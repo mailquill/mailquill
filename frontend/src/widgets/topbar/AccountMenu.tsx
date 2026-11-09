@@ -24,6 +24,11 @@ interface AccountMenuProps {
   onSettings: () => void
 }
 
+/**
+ * Avatar button in the top bar that opens the user menu: signed-in address, per-account storage usage, settings link and sign-out.
+ * @param props - `onSettings` is called when the user picks the settings entry.
+ * @returns The avatar button with its dropdown.
+ */
 export function AccountMenu({ onSettings }: AccountMenuProps) {
   const [open, setOpen] = useState(false)
   const navigate = useNavigate()

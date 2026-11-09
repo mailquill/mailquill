@@ -184,23 +184,8 @@ pub async fn discover_collection(base_url: &str, auth: &DavAuth) -> Result<Strin
         .unwrap_or_else(|| base_url.to_owned()))
 }
 
-/// Discover every CalDAV calendar collection exposed by an account.
-pub async fn discover_collections(
-    base_url: &str,
-    auth: &DavAuth,
-) -> Result<Vec<DiscoveredCalendar>, String> {
-    let c = client()?;
-    discover_calendars(&c, base_url, auth).await
-}
-
-pub async fn discover_collections_with_trusted_cert(
-    base_url: &str,
-    auth: &DavAuth,
-    trusted_cert_der: Option<&[u8]>,
-) -> Result<Vec<DiscoveredCalendar>, String> {
-    discover_collections_with_tls_options(base_url, auth, trusted_cert_der, false).await
-}
-
+/// Discover every CalDAV calendar collection exposed by an account, with the
+/// account's TLS trust settings (pinned certificate / accept-invalid) applied.
 pub async fn discover_collections_with_tls_options(
     base_url: &str,
     auth: &DavAuth,
@@ -211,40 +196,9 @@ pub async fn discover_collections_with_tls_options(
     discover_calendars(&c, base_url, auth).await
 }
 
-/// Fetch all events from a CalDAV collection. Each event carries its server
-/// `href` and `etag` so the caller can match, update, and delete resources.
-pub async fn pull(collection_url: &str, auth: &DavAuth) -> Result<Vec<ParsedEvent>, String> {
-    pull_range(collection_url, auth, None, None).await
-}
-
-/// Fetch events from a CalDAV collection within an optional UTC range.
-pub async fn pull_range(
-    collection_url: &str,
-    auth: &DavAuth,
-    start_utc: Option<chrono::DateTime<chrono::Utc>>,
-    end_utc: Option<chrono::DateTime<chrono::Utc>>,
-) -> Result<Vec<ParsedEvent>, String> {
-    pull_range_with_trusted_cert(collection_url, auth, start_utc, end_utc, None).await
-}
-
-pub async fn pull_range_with_trusted_cert(
-    collection_url: &str,
-    auth: &DavAuth,
-    start_utc: Option<chrono::DateTime<chrono::Utc>>,
-    end_utc: Option<chrono::DateTime<chrono::Utc>>,
-    trusted_cert_der: Option<&[u8]>,
-) -> Result<Vec<ParsedEvent>, String> {
-    pull_range_with_tls_options(
-        collection_url,
-        auth,
-        start_utc,
-        end_utc,
-        trusted_cert_der,
-        false,
-    )
-    .await
-}
-
+/// Fetch events from a CalDAV collection within an optional UTC range. Each
+/// event carries its server `href` and `etag` so the caller can match, update
+/// and delete resources. Applies the account's TLS trust settings.
 pub async fn pull_range_with_tls_options(
     collection_url: &str,
     auth: &DavAuth,
@@ -283,22 +237,8 @@ pub async fn pull_range_with_tls_options(
     Ok(events)
 }
 
-/// Read the collection change tag used for cheap "anything changed?" checks.
-pub async fn collection_ctag(
-    collection_url: &str,
-    auth: &DavAuth,
-) -> Result<Option<String>, String> {
-    collection_ctag_with_trusted_cert(collection_url, auth, None).await
-}
-
-pub async fn collection_ctag_with_trusted_cert(
-    collection_url: &str,
-    auth: &DavAuth,
-    trusted_cert_der: Option<&[u8]>,
-) -> Result<Option<String>, String> {
-    collection_ctag_with_tls_options(collection_url, auth, trusted_cert_der, false).await
-}
-
+/// Read the collection change tag used for cheap "anything changed?" checks,
+/// with the account's TLS trust settings applied.
 pub async fn collection_ctag_with_tls_options(
     collection_url: &str,
     auth: &DavAuth,

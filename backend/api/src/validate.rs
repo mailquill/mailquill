@@ -37,15 +37,6 @@ pub fn text(field: &str, value: &str, max: usize) -> Result<(), AppError> {
     no_control(field, value)
 }
 
-/// Optional free text: bounded length and no control chars (may be empty).
-#[allow(dead_code)] // shared helper for routes hardened under the zero-trust pass
-pub fn opt_text(field: &str, value: &str, max: usize) -> Result<(), AppError> {
-    if value.chars().count() > max {
-        return Err(reject(field, &format!("must be at most {max} characters")));
-    }
-    no_control(field, value)
-}
-
 /// Hex colour in `#RRGGBB` form.
 pub fn hex_color(field: &str, value: &str) -> Result<(), AppError> {
     let rest = value

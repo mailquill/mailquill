@@ -25,7 +25,6 @@ use api::state::{AppState, VapidConfig};
 
 #[derive(RustEmbed)]
 #[folder = "../../frontend/dist/"]
-#[allow(dead_code)]
 struct FrontendAssets;
 
 const PROXIED_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";

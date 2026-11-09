@@ -8,7 +8,7 @@ use tokio::{
 /// Status for a single account's sync task.
 #[derive(Clone, Debug)]
 pub struct SyncStatus {
-    /// Lifecycle state: `idle`, `pending`, `syncing`, `error` or `reauth_required`.
+    /// Lifecycle state: `idle`, `syncing`, `error` or `reauth_required`.
     pub state: String,
     /// RFC 3339 time of the last successfully completed sync cycle, if any.
     pub last_synced_at: Option<String>,
@@ -123,18 +123,6 @@ impl SyncManager {
                 .await;
         });
         tasks.insert(account_id, AccountTask { tx, handle });
-    }
-
-    /// Start sync with minimal context (used at server restart).
-    pub async fn start_account_minimal(&self, account_id: String, _user_id: String) {
-        // Mark as needing sync — actual sync started lazily on first request or separately
-        self.statuses.lock().await.insert(
-            account_id,
-            SyncStatus {
-                state: "pending".into(),
-                ..Default::default()
-            },
-        );
     }
 
     /// Stop the sync task for an account.

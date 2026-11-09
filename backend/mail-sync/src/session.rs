@@ -260,14 +260,6 @@ pub async fn select_folder(
     Ok((uidvalidity, exists))
 }
 
-/// Check if the server has THREAD=REFERENCES capability.
-pub async fn check_thread_capability(session: &mut ImapSession) -> bool {
-    match session.capabilities().await {
-        Ok(caps) => caps.has_str("THREAD=REFERENCES"),
-        Err(_) => false,
-    }
-}
-
 /// Highest UID in the currently selected mailbox, or `None` if it is empty.
 ///
 /// `UID FETCH * (UID)` targets the message with the highest sequence number;

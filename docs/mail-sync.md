@@ -104,7 +104,7 @@ database so a reconnecting client gets consistent numbers.
 
 States: `idle`, `syncing`, `error` (message in `error`), `reauth_required`
 (OAuth token rejected; the task skips cycles until the account is
-reconnected), `pending` (registered at startup, task not yet started).
+reconnected).
 
 ## Client side
 

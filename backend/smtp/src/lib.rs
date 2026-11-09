@@ -73,11 +73,6 @@ pub async fn send(req: SendRequest) -> Result<(String, Vec<u8>), SmtpError> {
     Ok((message_id, raw))
 }
 
-/// Build raw RFC 2822 bytes without sending — used for IMAP APPEND.
-pub fn build_raw_message(req: &SendRequest) -> Result<Vec<u8>, SmtpError> {
-    Ok(build_message(req)?.formatted())
-}
-
 /// Build the message without sending and return (Message-ID, raw bytes) —
 /// used when delivery happens through a provider API instead of SMTP.
 pub fn build_raw_with_id(req: &SendRequest) -> Result<(String, Vec<u8>), SmtpError> {

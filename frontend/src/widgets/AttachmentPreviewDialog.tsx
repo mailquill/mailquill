@@ -24,25 +24,28 @@ interface AttachmentPreviewDialogProps {
  */
 export function AttachmentPreviewDialog({ attachment, kind, onClose }: AttachmentPreviewDialogProps) {
   const { t } = useTranslation()
-  const [url, setUrl] = useState<string | null>(null)
-  const [failed, setFailed] = useState(false)
+  // One state record per fetched attachment. Deriving `url`/`failed` from the
+  // record's id resets the view for a new attachment without a setState in
+  // the effect, which would schedule an extra render.
+  const [preview, setPreview] = useState<{ id: string; url: string | null; failed: boolean } | null>(null)
+  const current = preview?.id === attachment.id ? preview : null
+  const url = current?.url ?? null
+  const failed = current?.failed ?? false
   const fileName = attachmentFileName(attachment, t('mail.unnamedAttachment'))
 
   useEffect(() => {
     let objectUrl: string | null = null
     let cancelled = false
-    setUrl(null)
-    setFailed(false)
     apiGetBlob(`/attachments/${attachment.id}`)
       .then((blob) => {
         if (cancelled) return
         // Re-type the blob: the URL must not be able to resolve to anything the
         // browser would parse as a document on our origin.
         objectUrl = URL.createObjectURL(new Blob([blob], { type: previewMimeType(attachment, kind) }))
-        setUrl(objectUrl)
+        setPreview({ id: attachment.id, url: objectUrl, failed: false })
       })
       .catch(() => {
-        if (!cancelled) setFailed(true)
+        if (!cancelled) setPreview({ id: attachment.id, url: null, failed: true })
       })
     return () => {
       cancelled = true

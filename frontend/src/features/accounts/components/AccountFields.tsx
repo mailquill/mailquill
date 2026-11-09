@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Inbox } from 'lucide-react'
+import type { Inbox } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { ACCT_COLORS, type Security } from '@/shared/lib/serverDiscovery'
 

@@ -52,7 +52,9 @@ export function useSendProgressToasts() {
         action: accountId
           ? {
               label: t('compose.checkCredentials'),
-              onClick: () => navigate(`/mail/settings?focus=${accountId}`),
+              onClick: () => {
+                void navigate(`/mail/settings?focus=${accountId}`)
+              },
             }
           : undefined,
       })

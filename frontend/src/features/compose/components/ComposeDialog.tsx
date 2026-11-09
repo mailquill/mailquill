@@ -670,7 +670,11 @@ function escapeHtml(value: string): string {
 async function fileToAttachment(file: File): Promise<AttachmentDraft> {
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
+    reader.onload = () => {
+      // readAsDataURL always yields a string; anything else is a broken read.
+      if (typeof reader.result === 'string') resolve(reader.result)
+      else reject(new Error('unexpected FileReader result'))
+    }
     reader.onerror = () => reject(reader.error)
     reader.readAsDataURL(file)
   })

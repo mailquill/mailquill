@@ -290,7 +290,9 @@ function MonthView({
   const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1)
   const gridStart = startOfWeekMon(monthStart)
   const days = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i))
-  const today = new Date()
+  // Fixed at mount: the clock is impure in render, and a remount on navigation
+  // refreshes the highlight often enough.
+  const [today] = useState(() => new Date())
 
   return (
     <div className="flex h-full flex-col">
@@ -357,7 +359,8 @@ function TimeGrid({
   const { t } = useTranslation()
   const days = view === 'day' ? [startOfDay(cursor)] : Array.from({ length: 7 }, (_, i) => addDays(startOfWeekMon(cursor), i))
   const hours = Array.from({ length: 24 }, (_, h) => h)
-  const today = new Date()
+  // Fixed at mount, see MonthGrid.
+  const [today] = useState(() => new Date())
   const allDayEvents = events.filter((e) => e.all_day && days.some((day) => sameDay(new Date(e.starts_at), day)))
 
   return (

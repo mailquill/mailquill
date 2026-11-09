@@ -43,8 +43,9 @@ Use these rules for frontend code organization, imports, naming, typing, documen
 
 ## Linting and Code Quality
 
-- **Stylelint**: Run via `bun run lint` alongside ESLint. Config is in `.stylelintrc.json`. Key rules are documented in [frontend-design-system.md](frontend-design-system.md).
-- **ESLint Rules**:
+- **Linter**: `bun run lint` runs [oxlint](https://oxc.rs/docs/guide/usage/linter) with type-aware rules through `oxlint-tsgolint` (the Go-based TypeScript compiler, so it keeps up with the TypeScript 7 toolchain). Config is `.oxlintrc.json`: the `correctness` category as errors plus React hooks (`react/rules-of-hooks`, `react/exhaustive-deps`), `react/only-export-components`, `typescript/consistent-type-imports`, `typescript/no-misused-promises` (void-returning attributes and arguments excluded, so `onClick={async …}` stays allowed) and `no-unused-vars` with a `_` prefix escape. `typescript/no-floating-promises` is off: fire-and-forget `invalidateQueries`/`navigate` calls are idiomatic here. Rule names follow oxlint's `plugin/rule` form; ESLint plugins are not loaded.
+- **Stylelint**: Config is in `.stylelintrc.json`. Key rules are documented in [frontend-design-system.md](frontend-design-system.md).
+- **Additional rules to adopt** (not yet configured):
   - Enforce FSD boundaries with `boundaries/dependencies`.
   - `react/no-multi-comp`: Error.
   - `unicorn/filename-case`: PascalCase for components.
@@ -90,9 +91,9 @@ Private, purely mechanical helpers, such as a one-liner that just calls another 
 
 **Exceptions**: `src/shared/components/ui/` files are mechanical shadcn/Radix wrappers; JSDoc is not required there.
 
-### ESLint enforcement
+### Lint enforcement
 
-`eslint-plugin-jsdoc` is configured in `eslint.config.js` with the following rules active as warnings on all exported symbols:
+JSDoc rules are not enforced by oxlint yet; the following `eslint-plugin-jsdoc` rules describe the intended contract and are checked in review:
 
 - `jsdoc/require-jsdoc` — requires a JSDoc block on every exported function, type alias, interface, and variable declaration.
 - `jsdoc/require-param` + `jsdoc/require-param-description` — every `@param` must exist and have a description.

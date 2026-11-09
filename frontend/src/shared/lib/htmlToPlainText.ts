@@ -102,7 +102,9 @@ export function htmlToPlainText(html: string): string {
     .replace(/\u00a0/g, ' ')
     .replace(
       // A run of break markers, plus the whitespace around it, is one break —
-      // as strong as its strongest marker.
+      // as strong as its strongest marker. The control characters are the
+      // private break markers inserted above, so matching them is the point.
+      // oxlint-disable-next-line no-control-regex
       /[^\S\n]*[\u0001\u0002][\s\u0001\u0002]*/g,
       (run) => (run.includes(PARAGRAPH_BREAK) ? '\n\n' : '\n'),
     )

@@ -340,7 +340,7 @@ pub async fn fetch_gmail_msgids(
     session: &mut ImapSession,
     uid_set: &str,
 ) -> Result<Vec<(u32, String)>, SessionError> {
-    use async_imap::imap_proto::{types::AttributeValue, Response};
+    use async_imap::imap_proto::{AttributeValue, Response};
 
     let id = session
         .run_command(format!("UID FETCH {uid_set} (UID X-GM-MSGID)"))
@@ -499,7 +499,7 @@ fn parse_fetch(msg: &async_imap::types::Fetch, include_body: bool) -> Option<Fet
     Some(fetched)
 }
 
-fn format_address(addr: &async_imap::imap_proto::types::Address) -> String {
+fn format_address(addr: &async_imap::imap_proto::Address) -> String {
     let mailbox = addr
         .mailbox
         .as_ref()

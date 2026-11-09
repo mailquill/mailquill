@@ -1,11 +1,7 @@
 //! Local-account password hashing and the operator password reset used by the
 //! `mailquill reset-password` command.
 
-use argon2::{
-    password_hash::{PasswordHasher, SaltString},
-    Argon2,
-};
-use argon2::password_hash::rand_core::OsRng;
+use argon2::{password_hash::PasswordHasher, Argon2};
 use sqlx::SqlitePool;
 
 /// Minimum accepted password length.
@@ -37,9 +33,9 @@ pub fn hash_password(password: &str) -> Result<String, PasswordResetError> {
         return Err(PasswordResetError::TooShort);
     }
 
-    let salt = SaltString::generate(&mut OsRng);
+    // A fresh random salt comes from the OS (password-hash's `getrandom`).
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|error| PasswordResetError::Hash(error.to_string()))
 }
@@ -79,7 +75,7 @@ pub async fn reset_password(
 #[cfg(test)]
 mod tests {
     use super::{reset_password, PasswordResetError};
-    use argon2::{password_hash::PasswordHash, PasswordVerifier};
+    use argon2::{password_hash::phc::PasswordHash, PasswordVerifier};
     use sqlx::sqlite::SqlitePoolOptions;
 
     async fn test_db() -> sqlx::SqlitePool {

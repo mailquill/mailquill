@@ -2,7 +2,7 @@
 //! rotation (HttpOnly cookie) and logout.
 
 use argon2::{
-    password_hash::{PasswordHash, PasswordVerifier},
+    password_hash::{phc::PasswordHash, PasswordVerifier},
     Argon2,
 };
 use axum::{

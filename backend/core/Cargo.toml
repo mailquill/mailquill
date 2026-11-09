@@ -10,7 +10,7 @@ sqlx = { workspace = true, features = ["postgres", "any", "macros", "uuid", "chr
 serde = { workspace = true }
 object_store = { version = "0.14", features = ["aws"] }
 aes-gcm = "0.11"
-zstd = "0.13"
+zstd = "0.14"
 sha2 = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }

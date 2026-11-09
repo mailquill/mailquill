@@ -38,13 +38,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots"] }
-quick-xml = "0.41"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+quick-xml = "0.42"
 url = "2"
 urlencoding = "2"
 
 # Mail
-mailparse = "0.16"
+mailparse = "0.18"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "pool", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 
 # TLS — rustls with the ring provider everywhere (no OpenSSL).

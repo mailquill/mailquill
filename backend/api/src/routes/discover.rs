@@ -122,12 +122,12 @@ pub fn parse_ispdb(xml: &str) -> IspdbConfig {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 let name = e.name();
-                let tag = String::from_utf8_lossy(name.as_ref()).into_owned();
+                let tag = name.as_ref().to_owned();
                 let server_type = e
                     .attributes()
                     .flatten()
-                    .find(|a| a.key.as_ref() == b"type")
-                    .map(|a| String::from_utf8_lossy(&a.value).into_owned());
+                    .find(|a| a.key.as_ref() == "type")
+                    .map(|a| a.value.to_string());
                 match tag.as_str() {
                     "incomingServer" if server_type.as_deref() == Some("imap") => {
                         server = Some("imap");
@@ -143,7 +143,7 @@ pub fn parse_ispdb(xml: &str) -> IspdbConfig {
                 }
             }
             Ok(Event::Text(t)) => {
-                let text = t.xml_content(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned();
+                let text = t.xml_content(quick_xml::XmlVersion::Implicit1_0).into_owned();
                 if in_display_name && cfg.provider.is_none() {
                     cfg.provider = Some(text);
                 } else if server.is_some() {
@@ -158,9 +158,9 @@ pub fn parse_ispdb(xml: &str) -> IspdbConfig {
             Ok(Event::End(e)) => {
                 let name = e.name();
                 let tag = name.as_ref();
-                if tag == b"displayName" {
+                if tag == "displayName" {
                     in_display_name = false;
-                } else if tag == b"incomingServer" || tag == b"outgoingServer" {
+                } else if tag == "incomingServer" || tag == "outgoingServer" {
                     if let (Some(kind), Some(port), Some(security)) = (server, port, security) {
                         let valid = validate::host("host", &host).is_ok()
                             && validate::port("port", port).is_ok();

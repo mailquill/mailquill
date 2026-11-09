@@ -11,7 +11,7 @@ libsqlite3-sys = { version = "0.37", features = ["bundled"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-lru = "0.18"
+lru = "0.19"
 
 [package.metadata.cargo-machete]
 ignored = ["libsqlite3-sys"]

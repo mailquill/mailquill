@@ -1159,7 +1159,8 @@ fn unfold(raw: &str) -> String {
 
 // ── XML helpers (namespace-agnostic via local names) ───────────────────────
 
-fn local_name(qname: &[u8]) -> &[u8] {
+fn local_name(qname: &str) -> &[u8] {
+    let qname = qname.as_bytes();
     match qname.iter().rposition(|&b| b == b':') {
         Some(i) => &qname[i + 1..],
         None => qname,
@@ -1201,12 +1202,13 @@ fn parse_calendar_responses(xml: &str) -> Vec<(String, Option<String>, String)> 
                 _ => {}
             },
             Ok(Event::Text(e)) if cur.is_some() => {
-                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                {
+                let t = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                     buf.push_str(&t);
                 }
             }
             Ok(Event::CData(e)) if cur.is_some() => {
-                buf.push_str(&String::from_utf8_lossy(&e.into_inner()));
+                buf.push_str(&e.into_inner());
             }
             Ok(Event::End(e)) => match local_name(e.name().as_ref()) {
                 b"href" if cur == Some("href") => {
@@ -1262,7 +1264,8 @@ fn first_href_in_elem(xml: &str, target: &[u8]) -> Option<String> {
                 }
             }
             Ok(Event::Text(e)) if in_href => {
-                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                {
+                let t = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                     buf.push_str(&t);
                 }
             }
@@ -1294,12 +1297,13 @@ fn first_text_in_elem(xml: &str, target: &[u8]) -> Option<String> {
                 buf.clear();
             }
             Ok(Event::Text(e)) if in_target => {
-                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                {
+                let t = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                     buf.push_str(&t);
                 }
             }
             Ok(Event::CData(e)) if in_target => {
-                buf.push_str(&String::from_utf8_lossy(&e.into_inner()));
+                buf.push_str(&e.into_inner());
             }
             Ok(Event::End(e)) if local_name(e.name().as_ref()) == target => {
                 let value = buf.trim();
@@ -1354,7 +1358,8 @@ fn calendars_with_resourcetype(xml: &str, rtype: &[u8]) -> Vec<DiscoveredCalenda
                 matched = true;
             }
             Ok(Event::Text(e)) if in_href || text_prop.is_some() => {
-                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                {
+                let t = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                     buf.push_str(&t);
                 }
             }

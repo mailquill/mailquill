@@ -833,7 +833,8 @@ fn extract_carddav_contacts(xml: &str, base: &str) -> Vec<CardDavContact> {
                 }
             }
             Ok(Event::Text(e)) => {
-                if let Ok(text) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                {
+                let text = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                     if in_href {
                         href.push_str(&text);
                     } else if in_etag {
@@ -844,7 +845,7 @@ fn extract_carddav_contacts(xml: &str, base: &str) -> Vec<CardDavContact> {
                 }
             }
             Ok(Event::CData(e)) if in_address_data => {
-                card.push_str(&String::from_utf8_lossy(&e.into_inner()));
+                card.push_str(&e.into_inner());
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
@@ -873,7 +874,8 @@ fn extract_carddav_contacts(xml: &str, base: &str) -> Vec<CardDavContact> {
     out
 }
 
-fn local_name(qname: &[u8]) -> &[u8] {
+fn local_name(qname: &str) -> &[u8] {
+    let qname = qname.as_bytes();
     match qname.iter().rposition(|&b| b == b':') {
         Some(i) => &qname[i + 1..],
         None => qname,
@@ -898,7 +900,8 @@ fn first_href_in_elem(xml: &str, target: &[u8]) -> Option<String> {
                 }
             }
             Ok(Event::Text(e)) if in_href => {
-                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                {
+                let t = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                     buf.push_str(&t);
                 }
             }
@@ -947,7 +950,8 @@ fn first_href_with_resourcetype(xml: &str, rtype: &[u8]) -> Option<String> {
                 matched = true;
             }
             Ok(Event::Text(e)) if in_href => {
-                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                {
+                let t = e.xml_content(quick_xml::XmlVersion::Implicit1_0);
                     buf.push_str(&t);
                 }
             }

@@ -8,7 +8,7 @@ license = "AGPL-3.0-or-later"
 mailparse = { workspace = true }
 strsim = "0.11"
 idna = "1"
-scraper = "0.27"
+scraper = "0.29"
 regex = "1"
 reqwest = { workspace = true }
 sqlx = { workspace = true, features = ["macros", "chrono", "uuid"] }

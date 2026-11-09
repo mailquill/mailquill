@@ -84,13 +84,6 @@ impl ContactProvider {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContactSourceIdentity {
-    pub source_id: String,
-    pub email_account_id: Option<String>,
-    pub provider: ContactProvider,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContactBookIdentity {
     pub remote_id: String,
     pub display_name: String,
@@ -180,20 +173,6 @@ pub struct CardDavContact {
 }
 
 #[derive(Debug, Clone)]
-pub struct GraphSyncPage {
-    pub contacts: Vec<ParsedContact>,
-    pub delta_link: Option<String>,
-    pub next_link: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct GoogleSyncPage {
-    pub contacts: Vec<ParsedContact>,
-    pub sync_token: Option<String>,
-    pub next_page_token: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct ContactSyncStatus {
     pub state: String,
     pub last_synced_at: Option<String>,
@@ -271,10 +250,6 @@ impl Default for ContactSyncManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn client() -> Result<reqwest::Client, String> {
-    client_with_tls_options(None, false)
 }
 
 fn client_with_tls_options(
@@ -370,14 +345,6 @@ async fn dav(
     Ok(text)
 }
 
-/// Fetch and parse all contacts from a CardDAV account. `base_url` may be the
-/// addressbook collection itself or any DAV URL discovery can start from.
-pub async fn sync_carddav(base_url: &str, auth: &DavAuth) -> Result<Vec<ParsedContact>, String> {
-    let c = client()?;
-    let contacts = sync_carddav_with_client(&c, base_url, auth).await?;
-    Ok(contacts.into_iter().map(|card| card.contact).collect())
-}
-
 pub async fn sync_carddav_with_tls_options(
     base_url: &str,
     auth: &DavAuth,
@@ -387,49 +354,6 @@ pub async fn sync_carddav_with_tls_options(
     let c = client_with_tls_options(trusted_cert_der, accept_invalid_tls)?;
     let contacts = sync_carddav_with_client(&c, base_url, auth).await?;
     Ok(contacts.into_iter().map(|card| card.contact).collect())
-}
-
-pub async fn discover_carddav_addressbook(
-    base_url: &str,
-    auth: &DavAuth,
-) -> Result<String, String> {
-    let c = client()?;
-    discover_addressbook(&c, base_url, auth)
-        .await
-        .ok_or_else(|| "no CardDAV addressbook discovered".to_string())
-}
-
-pub async fn carddav_sync_token(base_url: &str, auth: &DavAuth) -> Result<Option<String>, String> {
-    let c = client()?;
-    let addressbook = discover_addressbook(&c, base_url, auth)
-        .await
-        .unwrap_or_else(|| base_url.to_owned());
-    collection_sync_token(&c, &addressbook, auth).await
-}
-
-pub async fn put_carddav_contact(
-    href: &str,
-    auth: &DavAuth,
-    raw_vcard: &str,
-) -> Result<(), String> {
-    let c = client()?;
-    dav(
-        &c,
-        "PUT",
-        href,
-        auth,
-        "0",
-        "text/vcard; charset=utf-8",
-        raw_vcard,
-    )
-    .await?;
-    Ok(())
-}
-
-pub async fn delete_carddav_contact(href: &str, auth: &DavAuth) -> Result<(), String> {
-    let c = client()?;
-    dav(&c, "DELETE", href, auth, "0", "text/plain", "").await?;
-    Ok(())
 }
 
 async fn sync_carddav_with_client(
@@ -457,24 +381,6 @@ async fn sync_carddav_with_client(
     )
     .await?;
     Ok(extract_carddav_contacts(&xml, &addressbook))
-}
-
-async fn collection_sync_token(
-    c: &reqwest::Client,
-    addressbook: &str,
-    auth: &DavAuth,
-) -> Result<Option<String>, String> {
-    let xml = dav(
-        c,
-        "PROPFIND",
-        addressbook,
-        auth,
-        "0",
-        "application/xml; charset=utf-8",
-        r#"<d:propfind xmlns:d="DAV:"><d:prop><d:sync-token/></d:prop></d:propfind>"#,
-    )
-    .await?;
-    Ok(extract_texts(&xml, b"sync-token").into_iter().next())
 }
 
 async fn discover_addressbook(c: &reqwest::Client, base: &str, auth: &DavAuth) -> Option<String> {
@@ -523,215 +429,6 @@ async fn discover_addressbook(c: &reqwest::Client, base: &str, auth: &DavAuth) -
     .ok()?;
     let href = first_href_with_resourcetype(&list_xml, b"addressbook")?;
     resolve(base, &href)
-}
-
-pub async fn graph_contacts(
-    access_token: &str,
-    delta_link: Option<&str>,
-) -> Result<GraphSyncPage, String> {
-    let c = client()?;
-    let url = delta_link.unwrap_or("https://graph.microsoft.com/v1.0/me/contacts/delta");
-    let json: Value = c
-        .get(url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    let contacts = json["value"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(graph_contact)
-        .collect();
-    Ok(GraphSyncPage {
-        contacts,
-        delta_link: json["@odata.deltaLink"].as_str().map(str::to_owned),
-        next_link: json["@odata.nextLink"].as_str().map(str::to_owned),
-    })
-}
-
-pub async fn graph_contact_folders(access_token: &str) -> Result<Vec<(String, String)>, String> {
-    let c = client()?;
-    let json: Value = c
-        .get("https://graph.microsoft.com/v1.0/me/contactFolders")
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(json["value"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|folder| {
-            Some((
-                folder["id"].as_str()?.to_owned(),
-                folder["displayName"].as_str()?.to_owned(),
-            ))
-        })
-        .collect())
-}
-
-pub async fn graph_create_contact(
-    access_token: &str,
-    contact: &ParsedContact,
-) -> Result<String, String> {
-    let c = client()?;
-    let json: Value = c
-        .post("https://graph.microsoft.com/v1.0/me/contacts")
-        .bearer_auth(access_token)
-        .json(&to_graph_contact(contact))
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(json["id"].as_str().unwrap_or(&contact.uid).to_owned())
-}
-
-pub async fn graph_update_contact(
-    access_token: &str,
-    remote_id: &str,
-    contact: &ParsedContact,
-) -> Result<(), String> {
-    let c = client()?;
-    c.patch(format!(
-        "https://graph.microsoft.com/v1.0/me/contacts/{remote_id}"
-    ))
-    .bearer_auth(access_token)
-    .json(&to_graph_contact(contact))
-    .send()
-    .await
-    .map_err(explain_transport_error)?
-    .error_for_status()
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-pub async fn graph_delete_contact(access_token: &str, remote_id: &str) -> Result<(), String> {
-    let c = client()?;
-    c.delete(format!(
-        "https://graph.microsoft.com/v1.0/me/contacts/{remote_id}"
-    ))
-    .bearer_auth(access_token)
-    .send()
-    .await
-    .map_err(explain_transport_error)?
-    .error_for_status()
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-pub async fn google_connections(
-    access_token: &str,
-    sync_token: Option<&str>,
-) -> Result<GoogleSyncPage, String> {
-    let c = client()?;
-    let mut url = Url::parse("https://people.googleapis.com/v1/people/me/connections")
-        .map_err(|e| e.to_string())?;
-    url.query_pairs_mut()
-        .append_pair(
-            "personFields",
-            "names,emailAddresses,phoneNumbers,addresses,organizations,biographies,photos",
-        )
-        .append_pair("requestSyncToken", "true");
-    if let Some(token) = sync_token {
-        url.query_pairs_mut().append_pair("syncToken", token);
-    }
-    let json: Value = c
-        .get(url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    let contacts = json["connections"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(google_contact)
-        .collect();
-    Ok(GoogleSyncPage {
-        contacts,
-        sync_token: json["nextSyncToken"].as_str().map(str::to_owned),
-        next_page_token: json["nextPageToken"].as_str().map(str::to_owned),
-    })
-}
-
-pub async fn google_create_contact(
-    access_token: &str,
-    contact: &ParsedContact,
-) -> Result<String, String> {
-    let c = client()?;
-    let json: Value = c
-        .post("https://people.googleapis.com/v1/people:createContact")
-        .bearer_auth(access_token)
-        .json(&to_google_contact(contact))
-        .send()
-        .await
-        .map_err(explain_transport_error)?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(json["resourceName"]
-        .as_str()
-        .unwrap_or(&contact.uid)
-        .to_owned())
-}
-
-pub async fn google_update_contact(
-    access_token: &str,
-    resource_name: &str,
-    contact: &ParsedContact,
-) -> Result<(), String> {
-    let c = client()?;
-    c.patch(format!(
-        "https://people.googleapis.com/v1/{resource_name}:updateContact"
-    ))
-    .bearer_auth(access_token)
-    .query(&[(
-        "updatePersonFields",
-        "names,emailAddresses,phoneNumbers,addresses,organizations,biographies",
-    )])
-    .json(&to_google_contact(contact))
-    .send()
-    .await
-    .map_err(explain_transport_error)?
-    .error_for_status()
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-pub async fn google_delete_contact(access_token: &str, resource_name: &str) -> Result<(), String> {
-    let c = client()?;
-    c.delete(format!(
-        "https://people.googleapis.com/v1/{resource_name}:deleteContact"
-    ))
-    .bearer_auth(access_token)
-    .send()
-    .await
-    .map_err(explain_transport_error)?
-    .error_for_status()
-    .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 pub fn parse_vcard(raw: &str) -> Option<ParsedContact> {
@@ -1181,40 +878,6 @@ fn local_name(qname: &[u8]) -> &[u8] {
         Some(i) => &qname[i + 1..],
         None => qname,
     }
-}
-
-fn extract_texts(xml: &str, target: &[u8]) -> Vec<String> {
-    let mut reader = Reader::from_str(xml);
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut buf = String::new();
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) if local_name(e.name().as_ref()) == target => {
-                depth += 1;
-                if depth == 1 {
-                    buf.clear();
-                }
-            }
-            Ok(Event::Text(e)) if depth > 0 => {
-                if let Ok(t) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
-                    buf.push_str(&t);
-                }
-            }
-            Ok(Event::CData(e)) if depth > 0 => {
-                buf.push_str(&String::from_utf8_lossy(&e.into_inner()));
-            }
-            Ok(Event::End(e)) if local_name(e.name().as_ref()) == target && depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    out.push(std::mem::take(&mut buf));
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-    }
-    out
 }
 
 fn first_href_in_elem(xml: &str, target: &[u8]) -> Option<String> {

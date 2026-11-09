@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ensureFreshAccessToken } from '@/shared/api'
 import { getStoredPushSubscriptionId } from '@/shared/hooks/usePushNotifications'
 import type { SyncStatus } from '@/shared/types'
+import { PROGRESS_REFRESH_INTERVAL_MS, createMailRefreshScheduler } from '@/shared/lib/mailRefreshScheduler'
 import { z } from 'zod'
 
 interface PushPayload {
@@ -71,20 +72,16 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
 
     let source: EventSource | null = null
     let retry: ReturnType<typeof setTimeout> | undefined
-    let refresh: ReturnType<typeof setTimeout> | undefined
     let closed = false
     let hadConnection = false
 
-    const scheduleMailRefresh = () => {
-      if (refresh) clearTimeout(refresh)
-      refresh = setTimeout(() => {
-        refresh = undefined
-        queryClient.invalidateQueries({ queryKey: ['folders'] })
-        queryClient.invalidateQueries({ queryKey: ['unified'] })
-        queryClient.invalidateQueries({ queryKey: ['unified-counts'] })
-        queryClient.invalidateQueries({ queryKey: ['folder-messages'] })
-      }, 500)
-    }
+    const refresh = createMailRefreshScheduler(() => {
+      queryClient.invalidateQueries({ queryKey: ['folders'] })
+      queryClient.invalidateQueries({ queryKey: ['unified'] })
+      queryClient.invalidateQueries({ queryKey: ['unified-counts'] })
+      queryClient.invalidateQueries({ queryKey: ['folder-messages'] })
+    })
+    const scheduleMailRefresh = () => refresh.request()
 
     const connect = async () => {
       const token = await ensureFreshAccessToken()
@@ -142,12 +139,14 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
         if (!status.account_id) return
         const previous = queryClient.getQueryData<SyncStatus>(['sync-status', status.account_id])
         queryClient.setQueryData(['sync-status', status.account_id], status)
-        if (
-          previous?.state !== status.state ||
-          previous?.synced !== status.synced ||
-          previous?.total !== status.total
-        ) {
+        if (previous?.state !== status.state) {
+          // A cycle started or finished: reconcile promptly.
           scheduleMailRefresh()
+        } else if (previous.synced !== status.synced || previous.total !== status.total) {
+          // Progress during a backfill: new rows should still stream into the
+          // open list, but a refetch of every loaded page several times a
+          // second is what made the list stutter while syncing.
+          refresh.request({ minInterval: PROGRESS_REFRESH_INTERVAL_MS })
         }
       })
 
@@ -178,7 +177,7 @@ export function useMailNotifications(enabled: boolean, onSendStatus?: (status: S
     return () => {
       closed = true
       if (retry) clearTimeout(retry)
-      if (refresh) clearTimeout(refresh)
+      refresh.cancel()
       source?.close()
     }
   }, [queryClient])

@@ -464,10 +464,19 @@ function MessageCard({
   const color = colorFor(message.account_id)
   const isSpam = isSpamMessage(displayed)
 
+  // One attempt per opening of a message. Retriggering on `is_read` alone
+  // looped on a failed request (the rollback leaves the message unread, which
+  // is exactly what fired the effect) and undid a deliberate "mark unread"
+  // on the open message right away.
+  const markReadAttemptedFor = useRef<string | null>(null)
   useEffect(() => {
-    if (expanded && bodyLoaded && !displayed.is_read && !markRead.isPending) {
-      markRead.mutate({ id: displayed.id, is_read: true })
+    if (!expanded) {
+      markReadAttemptedFor.current = null
+      return
     }
+    if (!bodyLoaded || displayed.is_read || markReadAttemptedFor.current === displayed.id) return
+    markReadAttemptedFor.current = displayed.id
+    markRead.mutate({ id: displayed.id, is_read: true })
   }, [bodyLoaded, displayed.id, displayed.is_read, expanded, markRead])
 
   const headers = useMemo(() => (expanded ? messageHeaders(displayed) : []), [expanded, displayed])

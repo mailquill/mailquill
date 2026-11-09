@@ -31,6 +31,7 @@ interface MessageRowProps {
   onContextMenu: (event: React.MouseEvent, message: Message) => void
   onRowMouseDown: (index: number, id: string) => void
   onRowWarm: (index: number, id: string) => void
+  onRowCool: () => void
 }
 
 const DENSITY_PAD: Record<string, string> = {
@@ -63,6 +64,7 @@ export function MessageRow({
   onContextMenu,
   onRowMouseDown,
   onRowWarm,
+  onRowCool,
 }: MessageRowProps) {
   const { t } = useTranslation()
   const density = useUiPrefs((s) => s.density)
@@ -93,7 +95,9 @@ export function MessageRow({
         e.dataTransfer.setData('text/plain', message.id)
       }}
       onMouseEnter={() => onRowWarm(index, message.id)}
+      onMouseLeave={onRowCool}
       onFocus={() => onRowWarm(index, message.id)}
+      onBlur={onRowCool}
       className={cn(
         'relative flex w-full select-none items-start gap-2.5 border-b border-secondary pl-4 pr-3 text-left transition-colors',
         DENSITY_PAD[density],
@@ -259,6 +263,11 @@ interface MessageListProps {
   scope?: BulkScope
 }
 
+// Hover intent before a row's body is prefetched. Lazy-synced messages have
+// no stored body, so each prefetch is a provider login server-side; sweeping
+// the pointer across the list must not start one per row.
+const PREFETCH_HOVER_DELAY_MS = 150
+
 // Row-height estimates per density; real heights are measured after render.
 const DENSITY_ESTIMATE: Record<string, number> = {
   compact: 38,
@@ -365,9 +374,21 @@ export function MessageList({
     applyRange(index)
   }
 
+  const prefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(prefetchTimer.current), [])
+
   function onRowWarm(index: number, id: string) {
-    void prefetchMessage(queryClient, id)
     if (drag.current.active) applyRange(index)
+    clearTimeout(prefetchTimer.current)
+    prefetchTimer.current = setTimeout(() => {
+      prefetchTimer.current = undefined
+      void prefetchMessage(queryClient, id)
+    }, PREFETCH_HOVER_DELAY_MS)
+  }
+
+  function onRowCool() {
+    clearTimeout(prefetchTimer.current)
+    prefetchTimer.current = undefined
   }
 
   function toggleCheck(id: string) {
@@ -505,6 +526,7 @@ export function MessageList({
                   onContextMenu={openMenu}
                   onRowMouseDown={onRowMouseDown}
                   onRowWarm={onRowWarm}
+                  onRowCool={onRowCool}
                 />
               </div>
             )

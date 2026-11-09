@@ -67,7 +67,7 @@ export function UnifiedMailboxPage() {
         </header>
         <MessageList
           messages={messages}
-          activeId={selectedMessage?.id}
+          activeId={selectedThreadId || undefined}
           onSelect={handleSelect}
           loading={isLoading}
           onLoadMore={fetchNextPage}

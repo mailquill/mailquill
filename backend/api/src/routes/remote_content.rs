@@ -194,7 +194,10 @@ fn parse_allowed_url(raw: &str) -> Result<Url, AppError> {
             "local image hosts are not allowed".into(),
         ));
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // IPv6 literals arrive bracketed (`[::1]`); strip them or the literal
+    // check never matches and the address only fails later at the lookup.
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<IpAddr>() {
         if is_private_ip(ip) {
             return Err(AppError::BadGateway(
                 "private image hosts are not allowed".into(),
@@ -362,6 +365,35 @@ mod tests {
     // resolve as a *successful* <img> load — 204 has no decodable body, so
     // the browser fires the error event and shows a broken-image icon
     // instead of the blank space a failed remote image should render as.
+    #[test]
+    fn only_public_http_urls_are_accepted() {
+        for rejected in [
+            "ftp://example.test/a.png",
+            "javascript:alert(1)",
+            "data:image/png;base64,AAAA",
+            "http://localhost/a.png",
+            "http://app.localhost/a.png",
+            "http://127.0.0.1/a.png",
+            "http://[::1]/a.png",
+            "http://10.0.0.5:8080/a.png",
+            "not a url",
+        ] {
+            assert!(parse_allowed_url(rejected).is_err(), "{rejected}");
+        }
+        assert!(parse_allowed_url("https://images.example.test/a.png").is_ok());
+        assert!(parse_allowed_url("http://93.184.216.34/a.png").is_ok());
+    }
+
+    #[tokio::test]
+    async fn literal_hosts_are_pinned_without_a_lookup() {
+        let url = Url::parse("http://93.184.216.34:8080/a.png").unwrap();
+        let addrs = ensure_public_host(&url).await.unwrap();
+        assert_eq!(addrs, vec!["93.184.216.34:8080".parse().unwrap()]);
+
+        let private = Url::parse("http://[::ffff:10.0.0.1]/a.png").unwrap();
+        assert!(ensure_public_host(&private).await.is_err());
+    }
+
     #[test]
     fn embedded_ipv4_forms_are_treated_like_their_ipv4_address() {
         for blocked in [

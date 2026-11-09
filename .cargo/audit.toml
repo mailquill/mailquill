@@ -1,0 +1,22 @@
+# cargo-audit configuration (also read by the rustsec/audit-check action).
+#
+# Every ignored advisory below is blocked by an upstream pin, not a choice:
+# check `cargo audit` after dependency updates and drop an entry as soon as
+# the fixed version resolves. `cargo update --verbose --dry-run` shows what
+# still holds a crate back.
+
+[advisories]
+ignore = [
+    # libsqlite3-sys 0.37 via C SQLite CVE-2026-119375 (medium). Fixed in
+    # 0.39, but sqlx-sqlite 0.9.0 requires `<0.38`; needs a sqlx release.
+    "RUSTSEC-2026-0459",
+    # rsa 0.9 Marvin timing side channel (medium). Pulled in by jsonwebtoken
+    # 11 and jwt-simple 0.12 (via web-push-native 0.5); neither path performs
+    # RSA private-key operations here. Fixed in rsa 0.10, which no release of
+    # either dependant uses yet.
+    "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5 timing variability. Comes with k256/p256 0.13 through
+    # jwt-simple 0.12, pinned by web-push-native 0.5. Fixed in 0.7.6, which
+    # needs the elliptic-curve 0.14 generation upstream.
+    "RUSTSEC-2026-0387",
+]

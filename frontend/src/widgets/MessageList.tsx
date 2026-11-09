@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -25,7 +25,7 @@ interface MessageRowProps {
   index: number
   isActive: boolean
   checked: boolean
-  onClick: () => void
+  onSelect: (message: Message) => void
   onToggleCheck: (id: string) => void
   onToggleFlag: (message: Message) => void
   onContextMenu: (event: React.MouseEvent, message: Message) => void
@@ -53,12 +53,15 @@ function Checkbox({ checked }: { checked: boolean }) {
   )
 }
 
-export function MessageRow({
+// Memoised: the list re-renders on every selection change and on each
+// drag-select mousemove, and only the rows whose props changed should repaint.
+// Every callback handed down keeps a stable identity (see MessageList).
+export const MessageRow = memo(function MessageRow({
   message,
   index,
   isActive,
   checked,
-  onClick,
+  onSelect,
   onToggleCheck,
   onToggleFlag,
   onContextMenu,
@@ -86,7 +89,7 @@ export function MessageRow({
 
   return (
     <button
-      onClick={() => onClick()}
+      onClick={() => onSelect(message)}
       onContextMenu={(e) => onContextMenu(e, message)}
       draggable
       onDragStart={(e) => {
@@ -240,7 +243,7 @@ export function MessageRow({
       </div>
     </button>
   )
-}
+})
 
 function fromDomain(value: string): string {
   const { email } = parseFromAddr(value)
@@ -354,51 +357,77 @@ export function MessageList({
     return () => window.removeEventListener('mouseup', up)
   }, [])
 
-  function applyRange(toIndex: number) {
+  // The row callbacks below must keep their identity across renders so the
+  // memoised rows skip re-rendering; values they need at call time are read
+  // through refs instead of being closed over.
+  const messagesRef = useRef(messages)
+  const checkedRef = useRef(checked)
+  const onSelectRef = useRef(onSelect)
+  useEffect(() => {
+    messagesRef.current = messages
+    checkedRef.current = checked
+    onSelectRef.current = onSelect
+  })
+
+  const applyRange = useCallback((toIndex: number) => {
     const d = drag.current
     if (!d.active || d.anchor < 0) return
     const lo = Math.min(d.anchor, toIndex)
     const hi = Math.max(d.anchor, toIndex)
     const next = new Set(d.base)
     for (let i = lo; i <= hi; i++) {
-      const msg = messages[i]
+      const msg = messagesRef.current[i]
       if (!msg) continue
       if (d.additive) next.add(msg.id)
       else next.delete(msg.id)
     }
     setChecked(next)
-  }
+  }, [])
 
-  function onRowMouseDown(index: number, id: string) {
-    drag.current = { active: true, anchor: index, base: new Set(checked), additive: !checked.has(id) }
-    applyRange(index)
-  }
+  const onRowMouseDown = useCallback(
+    (index: number, id: string) => {
+      const current = checkedRef.current
+      drag.current = { active: true, anchor: index, base: new Set(current), additive: !current.has(id) }
+      applyRange(index)
+    },
+    [applyRange],
+  )
 
   const prefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => () => clearTimeout(prefetchTimer.current), [])
 
-  function onRowWarm(index: number, id: string) {
-    if (drag.current.active) applyRange(index)
-    clearTimeout(prefetchTimer.current)
-    prefetchTimer.current = setTimeout(() => {
-      prefetchTimer.current = undefined
-      void prefetchMessage(queryClient, id)
-    }, PREFETCH_HOVER_DELAY_MS)
-  }
+  const onRowWarm = useCallback(
+    (index: number, id: string) => {
+      if (drag.current.active) applyRange(index)
+      clearTimeout(prefetchTimer.current)
+      prefetchTimer.current = setTimeout(() => {
+        prefetchTimer.current = undefined
+        void prefetchMessage(queryClient, id)
+      }, PREFETCH_HOVER_DELAY_MS)
+    },
+    [applyRange, queryClient],
+  )
 
-  function onRowCool() {
+  const onRowCool = useCallback(() => {
     clearTimeout(prefetchTimer.current)
     prefetchTimer.current = undefined
-  }
+  }, [])
 
-  function toggleCheck(id: string) {
+  const toggleCheck = useCallback((id: string) => {
     setChecked((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
       return next
     })
-  }
+  }, [])
+
+  const selectRow = useCallback((message: Message) => onSelectRef.current(message), [])
+  const { mutate: mutateFlag } = toggleFlag
+  const flagRow = useCallback(
+    (message: Message) => mutateFlag({ id: message.id, is_flagged: !message.is_flagged }),
+    [mutateFlag],
+  )
 
   function bulk(action: 'read' | 'archive' | 'delete' | 'flag') {
     if (selectAllMatching && scope) {
@@ -425,10 +454,10 @@ export function MessageList({
     setChecked(allOnPage ? new Set() : new Set(messages.map((m) => m.id)))
   }
 
-  function openMenu(event: React.MouseEvent, message: Message) {
+  const openMenu = useCallback((event: React.MouseEvent, message: Message) => {
     event.preventDefault()
     setMenu({ x: event.clientX, y: event.clientY, message })
-  }
+  }, [])
 
   if (loading) {
     return (
@@ -520,9 +549,9 @@ export function MessageList({
                   index={item.index}
                   isActive={!!activeId && (msg.id === activeId || msg.thread_id === activeId)}
                   checked={checked.has(msg.id)}
-                  onClick={() => onSelect(msg)}
+                  onSelect={selectRow}
                   onToggleCheck={toggleCheck}
-                  onToggleFlag={(m) => toggleFlag.mutate({ id: m.id, is_flagged: !m.is_flagged })}
+                  onToggleFlag={flagRow}
                   onContextMenu={openMenu}
                   onRowMouseDown={onRowMouseDown}
                   onRowWarm={onRowWarm}

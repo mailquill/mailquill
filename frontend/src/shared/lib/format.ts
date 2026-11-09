@@ -1,17 +1,29 @@
+// `toLocale*String` builds a fresh Intl formatter per call, and the message
+// list formats one date per visible row on every render. Build the three
+// formatters once (lazily, so module load stays cheap) and reuse them.
+let dateFormatters: { time: Intl.DateTimeFormat; weekday: Intl.DateTimeFormat; monthDay: Intl.DateTimeFormat } | null =
+  null
+
+function formatters() {
+  dateFormatters ??= {
+    time: new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }),
+    weekday: new Intl.DateTimeFormat(undefined, { weekday: 'short' }),
+    monthDay: new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }),
+  }
+  return dateFormatters
+}
+
 export function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return ''
   const date = new Date(dateStr)
+  if (Number.isNaN(date.getTime())) return ''
   const now = new Date()
   const diff = now.getTime() - date.getTime()
   const days = Math.floor(diff / 86400_000)
 
-  if (days === 0) {
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  }
-  if (days < 7) {
-    return date.toLocaleDateString(undefined, { weekday: 'short' })
-  }
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  if (days === 0) return formatters().time.format(date)
+  if (days < 7) return formatters().weekday.format(date)
+  return formatters().monthDay.format(date)
 }
 
 /** Localized relative time from now, e.g. "vor 13 Min." / "13 min ago". */

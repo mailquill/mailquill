@@ -47,6 +47,8 @@ pub struct AppState {
     pub web_push_client: Option<reqwest::Client>,
     /// Broadcast of new-message events to connected SSE clients.
     pub events: broadcast::Sender<UserEvent>,
+    /// Per-account cap on concurrent on-demand body downloads.
+    pub body_fetch_limiter: Arc<crate::body_fetch::BodyFetchLimiter>,
     /// Whether approved remote email images should be fetched through the backend.
     pub remote_image_proxy_enabled: bool,
     /// Whether /api/auth/register accepts new sign-ups.

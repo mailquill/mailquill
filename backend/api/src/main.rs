@@ -157,6 +157,7 @@ async fn main() {
         vapid,
         web_push_client,
         events,
+        body_fetch_limiter: Arc::new(Default::default()),
         remote_image_proxy_enabled: settings.remote_image_proxy_enabled,
         registration_enabled: settings.registration_enabled,
     };

@@ -383,14 +383,16 @@ pub async fn mark_read(
     let user_db = state.user_db_pool.get(&user.0).await?;
     require_message_exists(&user_db, &message_id).await?;
 
+    // Record the pending push *before* flipping the local flag: the flag
+    // reconciliation treats a local value without a pending row as stale and
+    // copies the server's (still old) value back over it.
+    queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", req.is_read).await;
+
     sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
         .bind(req.is_read)
         .bind(&message_id)
         .execute(&user_db)
         .await?;
-
-    // Queue IMAP flag update
-    queue_imap_flag(&state, &user.0, &user_db, &message_id, "seen", req.is_read).await;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -404,12 +406,7 @@ pub async fn toggle_flag(
     let user_db = state.user_db_pool.get(&user.0).await?;
     require_message_exists(&user_db, &message_id).await?;
 
-    sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
-        .bind(req.is_flagged)
-        .bind(&message_id)
-        .execute(&user_db)
-        .await?;
-
+    // Pending row first, local flip second — see `mark_read`.
     queue_imap_flag(
         &state,
         &user.0,
@@ -419,6 +416,12 @@ pub async fn toggle_flag(
         req.is_flagged,
     )
     .await;
+
+    sqlx::query("UPDATE messages SET is_flagged = ? WHERE id = ?")
+        .bind(req.is_flagged)
+        .bind(&message_id)
+        .execute(&user_db)
+        .await?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -441,6 +444,14 @@ pub async fn archive_message(
         ));
     }
     let (account_id, uid, folder_full_path) = get_message_location(&user_db, &message_id).await?;
+
+    // Hide the row before queueing the IMAP side, exactly like delete/move do.
+    // Without this the list refetch right after the optimistic removal brings
+    // the message back until a later sync cycle notices the server-side move.
+    sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+        .bind(&message_id)
+        .execute(&user_db)
+        .await?;
 
     // Queue IMAP MOVE to Archive
     state
@@ -707,6 +718,15 @@ async fn fetch_body_on_demand(
     folder_id: String,
     uid: u32,
 ) -> Result<(Option<String>, Option<String>), AppError> {
+    // The list prefetches details on hover, so a quick sweep over the rows
+    // fires one of these per row. Cap concurrent provider logins per account,
+    // and once a slot is free re-check the store: another request may have
+    // downloaded this very body in the meantime.
+    let _permit = state.body_fetch_limiter.acquire(&account_id).await;
+    if let Some(stored) = load_stored_body(state, user_db, message_id).await {
+        return Ok(stored);
+    }
+
     // Get account credentials + backend kind
     let row: Option<(Vec<u8>, String, String, i64, String, Option<String>, String)> = sqlx::query_as(
         "SELECT credentials_encrypted, primary_email, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
@@ -782,6 +802,36 @@ async fn fetch_body_on_demand(
     .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(result)
+}
+
+/// The already downloaded body of a message, if the blob store has one.
+///
+/// Mirrors the read path in `get_message`; returns `None` when no body row
+/// exists or the blob cannot be read, so the caller falls back to the provider.
+async fn load_stored_body(
+    state: &AppState,
+    user_db: &sqlx::SqlitePool,
+    message_id: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let blob_key: String =
+        sqlx::query_scalar("SELECT blob_key FROM message_bodies WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_optional(user_db)
+            .await
+            .ok()
+            .flatten()?;
+    let compressed = state.blob_store.get(&blob_key).await.ok()?;
+    let decompressed = mailquill_core::compression::decompress_body(&compressed).ok()?;
+    match serde_json::from_slice::<serde_json::Value>(&decompressed) {
+        Ok(v) => Some((
+            v["html"].as_str().map(|s| s.to_owned()),
+            v["text"].as_str().map(|s| s.to_owned()),
+        )),
+        Err(_) => Some((
+            None,
+            Some(String::from_utf8_lossy(&decompressed).into_owned()),
+        )),
+    }
 }
 
 pub async fn queue_imap_flag(

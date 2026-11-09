@@ -96,6 +96,9 @@ async fn run_sync_task_with_context(
     do_sync(&account_id, &user_id, &app_state).await;
 
     let mut ticker = time::interval(time::Duration::from_secs(context.interval_secs as u64));
+    // A cycle that outlasts the interval must not be followed by a burst of
+    // catch-up ticks; one poll after the next full interval is enough.
+    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     ticker.reset();
 
     // In idle mode a dedicated IMAP connection triggers an immediate poll for
@@ -121,37 +124,67 @@ async fn run_sync_task_with_context(
     };
 
     loop {
+        // Wait for one wake-up, then take everything already queued behind it.
+        // Queued commands run before the poll (a move should reach the server
+        // before the cycle that reconciles it), and any number of poll requests
+        // — IDLE pokes, moves, manual refreshes — collapse into a single cycle
+        // instead of one full sync each.
+        let mut poll = false;
+        let mut commands = Vec::new();
         tokio::select! {
-            _ = ticker.tick() => {
-                do_sync(&account_id, &user_id, &app_state).await;
-            }
-            cmd = rx.recv() => {
-                match cmd {
-                    Some(SyncCommand::Shutdown) | None => {
-                        info!("sync task stopping: account={account_id}");
-                        break;
-                    }
-                    Some(SyncCommand::ForcePoll) => {
-                        do_sync(&account_id, &user_id, &app_state).await;
-                    }
-                    Some(SyncCommand::IMapMove { user_id: uid, uid: msg_uid, src_folder, dest_folder, expunge }) => {
-                        if let Err(e) = do_imap_move(&account_id, &uid, msg_uid, &src_folder, &dest_folder, expunge, &app_state).await {
-                            warn!("IMAP move failed: account={account_id} user={uid} uid={msg_uid} folder={src_folder} dest={dest_folder} expunge={expunge} err={e}");
-                        }
-                    }
-                    Some(SyncCommand::FlushFlags { user_id: uid }) => {
-                        if let Err(e) = do_flush_pending_flags(&account_id, &uid, &app_state).await {
-                            warn!("flag flush failed: account={account_id} user={uid} err={e}");
-                        }
-                    }
-                    Some(SyncCommand::IMapExpunge { user_id: uid, uid: msg_uid, folder }) => {
-                        if let Err(e) = do_imap_expunge(&account_id, &uid, msg_uid, &folder, &app_state).await {
-                            warn!("IMAP expunge failed: account={account_id} user={uid} uid={msg_uid} folder={folder} err={e}");
-                        }
-                    }
-                }
+            _ = ticker.tick() => poll = true,
+            cmd = rx.recv() => match cmd {
+                Some(SyncCommand::Shutdown) | None => break,
+                Some(SyncCommand::ForcePoll) => poll = true,
+                Some(cmd) => commands.push(cmd),
             }
         }
+        let mut shutdown = false;
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                SyncCommand::Shutdown => {
+                    shutdown = true;
+                    break;
+                }
+                SyncCommand::ForcePoll => poll = true,
+                cmd => commands.push(cmd),
+            }
+        }
+
+        for cmd in commands {
+            run_queued_command(&account_id, cmd, &app_state).await;
+        }
+        if poll {
+            do_sync(&account_id, &user_id, &app_state).await;
+        }
+        if shutdown {
+            break;
+        }
+    }
+    info!("sync task stopping: account={account_id}");
+}
+
+/// Execute one queued provider command (move, flag flush, expunge). Failures
+/// are logged, never propagated: one bad uid must not take the task down.
+async fn run_queued_command(account_id: &str, cmd: SyncCommand, app_state: &Arc<dyn SyncAppState>) {
+    match cmd {
+        SyncCommand::IMapMove { user_id: uid, uid: msg_uid, src_folder, dest_folder, expunge } => {
+            if let Err(e) = do_imap_move(account_id, &uid, msg_uid, &src_folder, &dest_folder, expunge, app_state).await {
+                warn!("IMAP move failed: account={account_id} user={uid} uid={msg_uid} folder={src_folder} dest={dest_folder} expunge={expunge} err={e}");
+            }
+        }
+        SyncCommand::FlushFlags { user_id: uid } => {
+            if let Err(e) = do_flush_pending_flags(account_id, &uid, app_state).await {
+                warn!("flag flush failed: account={account_id} user={uid} err={e}");
+            }
+        }
+        SyncCommand::IMapExpunge { user_id: uid, uid: msg_uid, folder } => {
+            if let Err(e) = do_imap_expunge(account_id, &uid, msg_uid, &folder, app_state).await {
+                warn!("IMAP expunge failed: account={account_id} user={uid} uid={msg_uid} folder={folder} err={e}");
+            }
+        }
+        // Handled by the task loop itself.
+        SyncCommand::Shutdown | SyncCommand::ForcePoll => {}
     }
 }
 
@@ -1245,17 +1278,21 @@ async fn pending_flag_ops(
     .await
 }
 
-/// Pending flags of one folder, keyed by uid, for the reconciliation to skip.
+/// Pending flags of one folder's uid range, keyed by uid, for the
+/// reconciliation to skip.
 async fn pending_flags_by_uid(
     account_id: &str,
     folder_path: &str,
+    uid_range: std::ops::RangeInclusive<u32>,
     db: &sqlx::SqlitePool,
 ) -> HashMap<i64, PendingFlags> {
     let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT uid, flag FROM pending_flag_ops WHERE account_id = ? AND folder_path = ?",
+        "SELECT uid, flag FROM pending_flag_ops WHERE account_id = ? AND folder_path = ? AND uid BETWEEN ? AND ?",
     )
     .bind(account_id)
     .bind(folder_path)
+    .bind(i64::from(*uid_range.start()))
+    .bind(i64::from(*uid_range.end()))
     .fetch_all(db)
     .await
     .unwrap_or_default();
@@ -1324,16 +1361,19 @@ async fn reconcile_flags(
     db: &sqlx::SqlitePool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     const FLAG_CHUNK: u32 = 1000;
-    // Flags the user changed locally whose push has not been confirmed yet.
-    // The server's value for those is stale by definition, so keep the local
-    // one instead of reverting the user's action.
-    let pending = pending_flags_by_uid(account_id, folder_path, db).await;
     let mut start: u32 = 1;
     while start <= up_to_uid {
         let end = start.saturating_add(FLAG_CHUNK - 1).min(up_to_uid);
         let flags = provider
             .fetch_flags(folder_path, &format!("{}:{}", start, end))
             .await?;
+        // Flags the user changed locally whose push has not been confirmed yet.
+        // The server's value for those is stale by definition, so keep the
+        // local one instead of reverting the user's action. Read per chunk,
+        // after the server fetch: a folder walk can take minutes, and a flag
+        // flipped while it runs must not be reverted just because the pending
+        // row did not exist when the walk started.
+        let pending = pending_flags_by_uid(account_id, folder_path, start..=end, db).await;
         let stored_flags: HashMap<i64, (bool, bool, bool)> = sqlx::query_as::<
             _,
             (i64, bool, bool, bool),

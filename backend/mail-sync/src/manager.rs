@@ -193,6 +193,12 @@ impl SyncManager {
     }
 
     /// Queue an IMAP MOVE operation.
+    ///
+    /// Returns as soon as the command is handed off. The local row is already
+    /// hidden by the caller, so the HTTP request must not wait for the sync
+    /// task to drain its channel — a long cycle would otherwise hold every
+    /// delete/move/archive request (and, through the browser's per-host
+    /// connection limit, the whole UI) until it finishes.
     pub async fn queue_imap_move(
         &self,
         user_id: String,
@@ -203,15 +209,32 @@ impl SyncManager {
         expunge: bool,
     ) {
         if let Some(tx) = self.task_sender(&account_id).await {
-            let _ = tx
-                .send(SyncCommand::IMapMove {
+            Self::deliver(
+                tx,
+                SyncCommand::IMapMove {
                     user_id,
                     uid,
                     src_folder,
                     dest_folder,
                     expunge,
-                })
-                .await;
+                },
+            );
+        }
+    }
+
+    /// Hand a command to a sync task without waiting for channel capacity.
+    ///
+    /// A full channel means the task is busy with a long cycle; the send then
+    /// completes in the background once the task drains the queue.
+    fn deliver(tx: mpsc::Sender<SyncCommand>, command: SyncCommand) {
+        match tx.try_send(command) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(command)) => {
+                tokio::spawn(async move {
+                    let _ = tx.send(command).await;
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 
@@ -227,7 +250,7 @@ impl SyncManager {
         }
     }
 
-    /// Queue an IMAP EXPUNGE.
+    /// Queue an IMAP EXPUNGE. Non-blocking like [`Self::queue_imap_move`].
     pub async fn queue_imap_expunge(
         &self,
         user_id: String,
@@ -236,13 +259,14 @@ impl SyncManager {
         folder: String,
     ) {
         if let Some(tx) = self.task_sender(&account_id).await {
-            let _ = tx
-                .send(SyncCommand::IMapExpunge {
+            Self::deliver(
+                tx,
+                SyncCommand::IMapExpunge {
                     user_id,
                     uid,
                     folder,
-                })
-                .await;
+                },
+            );
         }
     }
 }

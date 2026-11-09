@@ -193,6 +193,12 @@ async fn bulk_thread_action(
         }
         match action {
             ThreadAction::Archive => {
+                // Hide locally first so the list refetch after the optimistic
+                // removal does not resurrect the thread (see archive_message).
+                sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = ?")
+                    .bind(msg_id)
+                    .execute(&user_db)
+                    .await?;
                 state
                     .sync_manager
                     .queue_imap_move(
@@ -241,11 +247,8 @@ async fn bulk_thread_action(
                 }
             }
             ThreadAction::MarkRead(is_read) => {
-                sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
-                    .bind(is_read)
-                    .bind(msg_id)
-                    .execute(&user_db)
-                    .await?;
+                // Pending row before the local flip, so the flag reconciliation
+                // never mistakes the new local value for a stale one.
                 crate::routes::messages::enqueue_flag_op(
                     &state,
                     user_id,
@@ -257,6 +260,11 @@ async fn bulk_thread_action(
                     is_read,
                 )
                 .await;
+                sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
+                    .bind(is_read)
+                    .bind(msg_id)
+                    .execute(&user_db)
+                    .await?;
             }
         }
     }

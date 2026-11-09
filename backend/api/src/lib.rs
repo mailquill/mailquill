@@ -4,6 +4,7 @@
 //! under `tests/` can exercise the public API. The binary (`src/main.rs`)
 //! consumes these modules via the `api::` crate path.
 
+pub mod body_fetch;
 pub mod config;
 pub mod contact_reconcile;
 pub mod error;

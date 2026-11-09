@@ -198,7 +198,6 @@ dependencies = [
  "contact-sync",
  "db",
  "figment",
- "futures",
  "hex",
  "hickory-resolver",
  "mail-sync",

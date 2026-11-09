@@ -410,3 +410,17 @@ mod tests {
         assert_eq!(detail, "SMTP authentication failed");
     }
 }
+
+#[cfg(test)]
+mod header_safe_tests {
+    use super::header_safe;
+
+    #[test]
+    fn line_breaks_cannot_start_a_new_header() {
+        assert_eq!(
+            header_safe("Invoice\r\nBcc: attacker@example.test"),
+            "Invoice  Bcc: attacker@example.test"
+        );
+        assert_eq!(header_safe("plain subject"), "plain subject");
+    }
+}

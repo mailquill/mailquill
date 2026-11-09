@@ -356,6 +356,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deliver_returns_at_once_and_the_command_still_arrives() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(SyncCommand::ForcePoll).unwrap();
+
+        // Channel is full: the HTTP handler calling this must not wait.
+        tokio::time::timeout(Duration::from_millis(50), async {
+            SyncManager::deliver(
+                tx.clone(),
+                SyncCommand::IMapExpunge {
+                    user_id: "user".into(),
+                    uid: 7,
+                    folder: "Trash".into(),
+                },
+            );
+        })
+        .await
+        .expect("deliver must not block on a full channel");
+
+        assert!(matches!(rx.recv().await, Some(SyncCommand::ForcePoll)));
+        let delivered = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("the background send completes once the task drains");
+        assert!(matches!(
+            delivered,
+            Some(SyncCommand::IMapExpunge { uid: 7, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_to_a_stopped_task_is_a_no_op() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        SyncManager::deliver(tx, SyncCommand::ForcePoll);
+    }
+
+    #[tokio::test]
     async fn a_busy_account_does_not_block_commands_for_other_accounts() {
         let manager = Arc::new(SyncManager::new());
         let _rx = busy_account(&manager).await;

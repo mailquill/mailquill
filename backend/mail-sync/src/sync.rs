@@ -1966,3 +1966,135 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod reconciliation_tests {
+    use super::*;
+    use crate::session::FetchedMessage;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn db() -> sqlx::SqlitePool {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE messages (
+                 id TEXT NOT NULL PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                 account_id TEXT NOT NULL,
+                 folder_id TEXT NOT NULL,
+                 uid INTEGER NOT NULL,
+                 message_id_header TEXT,
+                 thread_id TEXT,
+                 is_read INTEGER NOT NULL DEFAULT 0,
+                 is_flagged INTEGER NOT NULL DEFAULT 0,
+                 is_deleted INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE(folder_id, uid)
+             );
+             CREATE TABLE pending_flag_ops (
+                 id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                 account_id TEXT NOT NULL,
+                 folder_path TEXT NOT NULL,
+                 uid INTEGER NOT NULL,
+                 flag TEXT NOT NULL,
+                 value INTEGER NOT NULL,
+                 attempts INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE (account_id, folder_path, uid, flag)
+             );",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        db
+    }
+
+    async fn flags(db: &sqlx::SqlitePool, uid: i64) -> (bool, bool, bool) {
+        sqlx::query_as("SELECT is_read, is_flagged, is_deleted FROM messages WHERE folder_id = 'f1' AND uid = ?")
+            .bind(uid)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn whole_folder_reconciliation_applies_server_flags_keeps_pending_and_hides_expunged() {
+        let db = db().await;
+        sqlx::raw_sql(
+            "INSERT INTO messages (account_id, folder_id, uid, is_read, is_flagged, is_deleted) VALUES
+                 ('acc', 'f1', 1, 0, 0, 0),   -- server now says seen + flagged
+                 ('acc', 'f1', 2, 1, 0, 0),   -- read locally, push pending, server still unseen
+                 ('acc', 'f1', 3, 0, 0, 0),   -- gone from the server
+                 ('acc', 'f1', 4, 0, 0, 1),   -- deleted locally; server still lists it live
+                 ('acc', 'f1', 9, 0, 0, 0);   -- beyond the reconciled range: untouched
+             INSERT INTO pending_flag_ops (account_id, folder_path, uid, flag, value)
+                 VALUES ('acc', 'INBOX', 2, 'seen', 1);",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        apply_flag_reconciliation(
+            "acc",
+            "f1",
+            "INBOX",
+            1..=4,
+            vec![
+                (1, true, true, false),
+                (2, false, false, false),
+                (4, true, false, false),
+            ],
+            &db,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(flags(&db, 1).await, (true, true, false), "server flags copied");
+        assert_eq!(flags(&db, 2).await, (true, false, false), "pending local read state kept");
+        assert_eq!(flags(&db, 3).await, (false, false, true), "missing uid marked expunged");
+        assert_eq!(flags(&db, 4).await, (true, false, true), "local delete never undone");
+        assert_eq!(flags(&db, 9).await, (false, false, false), "out-of-range rows untouched");
+    }
+
+    #[tokio::test]
+    async fn referenced_threads_resolves_only_the_ids_a_chunk_names() {
+        let db = db().await;
+        sqlx::raw_sql(
+            "INSERT INTO messages (account_id, folder_id, uid, message_id_header, thread_id) VALUES
+                 ('acc', 'f1', 1, 'root@example.test', 'thread-root'),
+                 ('acc', 'f1', 2, 'other@example.test', 'thread-other'),
+                 ('acc', 'f1', 3, 'orphan@example.test', NULL),
+                 ('other-account', 'f9', 1, 'foreign@example.test', 'thread-foreign');",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let chunk = vec![
+            FetchedMessage {
+                uid: 10,
+                in_reply_to: Some("<root@example.test>".into()),
+                ..FetchedMessage::default()
+            },
+            FetchedMessage {
+                uid: 11,
+                references: Some("<a@example.test> <orphan@example.test> <foreign@example.test>".into()),
+                ..FetchedMessage::default()
+            },
+        ];
+
+        let found = referenced_threads("acc", &chunk, &db).await.unwrap();
+        assert_eq!(found.get("root@example.test").map(String::as_str), Some("thread-root"));
+        assert!(!found.contains_key("other@example.test"), "unreferenced ids are not loaded");
+        assert!(!found.contains_key("orphan@example.test"), "rows without a thread are skipped");
+        assert!(!found.contains_key("foreign@example.test"), "other accounts are never consulted");
+        assert_eq!(found.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn referenced_threads_handles_chunks_without_references() {
+        let db = db().await;
+        let chunk = vec![FetchedMessage::default()];
+        assert!(referenced_threads("acc", &chunk, &db).await.unwrap().is_empty());
+    }
+}

@@ -177,3 +177,93 @@ pub async fn upload_script(
     let _ = tls.write_all(b"LOGOUT\r\n").await;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule(name: &str, conditions: Vec<Cond>, actions: Vec<Act>) -> CompiledRule {
+        CompiledRule {
+            name: name.to_owned(),
+            match_all: true,
+            conditions,
+            actions,
+        }
+    }
+
+    fn cond(field: &str, op: &str, value: &str) -> Cond {
+        Cond {
+            field: field.to_owned(),
+            op: op.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    fn act(kind: &str, value: Option<&str>) -> Act {
+        Act {
+            kind: kind.to_owned(),
+            value: value.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn strings_are_quoted_with_escaped_quotes_and_backslashes() {
+        assert_eq!(quote(r#"say "hi" \ bye"#), r#""say \"hi\" \\ bye""#);
+    }
+
+    #[test]
+    fn rule_names_cannot_break_out_of_their_comment_line() {
+        let script = compile_sieve(&[rule(
+            "Harmless\nredirect \"attacker@example.test\";",
+            vec![],
+            vec![act("markRead", None)],
+        )]);
+        let lines: Vec<&str> = script.lines().collect();
+        assert!(
+            lines.iter().any(|l| l.starts_with("# Harmless redirect")),
+            "the whole name stays on the comment line: {script}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.trim_start().starts_with("redirect")),
+            "no injected statement: {script}"
+        );
+    }
+
+    #[test]
+    fn conditions_and_actions_compile_to_sieve() {
+        let script = compile_sieve(&[CompiledRule {
+            name: "Newsletters".into(),
+            match_all: false,
+            conditions: vec![
+                cond("from", "contains", "news@"),
+                cond("subject", "is", "Weekly"),
+                cond("body", "notContains", "urgent"),
+                cond("unknown-field", "contains", "x"),
+            ],
+            actions: vec![
+                act("move", Some("Archive/News")),
+                act("star", None),
+                act("forward", Some("me@example.test")),
+                act("not-an-action", None),
+                act("delete", None),
+            ],
+        }]);
+        assert!(script.starts_with("require [\"fileinto\", \"imap4flags\"];"));
+        assert!(script.contains(
+            "if anyof (header :contains \"from\" \"news@\", header :is \"subject\" \"Weekly\", not body :contains \"urgent\", header :contains \"subject\" \"x\") {"
+        ));
+        assert!(script.contains("    fileinto \"Archive/News\";"));
+        assert!(script.contains("    setflag \"\\\\Flagged\";"));
+        assert!(script.contains("    redirect \"me@example.test\";"));
+        assert!(script.contains("    discard;"));
+        assert!(script.contains("    stop;\n}"));
+        assert!(!script.contains("not-an-action"));
+    }
+
+    #[test]
+    fn a_rule_without_conditions_matches_everything() {
+        let script = compile_sieve(&[rule("All", vec![], vec![act("markRead", None)])]);
+        assert!(script.contains("if true {"));
+        assert!(script.contains("    setflag \"\\\\Seen\";"));
+    }
+}

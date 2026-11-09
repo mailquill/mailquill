@@ -64,3 +64,46 @@ impl From<db::pool::PoolError> for AppError {
         AppError::Internal(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn internal_errors_never_leak_their_detail() {
+        let response = AppError::Internal("sqlite path /srv/data/users/x/mail.db".into()).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body_json(response).await["error"], "internal server error");
+    }
+
+    #[tokio::test]
+    async fn client_errors_map_to_their_status_and_carry_codes() {
+        assert_eq!(
+            AppError::TooManyRequests.into_response().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(AppError::Unauthorized.into_response().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(AppError::Forbidden.into_response().status(), StatusCode::FORBIDDEN);
+        assert_eq!(AppError::NotFound.into_response().status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            AppError::Unprocessable("bad".into()).into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let coded = AppError::BadGatewayWithCode {
+            code: "tls_untrusted",
+            message: "certificate rejected".into(),
+        }
+        .into_response();
+        assert_eq!(coded.status(), StatusCode::BAD_GATEWAY);
+        let json = body_json(coded).await;
+        assert_eq!(json["code"], "tls_untrusted");
+        assert_eq!(json["error"], "certificate rejected");
+    }
+}

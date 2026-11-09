@@ -172,3 +172,86 @@ describe('useMailNotifications connection lifecycle', () => {
     }
   })
 })
+
+describe('useMailNotifications sync events', () => {
+  function setup() {
+    vi.useFakeTimers()
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+    const wrapper = ({ children }: PropsWithChildren) =>
+      createElement(MemoryRouter, null, createElement(QueryClientProvider, { client: queryClient }, children))
+    renderHook(() => useMailNotifications(false), { wrapper })
+    return { queryClient, invalidate }
+  }
+
+  const syncEvent = (overrides: Record<string, unknown>) =>
+    JSON.stringify({ account_id: 'acc', state: 'syncing', last_synced_at: null, error: null, synced: 0, total: 10, ...overrides })
+
+  it('stores the status and refreshes the lists when a cycle starts', async () => {
+    const { queryClient, invalidate } = setup()
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      act(() => FakeEventSource.latest?.emit('sync', syncEvent({})))
+      expect(queryClient.getQueryData(['sync-status', 'acc'])).toMatchObject({ state: 'syncing', total: 10 })
+      expect(invalidate).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600)
+      })
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['unified'] })
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['unified-counts'] })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('spaces out refreshes that only report progress', async () => {
+    const { invalidate } = setup()
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      act(() => FakeEventSource.latest?.emit('sync', syncEvent({})))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600)
+      })
+      invalidate.mockClear()
+
+      // Progress ticks, same state: no refetch storm.
+      act(() => FakeEventSource.latest?.emit('sync', syncEvent({ synced: 3 })))
+      act(() => FakeEventSource.latest?.emit('sync', syncEvent({ synced: 6 })))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      expect(invalidate).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000)
+      })
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['unified'] })
+      expect(invalidate.mock.calls.filter(([arg]) => (arg as { queryKey: unknown[] }).queryKey[0] === 'unified')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refreshes once per burst of new-message events', async () => {
+    const { invalidate } = setup()
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      for (let i = 0; i < 5; i += 1) {
+        act(() => FakeEventSource.latest?.emit('message', JSON.stringify({ title: 'New mail' })))
+      }
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600)
+      })
+      expect(invalidate.mock.calls.filter(([arg]) => (arg as { queryKey: unknown[] }).queryKey[0] === 'unified')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

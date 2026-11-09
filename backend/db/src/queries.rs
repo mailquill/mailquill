@@ -703,6 +703,50 @@ mod tests {
         assert!(page.items[0].is_local_draft);
     }
 
+    // Totals come from the per-folder counters, not from counting messages:
+    // the unread filter reads `unread_count`, the plain view reads the
+    // trigger-maintained `live_message_count`, so a soft delete lowers the
+    // total without a recount.
+    #[tokio::test]
+    async fn totals_come_from_the_folder_counters() {
+        let db = test_db().await;
+        sqlx::query(
+            "INSERT INTO folders (id, account_id, full_path, folder_type, unread_count) VALUES
+             ('inbox-a', 'acc-a', 'INBOX', 'INBOX', 2),
+             ('inbox-b', 'acc-b', 'INBOX', 'INBOX', 5),
+             ('trash-a', 'acc-a', 'Trash', 'TRASH', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages
+             (id, account_id, folder_id, uid, thread_id, subject, from_addr, internal_date, is_read)
+             VALUES
+             ('m1', 'acc-a', 'inbox-a', 1, 'm1', 'a', 'a@example.test', '2026-01-03T00:00:00Z', 0),
+             ('m2', 'acc-a', 'inbox-a', 2, 'm2', 'b', 'a@example.test', '2026-01-02T00:00:00Z', 0),
+             ('m3', 'acc-b', 'inbox-b', 1, 'm3', 'c', 'b@example.test', '2026-01-01T00:00:00Z', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let all = unified_page(&db, Some("inbox"), None, None, 50, false).await.unwrap();
+        assert_eq!(all.total, 3, "live counter sums the inbox folders");
+        let unread = unified_page(&db, Some("inbox"), None, None, 50, true).await.unwrap();
+        assert_eq!(unread.total, 7, "unread filter sums the unread counters");
+        let scoped = unified_page(&db, Some("inbox"), Some("acc-a"), None, 50, true).await.unwrap();
+        assert_eq!(scoped.total, 2, "account scope narrows the counter sum");
+
+        sqlx::query("UPDATE messages SET is_deleted = 1 WHERE id = 'm2'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let after = super::folder_page(&db, "inbox-a", None, 50, false).await.unwrap();
+        assert_eq!(after.total, 1, "the trigger lowered the live counter");
+        assert_eq!(after.items.len(), 1);
+    }
+
     // A cross-account view resolves multiple folder_ids (one INBOX per
     // account) and must merge their per-folder top-K scans back into one
     // globally date-ordered, correctly paginated stream — not just concatenate

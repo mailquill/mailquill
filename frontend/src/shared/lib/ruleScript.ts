@@ -35,7 +35,7 @@ function sieveAction(a: RuleAction): string {
  * @param rule - Rule to compile.
  * @returns The complete script text, ending in `stop;`.
  */
-export function compileSieve(rule: Rule): string {
+function compileSieve(rule: Rule): string {
   const tests = rule.conditions.map(sieveTest)
   const join = rule.match_all ? 'allof' : 'anyof'
   const guard = tests.length ? `if ${join} (${tests.join(', ')}) {` : 'if true {'
@@ -56,7 +56,7 @@ export function compileSieve(rule: Rule): string {
  * @param rule - Rule to compile.
  * @returns The command with one parameter per line.
  */
-export function compileExchange(rule: Rule): string {
+function compileExchange(rule: Rule): string {
   const parts = [`New-InboxRule -Name ${JSON.stringify(rule.name)}`]
   for (const c of rule.conditions) {
     if (c.field === 'from') parts.push(`-From ${JSON.stringify(c.value)}`)

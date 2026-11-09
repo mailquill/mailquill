@@ -1,7 +1,7 @@
 import type { Message } from '@/shared/types'
 
 /** Why the compose dialog was opened; decides how the source message is quoted and which recipients are pre-filled. */
-export type ComposeMode = 'new' | 'reply' | 'forward' | 'draft'
+type ComposeMode = 'new' | 'reply' | 'forward' | 'draft'
 
 /**
  * Seed for a new compose session.

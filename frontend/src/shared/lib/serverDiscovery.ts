@@ -31,7 +31,7 @@ export interface ServerConfig {
 }
 
 /** How a server configuration was found: static provider table, Exchange autodiscover, backend DNS/ISPDB lookup, or the `imap.`/`smtp.` naming convention. */
-export type DiscoverSource = 'provider' | 'exchange' | 'dns' | 'autoconfig'
+type DiscoverSource = 'provider' | 'exchange' | 'dns' | 'autoconfig'
 
 /**
  * Discovered server settings plus provenance.
@@ -124,25 +124,12 @@ export const ACCT_COLORS = ['#2563EB', '#DC2626', '#EA580C', '#D97706', '#16A34A
 export const SETTINGS_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 
 /**
- * Initials for an account avatar derived from the display name, falling back to the address.
- * @param name - Display name; may be empty.
- * @param email - Address used when the name is empty.
- * @returns Two upper-case characters: the first letters of the first two words (split on whitespace, `.`, `@`, `_`, `-`), else the first two characters.
- */
-export function deriveInitials(name: string, email: string): string {
-  const src = (name || email || '?').trim()
-  const parts = src.split(/[\s.@_-]+/).filter(Boolean)
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
-  return src.slice(0, 2).toUpperCase()
-}
-
-/**
  * Synchronous server discovery from the static provider table.
  * @param email - Account address; its domain is looked up.
  * @param isExchange - Treat an unknown domain as Microsoft 365 hosted.
  * @returns Provider settings when the domain is known, the Outlook settings for Exchange, else an `autoconfig` guess (`imap.`/`smtp.` hosts, `dav.` URLs).
  */
-export function discoverServers(email: string, isExchange = false): DiscoverResult {
+function discoverServers(email: string, isExchange = false): DiscoverResult {
   const domain = (email.split('@')[1] || '').toLowerCase()
   const sub = (s: string) => (s || '').replace(/\{email\}/g, email).replace(/\{domain\}/g, domain)
   const fromProv = (p: ProviderDef, source: DiscoverSource): DiscoverResult => ({

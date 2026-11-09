@@ -3,7 +3,7 @@ import { apiDelete, apiGet, apiPost, apiPut } from '@/shared/api'
 
 /**
  * One of the user's own OpenPGP key pairs as listed by the server. The private
- * half is never included; fetch it with {@link usePgpKeyBlob}.
+ * half is never included in the listing.
  * @property fingerprint - Full key fingerprint, used to match signatures and recipients.
  * @property uid - The user id packet (name and address) the key was generated for.
  * @property public_key_armored - ASCII-armored public key for export and sharing.
@@ -16,16 +16,6 @@ export interface PgpKey {
   public_key_armored: string
   is_primary: boolean
   created_at: string
-}
-
-/**
- * The private half of a key, still encrypted with the user's passphrase; the
- * server never sees it in clear.
- * @property private_key_encrypted_blob - Client-encrypted private key material.
- */
-export interface PgpKeyBlob {
-  id: string
-  private_key_encrypted_blob: string
 }
 
 /**
@@ -123,21 +113,6 @@ export function useSetPrimaryPgpKey() {
 }
 
 /**
- * The encrypted private key of one key pair from `GET /pgp-keys/:id/blob`,
- * cached under `['pgp-key-blob', id]`. Fetched only when decrypting or signing
- * actually needs it.
- * @param id - Key id; the query stays disabled while unset.
- * @returns A query for the `PgpKeyBlob`.
- */
-export function usePgpKeyBlob(id?: string) {
-  return useQuery({
-    queryKey: ['pgp-key-blob', id],
-    queryFn: () => apiGet<PgpKeyBlob>(`/pgp-keys/${id}/blob`),
-    enabled: Boolean(id),
-  })
-}
-
-/**
  * Import a correspondent's public key by hand through `POST /contact-keys`,
  * then refetch that address's `['contact-keys', email]` entry and every
  * cached discovery result.
@@ -153,21 +128,6 @@ export function useCreateContactKey() {
       qc.invalidateQueries({ queryKey: ['contact-keys', variables.email.toLowerCase()] })
       qc.invalidateQueries({ queryKey: ['key-discovery'] })
     },
-  })
-}
-
-/**
- * Public keys stored for one address from `GET /contact-keys?email=`, cached
- * under `['contact-keys', email]` with the address trimmed and lower-cased.
- * @param email - Correspondent address; the query stays disabled while empty.
- * @returns A query for the `ContactKey[]`.
- */
-export function useContactKeys(email?: string) {
-  const normalized = email?.trim().toLowerCase()
-  return useQuery({
-    queryKey: ['contact-keys', normalized],
-    queryFn: () => apiGet<ContactKey[]>(`/contact-keys?email=${encodeURIComponent(normalized ?? '')}`),
-    enabled: Boolean(normalized),
   })
 }
 

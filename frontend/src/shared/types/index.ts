@@ -123,17 +123,6 @@ export interface PhishingCheck {
   params?: Record<string, string | number>
 }
 
-export interface Thread {
-  thread_id: string
-  messages: Message[]
-  subject: string
-  participants: string[]
-  unread_count: number
-  message_count: number
-  last_date: string
-  list_id: string | null
-}
-
 export interface SyncStatus {
   account_id: string
   state: string
@@ -164,11 +153,6 @@ export interface BrandEntry {
   id: string
   domain: string
   brand_name: string
-}
-
-export interface User {
-  user_id: string
-  email: string
 }
 
 export interface Contact {

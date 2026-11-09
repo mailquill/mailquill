@@ -129,7 +129,7 @@ async function doRefresh(): Promise<string | null> {
  * @param options - Standard `fetch` options; headers are merged over the defaults.
  * @returns The raw response, non-2xx ones included; callers decide how to parse it.
  */
-export async function apiFetch(
+async function apiFetch(
   path: string,
   options: RequestInit = {},
 ): Promise<Response> {

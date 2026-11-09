@@ -132,22 +132,6 @@ export function useContactBooks(accountId?: string) {
 }
 
 /**
- * Disconnect a contact account through `DELETE /contact-accounts/:id`, then
- * refetch contact accounts and contacts.
- * @returns A mutation taking the contact account id.
- */
-export function useDeleteContactAccount() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) => apiDelete(`/contact-accounts/${id}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['contact-accounts'] })
-      qc.invalidateQueries({ queryKey: ['contacts'] })
-    },
-  })
-}
-
-/**
  * Run a sync for one contact account now through `POST /contact-accounts/:id/sync`,
  * then refetch contact accounts and every contacts query.
  * @returns A mutation taking the contact account id.

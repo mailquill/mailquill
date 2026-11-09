@@ -1,35 +1,9 @@
-const PALETTE = [
-  '#5B8DEF', '#9B59B6', '#E74C3C', '#1ABC9C',
-  '#F39C12', '#2ECC71', '#3498DB', '#E91E63',
-  '#FF5722', '#607D8B', '#795548', '#009688',
-]
-
 function hashName(name: string): number {
   let h = 0
   for (let i = 0; i < name.length; i++) {
     h = (h * 31 + name.charCodeAt(i)) >>> 0
   }
   return h
-}
-
-/**
- * Pick a stable background colour for a sender avatar.
- * @param name - Display name (or address) the avatar stands for; hashed to choose the colour.
- * @returns A hex colour from the avatar palette; the same name always yields the same colour.
- */
-export function avatarColor(name: string): string {
-  return PALETTE[hashName(name) % PALETTE.length]
-}
-
-/**
- * Single upper-case initial shown inside a sender avatar.
- * @param name - Display name or address; surrounding whitespace is ignored.
- * @returns The first character upper-cased, or `?` when the name is blank.
- */
-export function avatarInitial(name: string): string {
-  const trimmed = name.trim()
-  if (!trimmed) return '?'
-  return trimmed[0].toUpperCase()
 }
 
 // Distinct, saturated colours used to give each account a stable identity

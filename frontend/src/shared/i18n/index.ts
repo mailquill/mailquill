@@ -4,7 +4,7 @@ import LanguageDetector from 'i18next-browser-languagedetector'
 import { en } from './en'
 import { de } from './de'
 
-export const LANG_STORAGE_KEY = 'mailquill-lang'
+const LANG_STORAGE_KEY = 'mailquill-lang'
 
 i18n
   .use(LanguageDetector)

@@ -9,7 +9,7 @@ export type ChangeType = 'new' | 'improved' | 'fixed'
  * @property type - Badge category.
  * @property text - Human-readable description shown as-is.
  */
-export interface ChangelogEntry {
+interface ChangelogEntry {
   type: ChangeType
   text: string
 }

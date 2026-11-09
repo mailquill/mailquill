@@ -60,7 +60,7 @@ function Checkbox({ checked }: { checked: boolean }) {
  * @param props - The message, its index, active/checked state and the row interaction callbacks (select, toggle check, toggle flag, context menu, drag-select start, hover prefetch warm/cool).
  * @returns The row element.
  */
-export const MessageRow = memo(function MessageRow({
+const MessageRow = memo(function MessageRow({
   message,
   index,
   isActive,

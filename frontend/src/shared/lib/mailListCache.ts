@@ -15,7 +15,7 @@ import type { Message } from '@/shared/types'
 import type { UnifiedCounts, UnifiedView } from '@/shared/lib/unifiedViews'
 
 /** Raw cache shape of the infinite mail-list queries (before `select` flattens). */
-export type ListPage = { messages: Message[]; total?: number; next_cursor: string | null }
+type ListPage = { messages: Message[]; total?: number; next_cursor: string | null }
 /** Full infinite-query cache entry: the loaded pages plus the cursor used to fetch each one. */
 export type InfiniteList = { pages: ListPage[]; pageParams: unknown[] }
 

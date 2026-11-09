@@ -65,7 +65,7 @@ export function hasPgpMime(value?: string | null): boolean {
  * @param fingerprint - Key fingerprint, normalised to upper case.
  * @returns The namespaced storage key.
  */
-export function sessionKeyId(fingerprint: string): string {
+function sessionKeyId(fingerprint: string): string {
   return `${SESSION_PREFIX}${fingerprint.toUpperCase()}`
 }
 
@@ -232,19 +232,6 @@ export async function verifyDetachedPgp(
 }
 
 /**
- * Clear-sign text (inline signature).
- * @param text - Text to sign.
- * @param privateKeyArmored - Unlocked private signing key.
- * @returns The armored clear-signed message.
- */
-export async function signText(text: string, privateKeyArmored: string): Promise<string> {
-  const pgp = await openpgp()
-  const privateKey = await pgp.readPrivateKey({ armoredKey: privateKeyArmored })
-  const message = await pgp.createCleartextMessage({ text })
-  return pgp.sign({ message, signingKeys: privateKey, format: 'armored' }) as Promise<string>
-}
-
-/**
  * Create a detached signature over text, for PGP/MIME signed mail.
  * @param text - Text to sign.
  * @param privateKeyArmored - Unlocked private signing key.
@@ -291,7 +278,7 @@ export function extractInlinePgpMessage(value: string): string | null {
  * @returns Nothing.
  * @throws Error with message `pgp.passphraseWeak` (an i18n key) when too short.
  */
-export function assertStrongPassphrase(passphrase: string): void {
+function assertStrongPassphrase(passphrase: string): void {
   if (passphrase.length < 12) {
     throw new Error('pgp.passphraseWeak')
   }

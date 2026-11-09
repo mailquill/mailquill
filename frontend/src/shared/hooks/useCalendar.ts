@@ -10,7 +10,7 @@ export type EventUpdate = Omit<NewCalendarEvent, 'calendar_id'>
  * @property url - Absolute URL of the collection, used as the calendar's `dav_url`.
  * @property color - Colour advertised by the server, when it sets one.
  */
-export interface DiscoveredCaldavCalendar {
+interface DiscoveredCaldavCalendar {
   name: string
   url: string
   color?: string | null

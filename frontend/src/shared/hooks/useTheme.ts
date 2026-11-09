@@ -11,7 +11,7 @@ const mql = typeof window !== 'undefined' ? window.matchMedia('(prefers-color-sc
  * the document element.
  * @param pref - The preference to apply; `system` reads `prefers-color-scheme`.
  */
-export function applyTheme(pref: ThemePref) {
+function applyTheme(pref: ThemePref) {
   const dark = pref === 'dark' || (pref === 'system' && !!mql?.matches)
   document.documentElement.classList.toggle('dark', dark)
 }

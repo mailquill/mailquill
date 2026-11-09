@@ -61,7 +61,7 @@ export function folderIcon(folder: Folder): ElementType {
  * @param folder - Folder whose `folder_type` is ranked.
  * @returns A small integer; custom folders share the lowest priority rank (5).
  */
-export function folderRank(folder: Folder): number {
+function folderRank(folder: Folder): number {
   return FOLDER_ORDER[folder.folder_type] ?? 5
 }
 
@@ -70,7 +70,7 @@ export function folderRank(folder: Folder): number {
  * @param folders - Folders to order; the input array is not mutated.
  * @returns A new sorted array.
  */
-export function sortFolders(folders: Folder[]): Folder[] {
+function sortFolders(folders: Folder[]): Folder[] {
   return [...folders].sort(
     (a, b) => folderRank(a) - folderRank(b) || folderTreePath(a).localeCompare(folderTreePath(b)),
   )

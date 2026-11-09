@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from '@/shared/api'
 import { accountColor, resolveAccountColor } from '@/shared/lib/avatar'
-import type { Account, AccountAlias, DiscoveredContactBook, Folder, SyncStatus } from '@/shared/types'
+import type { Account, DiscoveredContactBook, Folder, SyncStatus } from '@/shared/types'
 
 /**
  * All mail accounts of the signed-in user from `GET /accounts`, cached under
@@ -102,20 +102,6 @@ export function useSyncStatuses(): { account: Account; status?: SyncStatus }[] {
     })),
   })
   return accounts.map((account, i) => ({ account, status: results[i]?.data }))
-}
-
-/**
- * Sender aliases of one account from `GET /accounts/:id/aliases`, cached under
- * `['aliases', accountId]`, for the From picker in compose.
- * @param accountId - Account whose aliases to load; disabled while empty.
- * @returns A query for the `AccountAlias[]`.
- */
-export function useAliases(accountId: string) {
-  return useQuery({
-    queryKey: ['aliases', accountId],
-    queryFn: () => apiGet<AccountAlias[]>(`/accounts/${accountId}/aliases`),
-    enabled: !!accountId,
-  })
 }
 
 /**

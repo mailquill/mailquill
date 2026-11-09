@@ -196,14 +196,25 @@ pub async fn unified_page(
     })
 }
 
-/// Total conversation count for a unified view.
+/// The `folders` counter that answers "how many messages does this view hold":
+/// live messages, or unread ones when the unread filter is on. Both are kept
+/// exact by triggers on `messages`.
+fn folder_total_column(unread: bool) -> &'static str {
+    if unread {
+        "unread_count"
+    } else {
+        "live_message_count"
+    }
+}
+
+/// Total message count for a unified view.
 ///
-/// A `COUNT(*)` joining `folders` for `folder_type` scans every matching
-/// message and — without up-to-date ANALYZE statistics — the planner does not
-/// use the partial index, costing ~800ms on a 200k mailbox set. Instead resolve
-/// the view's folders and sum per-folder counts: a `folder_id = ?` equality is
-/// served by the covering `idx_msg_folder_undeleted` deterministically, with no
-/// dependence on planner statistics.
+/// Sums the trigger-maintained per-folder counters instead of counting
+/// messages. A `COUNT(*)` per folder walks that folder's index entries on
+/// every page request, and the lists are refetched after each action and on
+/// every sync signal — on a 200k mailbox set that was tens of milliseconds of
+/// pure counting per refetch. Reading the counters touches one small table.
+/// Starred has no counter and keeps its partial-index count.
 async fn view_total(
     db: &SqlitePool,
     view: Option<&str>,
@@ -215,8 +226,8 @@ async fn view_total(
     } else {
         ""
     };
-    let unread_clause = if unread { "AND is_read = 0" } else { "" };
     if view == Some("starred") {
+        let unread_clause = if unread { "AND is_read = 0" } else { "" };
         let sql = format!("{STARRED_COUNT_SQL} {unread_clause} {account_clause}");
         let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql.as_str()));
         if let Some(a) = account_id {
@@ -234,25 +245,15 @@ async fn view_total(
         _ => "INBOX",
     };
 
-    let folders_sql = format!("SELECT id FROM folders WHERE folder_type = ? {account_clause}");
-    let mut fq = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(folders_sql.as_str())).bind(folder_type);
-    if let Some(a) = account_id {
-        fq = fq.bind(a);
-    }
-    let folder_ids: Vec<String> = fq.fetch_all(db).await.unwrap_or_default();
-
-    let mut total = 0;
-    let count_sql = format!(
-        "SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_deleted = 0 {unread_clause}",
+    let column = folder_total_column(unread);
+    let sql = format!(
+        "SELECT COALESCE(SUM({column}), 0) FROM folders WHERE folder_type = ? {account_clause}"
     );
-    for fid in folder_ids {
-        total += sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql.as_str()))
-            .bind(&fid)
-            .fetch_one(db)
-            .await
-            .unwrap_or(0);
+    let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql.as_str())).bind(folder_type);
+    if let Some(a) = account_id {
+        q = q.bind(a);
     }
-    total
+    q.fetch_one(db).await.unwrap_or(0)
 }
 
 /// Single-folder page, newest first.
@@ -281,13 +282,16 @@ pub async fn folder_page(
     let next_cursor = rows.last().map(|r| r.5.clone());
     let has_more = rows.len() as i64 == limit;
 
-    let total_unread_clause = if unread { "AND is_read = 0" } else { "" };
+    // Trigger-maintained counter instead of a per-request COUNT (see view_total).
     let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT COUNT(*) FROM messages WHERE folder_id = ? AND is_deleted = 0 {total_unread_clause}",
+        "SELECT {} FROM folders WHERE id = ?",
+        folder_total_column(unread)
     )))
     .bind(folder_id)
-    .fetch_one(db)
+    .fetch_optional(db)
     .await
+    .ok()
+    .flatten()
     .unwrap_or(0);
 
     let items = enrich_threads(db, rows).await?;

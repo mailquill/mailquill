@@ -77,6 +77,14 @@ impl MailProvider for ImapProvider {
         Ok(session::fetch_flags(&mut self.session, uid_set).await?)
     }
 
+    async fn search_flags(
+        &mut self,
+        folder: &str,
+    ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+        self.ensure_selected(folder).await?;
+        Ok(Some(session::search_flags(&mut self.session).await?))
+    }
+
     async fn fetch_headers(
         &mut self,
         folder: &str,

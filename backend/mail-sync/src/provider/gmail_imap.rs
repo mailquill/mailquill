@@ -228,6 +228,13 @@ impl MailProvider for GmailImapProvider {
         self.imap.fetch_flags(folder, uid_set).await
     }
 
+    async fn search_flags(
+        &mut self,
+        folder: &str,
+    ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+        self.imap.search_flags(folder).await
+    }
+
     async fn fetch_headers(
         &mut self,
         folder: &str,

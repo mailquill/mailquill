@@ -139,6 +139,17 @@ pub trait MailProvider: Send {
         uid_set: &str,
     ) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError>;
 
+    /// Read/flagged/deleted state of *every* message in a folder, for backends
+    /// that can answer that in a few round trips regardless of folder size
+    /// (IMAP: four `UID SEARCH` queries). `None` means the caller should fall
+    /// back to chunked [`Self::fetch_flags`].
+    async fn search_flags(
+        &mut self,
+        _folder: &str,
+    ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+        Ok(None)
+    }
+
     /// Envelope + raw header block per message (lazy sync).
     async fn fetch_headers(
         &mut self,

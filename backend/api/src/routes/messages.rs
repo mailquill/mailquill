@@ -788,9 +788,17 @@ async fn fetch_body_on_demand(
         account_id: account_id.clone(),
     };
 
-    let result = mail_sync::fetch_body_by_uid(
-        mail_sync::provider::ProviderKind::parse(&provider_kind),
-        &config,
+    // Reuse a recently used session of this account when there is one; a
+    // fresh TLS handshake plus LOGIN per message is most of the time a body
+    // takes to open.
+    let kind = mail_sync::provider::ProviderKind::parse(&provider_kind);
+    let mut prov = state
+        .body_fetch_limiter
+        .checkout(&account_id, kind, &config)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let result = mail_sync::fetch_body_with_provider(
+        prov.as_mut(),
         &folder_path,
         uid,
         state.blob_store.clone(),
@@ -798,10 +806,18 @@ async fn fetch_body_on_demand(
         message_id,
         user_db,
     )
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    Ok(result)
+    .await;
+    match result {
+        Ok(body) => {
+            state.body_fetch_limiter.checkin(&account_id, prov);
+            Ok(body)
+        }
+        Err(e) => {
+            // The session may be broken; never hand it to the next request.
+            crate::body_fetch::close_in_background(prov);
+            Err(AppError::Internal(e.to_string()))
+        }
+    }
 }
 
 /// The already downloaded body of a message, if the blob store has one.

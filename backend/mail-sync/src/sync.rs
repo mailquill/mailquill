@@ -746,18 +746,6 @@ async fn sync_folder(
         }
     };
 
-    // Build existing thread_id map for JWZ (task 5.2)
-    let existing_threads: HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
-        "SELECT message_id_header, thread_id FROM messages WHERE account_id = ? AND message_id_header IS NOT NULL AND thread_id IS NOT NULL",
-    )
-    .bind(account_id)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .filter_map(|(mid, tid)| if tid.is_empty() { None } else { Some((mid, tid)) })
-    .collect();
-
     let mut max_uid = last_uid.unwrap_or(0);
     let account_name =
         sqlx::query_scalar::<_, String>("SELECT display_name FROM email_accounts WHERE id = ?")
@@ -779,6 +767,9 @@ async fn sync_folder(
             provider.fetch_headers(folder_path, &uid_set).await?
         };
         messages.sort_by_key(|msg| msg.uid);
+
+        // Thread state for JWZ, looked up for the ids this chunk refers to.
+        let existing_threads = referenced_threads(account_id, &messages, db).await?;
 
         let imported_messages = persist_message_metadata_chunk(
             account_id,
@@ -971,6 +962,52 @@ async fn sync_folder(
     }
 
     Ok(())
+}
+
+/// Thread ids of the stored messages a fetched chunk refers to, keyed by
+/// Message-ID — what JWZ threading needs to attach replies to existing
+/// conversations.
+///
+/// Only the ids named in the chunk's In-Reply-To and References headers are
+/// looked up. Loading the account's whole Message-ID → thread map instead
+/// grew with the mailbox and was rebuilt for every folder with new mail in
+/// every cycle: a 100k-row read to thread a handful of new messages.
+async fn referenced_threads(
+    account_id: &str,
+    messages: &[crate::session::FetchedMessage],
+    db: &sqlx::SqlitePool,
+) -> Result<HashMap<String, String>, sqlx::Error> {
+    let strip = |id: &str| id.trim_matches(|c| c == '<' || c == '>').to_owned();
+    let mut wanted: HashSet<String> = HashSet::new();
+    for msg in messages {
+        if let Some(irt) = msg.in_reply_to.as_deref() {
+            wanted.insert(strip(irt));
+        }
+        if let Some(refs) = msg.references.as_deref() {
+            wanted.extend(refs.split_whitespace().map(strip));
+        }
+    }
+    wanted.remove("");
+
+    let wanted: Vec<String> = wanted.into_iter().collect();
+    let mut found = HashMap::with_capacity(wanted.len());
+    // Keep each IN list comfortably under SQLite's bound-parameter limit.
+    for batch in wanted.chunks(500) {
+        let placeholders = vec!["?"; batch.len()].join(",");
+        let sql = format!(
+            "SELECT message_id_header, thread_id FROM messages WHERE account_id = ? AND thread_id IS NOT NULL AND message_id_header IN ({placeholders})"
+        );
+        let mut query = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(sql.as_str())).bind(account_id);
+        for id in batch {
+            query = query.bind(id);
+        }
+        for (message_id, thread_id) in query.fetch_all(db).await? {
+            if !thread_id.is_empty() {
+                found.insert(message_id, thread_id);
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Persist one fetched chunk in short write transactions. SQLite permits only
@@ -1360,6 +1397,28 @@ async fn reconcile_flags(
     provider: &mut dyn MailProvider,
     db: &sqlx::SqlitePool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Preferred: the whole folder's flags in a constant number of round trips.
+    // A backend without that answer, or a server that rejects the searches,
+    // takes the chunked FLAGS path below.
+    match provider.search_flags(folder_path).await {
+        Ok(Some(mut flags)) => {
+            flags.retain(|(uid, ..)| *uid <= up_to_uid);
+            return apply_flag_reconciliation(
+                account_id,
+                folder_id,
+                folder_path,
+                1..=up_to_uid,
+                flags,
+                db,
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(error) => warn!(
+            "flag search failed: account={account_id} folder={folder_path} err={error}; falling back to chunked FLAGS fetch"
+        ),
+    }
+
     const FLAG_CHUNK: u32 = 1000;
     let mut start: u32 = 1;
     while start <= up_to_uid {
@@ -1367,65 +1426,77 @@ async fn reconcile_flags(
         let flags = provider
             .fetch_flags(folder_path, &format!("{}:{}", start, end))
             .await?;
-        // Flags the user changed locally whose push has not been confirmed yet.
-        // The server's value for those is stale by definition, so keep the
-        // local one instead of reverting the user's action. Read per chunk,
-        // after the server fetch: a folder walk can take minutes, and a flag
-        // flipped while it runs must not be reverted just because the pending
-        // row did not exist when the walk started.
-        let pending = pending_flags_by_uid(account_id, folder_path, start..=end, db).await;
-        let stored_flags: HashMap<i64, (bool, bool, bool)> = sqlx::query_as::<
-            _,
-            (i64, bool, bool, bool),
-        >(
-            "SELECT uid, is_read, is_flagged, is_deleted FROM messages WHERE folder_id = ? AND uid BETWEEN ? AND ?",
-        )
-        .bind(folder_id)
-        .bind(i64::from(start))
-        .bind(i64::from(end))
-        .fetch_all(db)
-        .await?
-        .into_iter()
-        .map(|(uid, seen, flagged, deleted)| (uid, (seen, flagged, deleted)))
-        .collect();
-        let expunged = expunged_uids(&flags, &stored_flags);
-        let changed_flags = changed_message_flags(flags, &stored_flags, &pending);
-        if changed_flags.is_empty() && expunged.is_empty() {
-            if end >= up_to_uid {
-                break;
-            }
-            start = end + 1;
-            continue;
-        }
-
-        let mut tx = db.begin().await?;
-        for (uid, seen, flagged, deleted) in changed_flags {
-            // Hide messages the server has marked \Deleted (e.g. left behind by a
-            // copy-then-flag move) without un-hiding a locally deleted row.
-            sqlx::query(
-                "UPDATE messages SET is_read = ?, is_flagged = ?, is_deleted = MAX(?, is_deleted) WHERE folder_id = ? AND uid = ?",
-            )
-            .bind(seen as i64)
-            .bind(flagged as i64)
-            .bind(deleted as i64)
-            .bind(folder_id)
-            .bind(uid as i64)
-            .execute(&mut *tx)
+        apply_flag_reconciliation(account_id, folder_id, folder_path, start..=end, flags, db)
             .await?;
-        }
-        for uid in expunged {
-            sqlx::query("UPDATE messages SET is_deleted = 1 WHERE folder_id = ? AND uid = ?")
-                .bind(folder_id)
-                .bind(uid)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
         if end >= up_to_uid {
             break;
         }
         start = end + 1;
     }
+    Ok(())
+}
+
+/// Bring the stored rows of `uid_range` in line with the server's flags for
+/// that range: changed flags are copied, uids the server no longer returned
+/// are hidden as expunged.
+async fn apply_flag_reconciliation(
+    account_id: &str,
+    folder_id: &str,
+    folder_path: &str,
+    uid_range: std::ops::RangeInclusive<u32>,
+    server_flags: Vec<(u32, bool, bool, bool)>,
+    db: &sqlx::SqlitePool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Flags the user changed locally whose push has not been confirmed yet.
+    // The server's value for those is stale by definition, so keep the local
+    // one instead of reverting the user's action. Read *after* the server
+    // fetch: a folder walk can take a while, and a flag flipped while it runs
+    // must not be reverted just because the pending row did not exist when
+    // the walk started.
+    let pending = pending_flags_by_uid(account_id, folder_path, uid_range.clone(), db).await;
+    let stored_flags: HashMap<i64, (bool, bool, bool)> = sqlx::query_as::<
+        _,
+        (i64, bool, bool, bool),
+    >(
+        "SELECT uid, is_read, is_flagged, is_deleted FROM messages WHERE folder_id = ? AND uid BETWEEN ? AND ?",
+    )
+    .bind(folder_id)
+    .bind(i64::from(*uid_range.start()))
+    .bind(i64::from(*uid_range.end()))
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .map(|(uid, seen, flagged, deleted)| (uid, (seen, flagged, deleted)))
+    .collect();
+    let expunged = expunged_uids(&server_flags, &stored_flags);
+    let changed_flags = changed_message_flags(server_flags, &stored_flags, &pending);
+    if changed_flags.is_empty() && expunged.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = db.begin().await?;
+    for (uid, seen, flagged, deleted) in changed_flags {
+        // Hide messages the server has marked \Deleted (e.g. left behind by a
+        // copy-then-flag move) without un-hiding a locally deleted row.
+        sqlx::query(
+            "UPDATE messages SET is_read = ?, is_flagged = ?, is_deleted = MAX(?, is_deleted) WHERE folder_id = ? AND uid = ?",
+        )
+        .bind(seen as i64)
+        .bind(flagged as i64)
+        .bind(deleted as i64)
+        .bind(folder_id)
+        .bind(uid as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for uid in expunged {
+        sqlx::query("UPDATE messages SET is_deleted = 1 WHERE folder_id = ? AND uid = ?")
+            .bind(folder_id)
+            .bind(uid)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

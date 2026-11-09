@@ -281,6 +281,36 @@ pub async fn fetch_flags(
     Ok(out)
 }
 
+/// Flags of every message in the selected mailbox, from four `UID SEARCH`
+/// queries (ALL, UNSEEN, FLAGGED, DELETED), as `(uid, is_seen, is_flagged,
+/// is_deleted)` sorted by uid.
+///
+/// Round trips stay constant in the folder size, where fetching FLAGS in uid
+/// chunks needs one per thousand messages, and the responses carry bare uid
+/// lists instead of one FETCH line per message. The ALL set is authoritative
+/// for which uids still exist, so expunge detection keeps working.
+pub async fn search_flags(
+    session: &mut ImapSession,
+) -> Result<Vec<(u32, bool, bool, bool)>, SessionError> {
+    let all = session.uid_search("ALL").await?;
+    let unseen = session.uid_search("UNSEEN").await?;
+    let flagged = session.uid_search("FLAGGED").await?;
+    let deleted = session.uid_search("DELETED").await?;
+    let mut out: Vec<(u32, bool, bool, bool)> = all
+        .into_iter()
+        .map(|uid| {
+            (
+                uid,
+                !unseen.contains(&uid),
+                flagged.contains(&uid),
+                deleted.contains(&uid),
+            )
+        })
+        .collect();
+    out.sort_unstable_by_key(|(uid, ..)| *uid);
+    Ok(out)
+}
+
 /// Fetch the Gmail `X-GM-MSGID` extension for a uid set, returning
 /// `(uid, gmail_message_id_hex)`. The hex form is exactly the Gmail API
 /// message id. Issued as a raw command because async-imap's typed `Fetch`

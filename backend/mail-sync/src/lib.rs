@@ -49,11 +49,37 @@ pub async fn fetch_body_by_uid(
     let mut prov = provider::connect(kind, config)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    let result = fetch_body_with_provider(
+        prov.as_mut(),
+        folder_path,
+        uid,
+        blob_store,
+        account_id,
+        message_id,
+        user_db,
+    )
+    .await;
+    let _ = prov.close().await;
+    result
+}
+
+/// [`fetch_body_by_uid`] on an already open provider session, so a caller
+/// serving several body requests for one account can reuse the connection
+/// instead of paying TLS + login per message.
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_body_with_provider(
+    prov: &mut dyn provider::MailProvider,
+    folder_path: &str,
+    uid: u32,
+    blob_store: Arc<dyn BlobStore>,
+    account_id: &str,
+    message_id: &str,
+    user_db: &sqlx::SqlitePool,
+) -> Result<(Option<String>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
     let raw = prov
         .fetch_raw(folder_path, uid)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-    let _ = prov.close().await;
 
     let parsed = mime::parse_mime(&raw).map_err(|e| e.to_string())?;
 

@@ -1,0 +1,62 @@
+name: Frontend audit
+
+# Checks the frontend's bun.lock against the npm advisory database.
+#
+# Two passes: `bun audit --prod` covers only packages that end up in the
+# shipped bundle and fails the check on any finding. The full `bun audit`
+# also covers build tooling (Vite, the PWA plugin's workbox-build tree,
+# test runners); its result goes to the job summary but does not fail the
+# job, because those packages never run in a user's browser and are mostly
+# pinned exactly by their parents, so a finding there is not actionable
+# until the parent releases.
+#
+# Runs when the frontend manifest or lockfile changes, and once a day so an
+# advisory published against an unchanged package still surfaces.
+
+on:
+  push:
+    paths:
+      - 'frontend/package.json'
+      - 'frontend/bun.lock'
+      - '.github/workflows/frontend-audit.yml'
+  pull_request:
+    paths:
+      - 'frontend/package.json'
+      - 'frontend/bun.lock'
+      - '.github/workflows/frontend-audit.yml'
+  schedule:
+    # 06:15 UTC daily, shortly after the Rust audit
+    - cron: '15 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bun-audit:
+    name: bun audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Keep in step with the version that wrote frontend/bun.lock.
+          bun-version: '1.4.4'
+      - name: Install from lockfile
+        run: bun install --frozen-lockfile
+      - name: Audit shipped dependencies
+        run: bun audit --prod
+      - name: Audit build tooling (informational)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## bun audit (all dependencies, including build tooling)'
+            echo
+            echo '```'
+            bun audit 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

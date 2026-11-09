@@ -17,6 +17,8 @@ pub enum AppError {
     BadGateway(String),
     #[error("bad gateway ({code}): {message}")]
     BadGatewayWithCode { code: &'static str, message: String },
+    #[error("too many attempts, try again later")]
+    TooManyRequests,
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -33,6 +35,7 @@ impl IntoResponse for AppError {
             AppError::BadGatewayWithCode { code, message } => {
                 (StatusCode::BAD_GATEWAY, message.clone(), Some(*code))
             }
+            AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, self.to_string(), None),
             AppError::Internal(m) => {
                 tracing::error!("internal error: {m}");
                 (

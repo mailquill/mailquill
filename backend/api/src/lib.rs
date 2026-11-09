@@ -12,6 +12,7 @@ pub mod imap_utf7;
 pub mod middleware;
 pub mod oauth_tokens;
 pub mod passwords;
+pub mod rate_limit;
 pub mod routes;
 pub mod secrets;
 pub mod sieve;

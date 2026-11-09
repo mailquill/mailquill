@@ -14,7 +14,7 @@ use axum::{
 use bytes::BytesMut;
 use reqwest::{redirect::Policy, Url};
 use serde::Deserialize;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::lookup_host;
 
@@ -38,13 +38,6 @@ pub async fn remote_image(
         .validate(&query.token)
         .map_err(|_| AppError::Unauthorized)?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .redirect(Policy::none())
-        .user_agent("Mailquill remote image proxy")
-        .build()
-        .map_err(|err| AppError::Internal(err.to_string()))?;
-
     let mut url = match parse_allowed_url(&query.url) {
         Ok(url) => url,
         Err(err) => {
@@ -55,10 +48,15 @@ pub async fn remote_image(
             return Ok(empty_image_response());
         }
     };
-    if let Err(err) = ensure_public_host(&url).await {
-        return Ok(proxy_blocked_response(&url, err));
-    }
+    let mut addrs = match ensure_public_host(&url).await {
+        Ok(addrs) => addrs,
+        Err(err) => return Ok(proxy_blocked_response(&url, err)),
+    };
     for _ in 0..=MAX_REDIRECTS {
+        // The client connects to exactly the addresses that passed the check,
+        // so a DNS answer that changes between the check and the request (DNS
+        // rebinding) cannot redirect the fetch to an internal host.
+        let client = pinned_client(&url, &addrs)?;
         let response = match client.get(url.clone()).send().await {
             Ok(response) => response,
             Err(err) => {
@@ -93,9 +91,10 @@ pub async fn remote_image(
                 Ok(url) => url,
                 Err(err) => return Ok(proxy_failure_response(&url, err)),
             };
-            if let Err(err) = ensure_public_host(&url).await {
-                return Ok(proxy_blocked_response(&url, err));
-            }
+            addrs = match ensure_public_host(&url).await {
+                Ok(addrs) => addrs,
+                Err(err) => return Ok(proxy_blocked_response(&url, err)),
+            };
             continue;
         }
 
@@ -155,6 +154,10 @@ pub async fn remote_image(
             body.extend_from_slice(&chunk);
         }
 
+        // The bytes are mail-controlled. `<img>` loads ignore both headers,
+        // but if the proxied URL is ever opened as a document (an SVG with
+        // script, say), the sandbox keeps it off our origin and nosniff
+        // stops the browser from reinterpreting the type.
         return Response::builder()
             .status(StatusCode::OK)
             .header(
@@ -163,6 +166,8 @@ pub async fn remote_image(
                     .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
             )
             .header(header::CACHE_CONTROL, "private, max-age=3600")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'")
             .body(Body::from(body.freeze()))
             .map_err(|err| AppError::Internal(err.to_string()));
     }
@@ -200,48 +205,99 @@ fn parse_allowed_url(raw: &str) -> Result<Url, AppError> {
     Ok(url)
 }
 
+/// Addresses the proxy must never connect to: anything that is not a public
+/// unicast address, including the IPv6 forms that embed an IPv4 address
+/// (`::ffff:10.0.0.1`, NAT64) which would otherwise slip past the IPv4 rules.
 fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || ip.octets()[0] == 0
-        }
+        IpAddr::V4(ip) => is_private_ipv4(ip),
         IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return is_private_ipv4(mapped);
+            }
+            let segments = ip.segments();
+            // NAT64 well-known prefix 64:ff9b::/96 carries an IPv4 address.
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = [segments[6], segments[7]];
+                return is_private_ipv4(Ipv4Addr::new(
+                    (a >> 8) as u8,
+                    a as u8,
+                    (b >> 8) as u8,
+                    b as u8,
+                ));
+            }
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
+                || ip.is_multicast()
+                // 2001:db8::/32 documentation
+                || (segments[0] == 0x2001 && segments[1] == 0xdb8)
         }
     }
 }
 
-async fn ensure_public_host(url: &Url) -> Result<(), AppError> {
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || octets[0] == 0
+        // 100.64.0.0/10 shared address space (carrier-grade NAT)
+        || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+        // 240.0.0.0/4 reserved
+        || octets[0] >= 240
+}
+
+/// Resolve the URL's host and reject it unless every address is public.
+/// Returns the vetted addresses so the request can be pinned to them.
+async fn ensure_public_host(url: &Url) -> Result<Vec<SocketAddr>, AppError> {
     let host = url
         .host_str()
         .ok_or_else(|| AppError::BadGateway("image url has no host".into()))?;
-    if host.parse::<IpAddr>().is_ok() {
-        return Ok(());
-    }
-
     let port = url
         .port_or_known_default()
         .ok_or_else(|| AppError::BadGateway("image url has no port".into()))?;
-    let addrs = lookup_host((host, port))
-        .await
-        .map_err(|err| AppError::BadGateway(format!("image host lookup failed: {err}")))?;
-    for addr in addrs {
-        if is_private_ip(addr.ip()) {
-            return Err(AppError::BadGateway(
-                "private image hosts are not allowed".into(),
-            ));
-        }
+    let literal = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .ok();
+    let addrs: Vec<SocketAddr> = match literal {
+        Some(ip) => vec![SocketAddr::new(ip, port)],
+        None => lookup_host((host, port))
+            .await
+            .map_err(|err| AppError::BadGateway(format!("image host lookup failed: {err}")))?
+            .collect(),
+    };
+    if addrs.is_empty() {
+        return Err(AppError::BadGateway("image host did not resolve".into()));
     }
+    if addrs.iter().any(|addr| is_private_ip(addr.ip())) {
+        return Err(AppError::BadGateway(
+            "private image hosts are not allowed".into(),
+        ));
+    }
+    Ok(addrs)
+}
 
-    Ok(())
+/// An HTTP client that connects to `addrs` for the URL's host, bypassing a
+/// second DNS lookup.
+fn pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<reqwest::Client, AppError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::BadGateway("image url has no host".into()))?;
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .redirect(Policy::none())
+        .user_agent("Mailquill remote image proxy")
+        .resolve_to_addrs(host, addrs)
+        .build()
+        .map_err(|err| AppError::Internal(err.to_string()))
 }
 
 /// Upstream didn't deliver a usable image (4xx/5xx, timeout, wrong content
@@ -306,6 +362,26 @@ mod tests {
     // resolve as a *successful* <img> load — 204 has no decodable body, so
     // the browser fires the error event and shows a broken-image icon
     // instead of the blank space a failed remote image should render as.
+    #[test]
+    fn embedded_ipv4_forms_are_treated_like_their_ipv4_address() {
+        for blocked in [
+            "::ffff:127.0.0.1",
+            "::ffff:10.1.2.3",
+            "::ffff:169.254.169.254",
+            "64:ff9b::7f00:1",
+            "fc00::1",
+            "2001:db8::1",
+        ] {
+            assert!(is_private_ip(blocked.parse().unwrap()), "{blocked}");
+        }
+        for blocked in ["100.64.0.1", "0.0.0.0", "240.0.0.1", "224.0.0.1", "169.254.169.254"] {
+            assert!(is_private_ip(blocked.parse().unwrap()), "{blocked}");
+        }
+        for allowed in ["93.184.216.34", "2606:4700::6810:84e5", "::ffff:93.184.216.34"] {
+            assert!(!is_private_ip(allowed.parse().unwrap()), "{allowed}");
+        }
+    }
+
     #[test]
     fn empty_image_response_is_a_decodable_image_not_no_content() {
         let response = empty_image_response();

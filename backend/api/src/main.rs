@@ -28,8 +28,26 @@ use api::state::{AppState, VapidConfig};
 #[allow(dead_code)]
 struct FrontendAssets;
 
-const PROXIED_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob:; object-src 'none'";
-const DIRECT_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: http: https:; connect-src 'self'; frame-src blob:; object-src 'none'";
+const PROXIED_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+const DIRECT_IMAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: http: https:; connect-src 'self'; frame-src blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
+/// Request span for access logging with the access token stripped from the
+/// query string. SSE, the image proxy and the OAuth start URL carry the token
+/// as `?token=` because those requests cannot send an Authorization header;
+/// logging the raw URI would write live bearer tokens into the log.
+fn redacted_uri(uri: &axum::http::Uri) -> String {
+    let Some(query) = uri.query() else {
+        return uri.path().to_owned();
+    };
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if key.eq_ignore_ascii_case("token") => format!("{key}=[redacted]"),
+            _ => pair.to_owned(),
+        })
+        .collect();
+    format!("{}?{}", uri.path(), redacted.join("&"))
+}
 
 fn content_security_policy(remote_image_proxy_enabled: bool) -> &'static str {
     if remote_image_proxy_enabled {
@@ -158,6 +176,8 @@ async fn main() {
         web_push_client,
         events,
         body_fetch_limiter: Arc::new(Default::default()),
+        login_limiter: Arc::new(Default::default()),
+        secure_cookies: settings.app_base_url.starts_with("https://"),
         remote_image_proxy_enabled: settings.remote_image_proxy_enabled,
         registration_enabled: settings.registration_enabled,
     };
@@ -470,7 +490,25 @@ async fn main() {
             header::CONTENT_SECURITY_POLICY,
             content_security_policy_header(state.remote_image_proxy_enabled),
         ))
-        .layer(TraceLayer::new_for_http())
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+            tracing::info_span!(
+                "request",
+                method = %request.method(),
+                uri = %redacted_uri(request.uri()),
+            )
+        }))
         .with_state(state.clone());
 
     let addr: std::net::SocketAddr = format!("{}:{}", settings.server_host, settings.server_port)
@@ -656,6 +694,14 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    #[test]
+    fn request_spans_never_carry_access_tokens() {
+        let uri: axum::http::Uri = "/api/events?token=eyJhbGci.secret&x=1".parse().unwrap();
+        assert_eq!(redacted_uri(&uri), "/api/events?token=[redacted]&x=1");
+        let plain: axum::http::Uri = "/api/accounts".parse().unwrap();
+        assert_eq!(redacted_uri(&plain), "/api/accounts");
+    }
 
     #[tokio::test]
     async fn frontend_csp_matches_remote_image_delivery_mode() {

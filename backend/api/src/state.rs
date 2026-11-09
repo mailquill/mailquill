@@ -49,6 +49,10 @@ pub struct AppState {
     pub events: broadcast::Sender<UserEvent>,
     /// Per-account cap on concurrent on-demand body downloads.
     pub body_fetch_limiter: Arc<crate::body_fetch::BodyFetchLimiter>,
+    /// Failed-login / registration throttle.
+    pub login_limiter: Arc<crate::rate_limit::FailureLimiter>,
+    /// Whether auth cookies carry the `Secure` attribute (app served over https).
+    pub secure_cookies: bool,
     /// Whether approved remote email images should be fetched through the backend.
     pub remote_image_proxy_enabled: bool,
     /// Whether /api/auth/register accepts new sign-ups.

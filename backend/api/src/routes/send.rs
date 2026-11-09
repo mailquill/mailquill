@@ -202,6 +202,16 @@ pub async fn send_email(
     ))
 }
 
+/// Free-text header values must not contain line breaks: a CR/LF inside the
+/// subject or a threading header would end that header and let the rest of
+/// the value be parsed as further headers (Bcc, Reply-To, ...).
+fn header_safe(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+        .collect()
+}
+
 async fn deliver_email(
     state: &AppState,
     user_db: &SqlitePool,
@@ -242,15 +252,15 @@ async fn deliver_email(
         to: req.to.clone(),
         cc: req.cc.clone().unwrap_or_default(),
         bcc: req.bcc.clone().unwrap_or_default(),
-        subject: req.subject.clone(),
+        subject: header_safe(&req.subject),
         body_text: req.body_text.clone(),
         body_html: req.body_html.clone(),
         pgp_mime_mode: req.pgp_mime_mode.clone(),
         pgp_signature: req.pgp_signature.clone(),
         calendar_method: req.calendar_method.clone(),
         calendar_ics: req.calendar_ics.clone(),
-        in_reply_to: req.in_reply_to.clone(),
-        references: req.references.clone(),
+        in_reply_to: req.in_reply_to.as_deref().map(header_safe),
+        references: req.references.as_deref().map(header_safe),
         attachments: req
             .attachments
             .as_ref()
@@ -347,6 +357,7 @@ fn send_failure_detail(error: &AppError) -> String {
         | AppError::Unprocessable(message)
         | AppError::BadGateway(message) => message.clone(),
         AppError::BadGatewayWithCode { message, .. } => message.clone(),
+        AppError::TooManyRequests => "too many attempts, try again later".to_owned(),
         AppError::Internal(_) => "internal server error".to_owned(),
     }
 }

@@ -83,7 +83,14 @@ pub fn compile_sieve(rules: &[CompiledRule]) -> String {
             let join = if rule.match_all { "allof" } else { "anyof" };
             format!("if {join} ({}) {{", tests.join(", "))
         };
-        out.push_str(&format!("\n# {}\n{}\n", rule.name, guard));
+        // The name lives in a line comment; a line break inside it would end
+        // the comment and turn the rest of the name into script.
+        let name: String = rule
+            .name
+            .chars()
+            .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+            .collect();
+        out.push_str(&format!("\n# {name}\n{guard}\n"));
         for line in rule.actions.iter().filter_map(sieve_action) {
             out.push_str(&line);
             out.push('\n');

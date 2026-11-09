@@ -330,6 +330,9 @@ async fn fetch_wkd_key(email: &str) -> Result<Option<String>, AppError> {
     let (local, domain) = email
         .split_once('@')
         .ok_or_else(|| AppError::Unprocessable("email must be valid".into()))?;
+    // The domain is spliced into the WKD URL; restrict it to hostname
+    // characters so the request cannot be steered by path or query syntax.
+    crate::validate::host("email", domain)?;
     let hash = zbase32_sha1(local.as_bytes());
     let url = format!(
         "https://{domain}/.well-known/openpgpkey/hu/{hash}?l={}",

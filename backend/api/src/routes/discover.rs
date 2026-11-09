@@ -411,6 +411,11 @@ async fn mx_targets(resolver: &TokioResolver, domain: &str) -> Vec<String> {
 
 pub async fn discover(Query(q): Query<DiscoverQuery>) -> Result<impl IntoResponse, AppError> {
     validate::email("email", &q.email)?;
+    // The domain becomes part of outbound URLs and host names below; keep it
+    // to hostname characters so it cannot carry path or query syntax.
+    if let Some(domain) = q.email.rsplit('@').next() {
+        validate::host("email", domain)?;
+    }
     let domain = q
         .email
         .split('@')

@@ -318,18 +318,90 @@ pub async fn download_attachment(
         .await
         .map_err(|_| AppError::NotFound)?;
 
-    let disposition = match filename {
-        Some(name) => format!("inline; filename=\"{}\"", name.replace('"', "")),
-        None => "inline".to_owned(),
-    };
+    let (content_type, disposition) = attachment_headers(&content_type, filename.as_deref());
 
     Ok((
         [
             (axum::http::header::CONTENT_TYPE, content_type),
             (axum::http::header::CONTENT_DISPOSITION, disposition),
+            (
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                "nosniff".to_owned(),
+            ),
         ],
         bytes,
     ))
+}
+
+/// Content types a browser would run or parse as a document. An attachment
+/// of such a type must never render on our origin: it is mail-controlled
+/// markup, and a stored HTML or SVG attachment would otherwise be a script
+/// injection into the app the moment it is opened in a tab.
+fn is_active_content(content_type: &str) -> bool {
+    let kind = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        kind.as_str(),
+        "text/html"
+            | "application/xhtml+xml"
+            | "image/svg+xml"
+            | "text/xml"
+            | "application/xml"
+            | "text/javascript"
+            | "application/javascript"
+            | "application/x-javascript"
+            | "application/ecmascript"
+            | "text/css"
+    ) || kind.ends_with("+xml")
+}
+
+/// Response headers for serving an attachment: active content is forced to a
+/// download as an opaque binary, everything else may render inline. The file
+/// name is cleaned of characters that would break or extend the header.
+fn attachment_headers(content_type: &str, filename: Option<&str>) -> (String, String) {
+    let active = is_active_content(content_type);
+    let served_type = if active {
+        "application/octet-stream".to_owned()
+    } else {
+        content_type.to_owned()
+    };
+    let mode = if active { "attachment" } else { "inline" };
+    let disposition = match filename {
+        Some(name) => {
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_control() || matches!(c, '"' | '\\' | ';') { '_' } else { c })
+                .collect();
+            format!("{mode}; filename=\"{safe}\"")
+        }
+        None => mode.to_owned(),
+    };
+    (served_type, disposition)
+}
+
+#[cfg(test)]
+mod attachment_header_tests {
+    use super::attachment_headers;
+
+    #[test]
+    fn active_content_is_downloaded_as_opaque_binary() {
+        for kind in ["text/html; charset=utf-8", "image/svg+xml", "application/xhtml+xml", "text/xml"] {
+            let (served, disposition) = attachment_headers(kind, Some("page.html"));
+            assert_eq!(served, "application/octet-stream", "{kind}");
+            assert!(disposition.starts_with("attachment;"), "{kind}");
+        }
+    }
+
+    #[test]
+    fn passive_content_stays_inline_with_a_clean_name() {
+        let (served, disposition) = attachment_headers("application/pdf", Some("a\"b;c\r\n.pdf"));
+        assert_eq!(served, "application/pdf");
+        assert_eq!(disposition, "inline; filename=\"a_b_c__.pdf\"");
+    }
 }
 
 /// Re-run phishing analysis (e.g. after a brands-list update). Fetches the

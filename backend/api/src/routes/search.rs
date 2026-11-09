@@ -121,12 +121,11 @@ pub async fn search(
             .push("EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)".to_string());
     }
 
-    // Cursor-based pagination
+    // Cursor-based pagination — bound like every other value instead of being
+    // spliced into the SQL text.
     if let Some(ref cursor) = q.cursor {
-        conditions.push(format!(
-            "m.internal_date < '{}'",
-            cursor.replace('\'', "''")
-        ));
+        conditions.push("m.internal_date < ?".to_string());
+        binds.push(cursor.clone());
     }
 
     let where_clause = conditions.join(" AND ");

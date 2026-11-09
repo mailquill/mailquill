@@ -17,6 +17,7 @@ use crate::{
     error::AppError,
     middleware::UserId,
     passwords::{hash_password, PasswordResetError},
+    rate_limit::{forwarded_client_ip, LOGIN_MAX_FAILURES, REGISTER_MAX_ATTEMPTS},
     state::AppState,
 };
 
@@ -45,10 +46,19 @@ pub struct AuthResponse {
 
 pub async fn register(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if !state.registration_enabled {
         return Err(AppError::Forbidden);
+    }
+    // Throttle mass sign-ups from one client when a proxy reports its address.
+    if let Some(ip) = forwarded_client_ip(&headers) {
+        let key = format!("register-ip:{ip}");
+        if state.login_limiter.is_blocked(&key, REGISTER_MAX_ATTEMPTS) {
+            return Err(AppError::TooManyRequests);
+        }
+        state.login_limiter.record_failure(&key);
     }
     if !req.email.contains('@') {
         return Err(AppError::Unprocessable("invalid email address".into()));
@@ -104,9 +114,24 @@ pub async fn register(
 
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let email = req.email.to_lowercase();
+
+    // Brute-force throttle: per account, and per client address when a
+    // reverse proxy reports one. Checked before any work so a locked key costs
+    // the attacker nothing but a 429.
+    let mut limit_keys = vec![format!("email:{email}")];
+    if let Some(ip) = forwarded_client_ip(&headers) {
+        limit_keys.push(format!("ip:{ip}"));
+    }
+    if limit_keys
+        .iter()
+        .any(|key| state.login_limiter.is_blocked(key, LOGIN_MAX_FAILURES))
+    {
+        return Err(AppError::TooManyRequests);
+    }
 
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT id, password_hash FROM users WHERE email = ?")
@@ -114,12 +139,23 @@ pub async fn login(
             .fetch_optional(&state.app_db)
             .await?;
 
-    let (user_id, hash) = row.ok_or(AppError::Unauthorized)?;
-
+    // Verify against a dummy hash when the account does not exist, so the
+    // response time does not reveal which addresses are registered.
+    let (user_id, hash) = match row {
+        Some(row) => row,
+        None => (String::new(), dummy_password_hash().to_owned()),
+    };
     let parsed = PasswordHash::new(&hash).map_err(|e| AppError::Internal(e.to_string()))?;
-    Argon2::default()
+    let verified = Argon2::default()
         .verify_password(req.password.as_bytes(), &parsed)
-        .map_err(|_| AppError::Unauthorized)?;
+        .is_ok();
+    if !verified || user_id.is_empty() {
+        for key in &limit_keys {
+            state.login_limiter.record_failure(key);
+        }
+        return Err(AppError::Unauthorized);
+    }
+    state.login_limiter.clear(&limit_keys[0]);
 
     let access_token = state
         .jwt_key
@@ -210,13 +246,31 @@ pub async fn logout(
     }
 
     let mut headers = HeaderMap::new();
+    let mut clear = String::from(
+        "refresh_token=; HttpOnly; SameSite=Strict; Path=/api/auth/refresh; Max-Age=0",
+    );
+    if state.secure_cookies {
+        clear.push_str("; Secure");
+    }
     headers.insert(
         "Set-Cookie",
-        HeaderValue::from_static(
-            "refresh_token=; HttpOnly; SameSite=Strict; Path=/api/auth/refresh; Max-Age=0",
-        ),
+        HeaderValue::from_str(&clear).unwrap_or_else(|_| {
+            HeaderValue::from_static(
+                "refresh_token=; HttpOnly; SameSite=Strict; Path=/api/auth/refresh; Max-Age=0",
+            )
+        }),
     );
     Ok((headers, Json(json!({ "ok": true }))))
+}
+
+/// A valid Argon2 hash of a throwaway password, verified against when a login
+/// names an unknown account so that path takes as long as a real check.
+fn dummy_password_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        hash_password("mailquill-dummy-password-for-timing")
+            .expect("hashing a fixed valid password cannot fail")
+    })
 }
 
 pub async fn me(
@@ -280,20 +334,25 @@ async fn issue_refresh_token(
     .execute(&state.app_db)
     .await?;
 
-    let cookie = refresh_cookie(&token, remember);
+    let cookie = refresh_cookie(&token, remember, state.secure_cookies);
     Ok((token, cookie))
 }
 
 /// Build the `Set-Cookie` value for a refresh token. Remembered sessions get
 /// an explicit `Max-Age` so the cookie survives a browser restart;
 /// unremembered ones omit it so the browser drops the cookie on close.
-fn refresh_cookie(token: &str, remember: bool) -> String {
-    let base = format!("refresh_token={token}; HttpOnly; SameSite=Strict; Path=/api/auth/refresh");
+/// `secure` marks the cookie https-only; it follows the configured base URL
+/// so a plain-http development setup keeps working.
+fn refresh_cookie(token: &str, remember: bool, secure: bool) -> String {
+    let mut cookie =
+        format!("refresh_token={token}; HttpOnly; SameSite=Strict; Path=/api/auth/refresh");
     if remember {
-        format!("{base}; Max-Age={}", REMEMBER_TTL.num_seconds())
-    } else {
-        base
+        cookie.push_str(&format!("; Max-Age={}", REMEMBER_TTL.num_seconds()));
     }
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
 }
 
 #[cfg(test)]
@@ -302,15 +361,29 @@ mod tests {
 
     #[test]
     fn remembered_sessions_get_a_persistent_min_seven_day_max_age() {
-        let cookie = refresh_cookie("tok", true);
+        let cookie = refresh_cookie("tok", true, false);
         assert!(cookie.contains("Max-Age=2592000"));
         assert!(REMEMBER_TTL >= chrono::Duration::days(7));
     }
 
     #[test]
     fn unremembered_sessions_get_a_browser_session_cookie() {
-        let cookie = refresh_cookie("tok", false);
+        let cookie = refresh_cookie("tok", false, false);
         assert!(!cookie.contains("Max-Age"));
         assert!(cookie.starts_with("refresh_token=tok;"));
+    }
+
+    #[test]
+    fn https_deployments_get_secure_cookies() {
+        assert!(refresh_cookie("tok", true, true).ends_with("; Secure"));
+        assert!(!refresh_cookie("tok", true, false).contains("Secure"));
+    }
+
+    #[test]
+    fn dummy_hash_verifies_only_its_own_password() {
+        let parsed = PasswordHash::new(dummy_password_hash()).unwrap();
+        assert!(Argon2::default()
+            .verify_password(b"wrong", &parsed)
+            .is_err());
     }
 }

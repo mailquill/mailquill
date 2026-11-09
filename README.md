@@ -290,7 +290,7 @@ unset mailquill_password
 | `JWT_SECRET` | yes | Secret used to sign 15-minute access tokens. |
 | `DATA_DIR` | no | Storage directory for app and per-user databases. Defaults to `./data`. |
 | `SERVER_PORT` | no | Backend bind port. The repo-local development `.env` uses `8765` to avoid common `8080` collisions. |
-| `APP_BASE_URL` | no | Public backend base URL used for OAuth redirect URIs. The repo-local development `.env` uses `http://localhost:8765`. |
+| `APP_BASE_URL` | no | Public backend base URL used for OAuth redirect URIs. An `https://` value also marks the auth cookie `Secure`. The repo-local development `.env` uses `http://localhost:8765`. |
 | `GOOGLE_OAUTH_CLIENT_ID` | for Gmail OAuth | Google OAuth application client ID. |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | for Gmail OAuth | Google OAuth application client secret. |
 | `MICROSOFT_OAUTH_CLIENT_ID` | for Outlook OAuth | Microsoft OAuth application client ID. |
@@ -364,6 +364,14 @@ MAILQUILL_APP_URL=http://127.0.0.1:8765 \
 CHROME_PATH=/usr/bin/chromium \
 node scripts/e2e/csp-console-check.mjs
 ```
+
+## Documentation
+
+- [docs/mail-sync.md](docs/mail-sync.md) — how mail is synced, how local actions reach the server, and how the client stays in step.
+- [docs/security.md](docs/security.md) — authentication, data isolation, response headers, and how untrusted mail content is handled.
+- [docs/databases.md](docs/databases.md) — the SQLite databases and their tables.
+- [docs/blob-store.md](docs/blob-store.md) — where message bodies and attachments are stored.
+- [docs/reverse-proxy.md](docs/reverse-proxy.md), [docs/oauth-gmail-outlook.md](docs/oauth-gmail-outlook.md), [docs/contact-sync.md](docs/contact-sync.md), [docs/phishing-data.md](docs/phishing-data.md), [docs/filesystem-layout.md](docs/filesystem-layout.md), [docs/dev-setup.md](docs/dev-setup.md).
 
 ## License
 

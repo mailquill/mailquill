@@ -57,15 +57,18 @@ on next use. Migrations:
 |----------------|---------|
 | `email_accounts` | IMAP/SMTP accounts (encrypted credentials live here) |
 | `account_aliases` | send-from aliases per account |
-| `folders` | synced IMAP folders and their sync settings |
+| `folders` | synced IMAP folders, their sync settings, and the trigger-maintained `unread_count` / `live_message_count` the list totals and sidebar badges read |
 | `messages` | message metadata (headers, flags, thread keys) |
+| `pending_flag_ops` | outbox of read/flagged changes not yet confirmed by the server; protects them from being reverted by the next flag reconciliation (see [mail-sync.md](mail-sync.md)) |
+| `local_drafts` | recipient and attachment JSON of drafts composed locally (the draft itself is a `messages` row with `is_local_draft = 1`) |
 | `message_bodies` | pointer (`blob_key`) + sizes for each body in the blob store |
 | `attachments` | attachment metadata + blob pointers |
 | `remote_message_ids` | provider/UID ↔ local id mapping for sync |
 | `messages_fts`, `messages_vocab` | FTS5 full-text search index + vocabulary |
 | `phishing_analysis` | cached phishing verdicts per message |
+| `phishing_trusted_senders` | sender domains the user marked "not spam"; analyses short-circuit on them |
 | `pgp_keys`, `contact_keys` | PGP key material |
-| `contacts`, `contact_accounts`, `contact_groups`, `contact_group_members` | contacts (CardDAV) |
+| `contacts`, `contact_accounts`, `contact_books`, `contact_groups`, `contact_group_members` | contacts (CardDAV) |
 | `calendars`, `calendar_accounts`, `calendar_events`, `meeting_invitations` | calendar (CalDAV) |
 | `inbox_rules` | server-side / Sieve-style rules |
 | `user_brand_entries` | user-defined brand entries for phishing checks |

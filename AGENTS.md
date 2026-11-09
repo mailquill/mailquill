@@ -6,6 +6,8 @@
 - Sandboxed agent Rust build helper: see [docs/agents/agent-rust-builds.md](docs/agents/agent-rust-builds.md).
 - Compose `.env` usage: see [docs/agents/compose-env.md](docs/agents/compose-env.md).
 - Backend auth provider neutrality: see [docs/agents/backend-auth-provider-neutrality.md](docs/agents/backend-auth-provider-neutrality.md).
+- Mail sync architecture (task loop, pending flag ops, reconciliation, client refresh): see [docs/mail-sync.md](docs/mail-sync.md).
+- Security guarantees to keep intact (auth, headers, mail content handling, proxy filter): see [docs/security.md](docs/security.md).
 
 ## Frontend
 

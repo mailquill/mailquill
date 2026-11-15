@@ -155,3 +155,25 @@ indexes it for search and runs the phishing analysis. The list prefetches the
 newest message on load and a hovered row after 150 ms of hover intent.
 `BodyFetchLimiter` caps concurrent downloads at two per account and keeps
 successful sessions for 60 s so consecutive bodies reuse one connection.
+
+## Search
+
+A search is answered in two parts that the client fires together.
+
+`GET /api/search` reads the local indexes only (`messages_fts` for subject,
+sender and downloaded bodies, `messages_addr_fts` for recipients,
+`messages_subject_tri` for subject substrings) and never scans `messages`.
+Every term of the query must match; typo correction applies only to a term
+that matches nothing as typed.
+
+`GET /api/search/remote` covers what the local index cannot know: in `lazy`
+body mode, the bodies that were never downloaded. Each IMAP account runs
+`UID SEARCH TEXT` in its synced, non-empty folders (largest first, at most
+25), the uids are mapped back to local rows, the structured filters are
+applied in SQL, and messages the local search already returns are left out.
+Accounts are searched concurrently on sessions from `BodyFetchLimiter`, so
+they share the per-account connection cap with body downloads. A pooled
+session the server has closed is detected and the search retried once on a
+new connection; an account that still fails or exceeds 25 s is counted in
+`failed_accounts` without failing the request. API providers (Gmail API,
+Graph) have no server-side search here and are skipped.

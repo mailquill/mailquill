@@ -321,6 +321,7 @@ async fn main() {
         .route("/send", post(routes::send::send_email))
         // Search
         .route("/search", get(routes::search::search))
+        .route("/search/remote", get(routes::search::search_remote))
         // Server autodiscovery for the account wizard
         .route("/discover", get(routes::discover::discover))
         // OpenPGP

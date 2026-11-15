@@ -64,7 +64,8 @@ on next use. Migrations:
 | `message_bodies` | pointer (`blob_key`) + sizes for each body in the blob store |
 | `attachments` | attachment metadata + blob pointers |
 | `remote_message_ids` | provider/UID ↔ local id mapping for sync |
-| `messages_fts`, `messages_vocab` | FTS5 full-text search index + vocabulary |
+| `messages_fts`, `messages_vocab` | FTS5 full-text search index over subject, sender and body (written by the sync) + its vocabulary for typo correction |
+| `messages_addr_fts`, `messages_subject_tri` | FTS5 search indexes over the To/Cc headers (word prefixes) and the subject (trigram, for substring matches); external-content tables over `messages`, kept current by triggers |
 | `phishing_analysis` | cached phishing verdicts per message |
 | `phishing_trusted_senders` | sender domains the user marked "not spam"; analyses short-circuit on them |
 | `pgp_keys`, `contact_keys` | PGP key material |

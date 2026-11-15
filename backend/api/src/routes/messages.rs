@@ -816,29 +816,24 @@ async fn get_message_location(
     Ok((account_id, uid as u32, folder_path))
 }
 
-async fn fetch_body_on_demand(
+/// Backend kind and connection settings for an on-demand provider session of
+/// one account (body download, server-side search): decrypted credentials and
+/// a freshly refreshed OAuth token where the account uses one.
+pub(crate) async fn provider_session_config(
     state: &AppState,
-    _user_id: &str,
     user_db: &sqlx::SqlitePool,
-    message_id: &str,
-    account_id: String,
-    folder_id: String,
-    uid: u32,
-) -> Result<(Option<String>, Option<String>), AppError> {
-    // The list prefetches details on hover, so a quick sweep over the rows
-    // fires one of these per row. Cap concurrent provider logins per account,
-    // and once a slot is free re-check the store: another request may have
-    // downloaded this very body in the meantime.
-    let _permit = state.body_fetch_limiter.acquire(&account_id).await;
-    if let Some(stored) = load_stored_body(state, user_db, message_id).await {
-        return Ok(stored);
-    }
-
-    // Get account credentials + backend kind
+    account_id: &str,
+) -> Result<
+    (
+        mail_sync::provider::ProviderKind,
+        mail_sync::provider::ProviderConfig,
+    ),
+    AppError,
+> {
     let row: Option<(Vec<u8>, String, String, i64, String, Option<String>, String)> = sqlx::query_as(
         "SELECT credentials_encrypted, primary_email, imap_host, imap_port, imap_auth_scheme, imap_tls_cert, provider_kind FROM email_accounts WHERE id = ?",
     )
-    .bind(&account_id)
+    .bind(account_id)
     .fetch_optional(user_db)
     .await?;
 
@@ -851,17 +846,9 @@ async fn fetch_body_on_demand(
     let creds: serde_json::Value =
         serde_json::from_slice(&creds_bytes).map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // Get folder path
-    let folder_path: Option<String> =
-        sqlx::query_scalar("SELECT full_path FROM folders WHERE id = ?")
-            .bind(&folder_id)
-            .fetch_optional(user_db)
-            .await?;
-    let folder_path = folder_path.ok_or(AppError::NotFound)?;
-
     // Prefer a freshly refreshed OAuth token over the (possibly expired) stored one.
     let oauth_access_token =
-        match crate::oauth_tokens::fresh_access_token(&state.credential_key, user_db, &account_id)
+        match crate::oauth_tokens::fresh_access_token(&state.credential_key, user_db, account_id)
             .await
         {
             Ok(Some(token)) => Some(token),
@@ -892,13 +879,45 @@ async fn fetch_body_on_demand(
         auth_scheme,
         trusted_cert_der: mail_sync::session::decode_trusted_cert(imap_tls_cert.as_deref()),
         db: Some(user_db.clone()),
-        account_id: account_id.clone(),
+        account_id: account_id.to_owned(),
     };
+    Ok((
+        mail_sync::provider::ProviderKind::parse(&provider_kind),
+        config,
+    ))
+}
+
+async fn fetch_body_on_demand(
+    state: &AppState,
+    _user_id: &str,
+    user_db: &sqlx::SqlitePool,
+    message_id: &str,
+    account_id: String,
+    folder_id: String,
+    uid: u32,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    // The list prefetches details on hover, so a quick sweep over the rows
+    // fires one of these per row. Cap concurrent provider logins per account,
+    // and once a slot is free re-check the store: another request may have
+    // downloaded this very body in the meantime.
+    let _permit = state.body_fetch_limiter.acquire(&account_id).await;
+    if let Some(stored) = load_stored_body(state, user_db, message_id).await {
+        return Ok(stored);
+    }
+
+    // Get folder path
+    let folder_path: Option<String> =
+        sqlx::query_scalar("SELECT full_path FROM folders WHERE id = ?")
+            .bind(&folder_id)
+            .fetch_optional(user_db)
+            .await?;
+    let folder_path = folder_path.ok_or(AppError::NotFound)?;
+
+    let (kind, config) = provider_session_config(state, user_db, &account_id).await?;
 
     // Reuse a recently used session of this account when there is one; a
     // fresh TLS handshake plus LOGIN per message is most of the time a body
     // takes to open.
-    let kind = mail_sync::provider::ProviderKind::parse(&provider_kind);
     let mut prov = state
         .body_fetch_limiter
         .checkout(&account_id, kind, &config)

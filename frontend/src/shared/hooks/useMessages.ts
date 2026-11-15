@@ -426,12 +426,14 @@ export function useMarkThreadRead() {
 }
 
 /**
- * Infinite, cursor-paged search through `GET /search`, cached under
- * `['search', query, filters]`. Runs only once the query is longer than one
- * character or at least one filter is set.
+ * Infinite, cursor-paged search of the local index through `GET /search`,
+ * cached under `['search', query, filters]`. Runs only once the query is
+ * longer than one character or at least one filter is set. For the matches
+ * only the mail servers know about see {@link useRemoteSearchMessages}.
  * @param query - Free-text search terms, sent as `q`.
  * @param filters - Extra query-string parameters passed through verbatim.
- * @returns An infinite query whose data is `{ messages }` over all loaded pages.
+ * @returns An infinite query whose data is `{ messages, total }`: the rows of
+ *   all loaded pages and the number of matches over all pages.
  */
 export function useSearchMessages(query: string, filters?: Record<string, string>) {
   const hasFilters = !!filters && Object.keys(filters).length > 0
@@ -440,15 +442,59 @@ export function useSearchMessages(query: string, filters?: Record<string, string
     queryFn: ({ pageParam }) => {
       const params = new URLSearchParams(query ? { q: query, ...filters } : { ...filters })
       if (pageParam) params.set('cursor', pageParam)
-      return apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; next_cursor: string | null }>(`/search?${params}`)
-        .then(normalizeMessagePage)
+      return apiGet<{ messages?: ApiMessage[]; items?: ApiMessage[]; total?: number | null; next_cursor: string | null }>(
+        `/search?${params}`,
+      ).then((page) => normalizeMessagePage({ ...page, total: page.total ?? undefined }))
     },
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
+    // Results are dynamic, but a back/forward within the same minute should
+    // not blank the list and search again.
+    staleTime: 30_000,
     select: (data) => ({
       messages: data.pages.flatMap((page) => page.messages),
+      total: data.pages[0]?.total,
     }),
     enabled: query.trim().length > 1 || hasFilters,
+  })
+}
+
+/**
+ * Server-side half of a search, from `GET /search/remote`, cached under
+ * `['search-remote', query, filters]`. The IMAP servers search headers and
+ * bodies, which reaches messages whose body was never downloaded; the response
+ * holds only the matches the local search ({@link useSearchMessages}) misses.
+ * It takes seconds rather than milliseconds, so it runs alongside the local
+ * query instead of blocking it, and only for a free-text query.
+ * @param query - Free-text search terms, sent as `q`.
+ * @param filters - Extra query-string parameters passed through verbatim.
+ * @returns A query whose data is `{ messages, searchedAccounts, failedAccounts }`.
+ */
+export function useRemoteSearchMessages(query: string, filters?: Record<string, string>) {
+  const qc = useQueryClient()
+  return useQuery({
+    queryKey: ['search-remote', query, filters],
+    queryFn: async () => {
+      const params = new URLSearchParams({ q: query, ...filters })
+      const res = await apiGet<{ items?: ApiMessage[]; searched_accounts?: number; failed_accounts?: number }>(
+        `/search/remote?${params}`,
+      )
+      // The server leaves out what the local index matches at that moment. A
+      // body downloaded and indexed since the local query ran would then be
+      // in neither result, so the local half is refreshed to pick it up.
+      qc.invalidateQueries({ queryKey: ['search', query, filters] })
+      return {
+        messages: normalizeMessagePage({ items: res.items, next_cursor: null }).messages,
+        searchedAccounts: res.searched_accounts ?? 0,
+        failedAccounts: res.failed_accounts ?? 0,
+      }
+    },
+    // A server search is expensive; keep its answer for a while and do not
+    // repeat it on window focus or after a failure.
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: query.trim().length > 1,
   })
 }
 

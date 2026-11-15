@@ -331,6 +331,114 @@ pub async fn search_flags(
     Ok(out)
 }
 
+/// Build the criteria of a server-side full-text `UID SEARCH`: one `TEXT` key
+/// per term (implicitly ANDed), which covers headers and body. Returns `None`
+/// when no term has searchable content.
+///
+/// The result is the command split at its literals. A single segment is a
+/// complete criteria string. With more, every segment but the last ends in a
+/// literal announcement (`{n}`): the next segment may only be sent once the
+/// server has answered with a continuation request.
+///
+/// ASCII terms go out as quoted strings, with quotes and backslashes escaped.
+/// Terms with non-ASCII characters must be literals (a quoted string is 7-bit
+/// only, and servers silently find nothing otherwise) and need `CHARSET
+/// UTF-8`, which is declared only then since some servers reject the keyword.
+/// Control characters (CR/LF above all) are dropped from every term, so a
+/// term can never end the command or inject another one.
+pub fn text_search_criteria(terms: &[String]) -> Option<Vec<String>> {
+    let terms: Vec<String> = terms
+        .iter()
+        .map(|term| {
+            term.chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .filter(|term| !term.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::new();
+    let mut current = if terms.iter().all(|term| term.is_ascii()) {
+        String::new()
+    } else {
+        "CHARSET UTF-8 ".to_owned()
+    };
+    for (index, term) in terms.iter().enumerate() {
+        if index > 0 {
+            current.push(' ');
+        }
+        if term.is_ascii() {
+            current.push_str(&format!(
+                "TEXT \"{}\"",
+                term.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
+        } else {
+            current.push_str(&format!("TEXT {{{}}}", term.len()));
+            segments.push(std::mem::replace(&mut current, term.clone()));
+        }
+    }
+    segments.push(current);
+    Some(segments)
+}
+
+/// Uids of the messages in the selected mailbox whose headers or body contain
+/// every term, newest (highest uid) first. Empty when no term is searchable.
+pub async fn search_text(
+    session: &mut ImapSession,
+    terms: &[String],
+) -> Result<Vec<u32>, SessionError> {
+    use async_imap::imap_proto::{MailboxDatum, Response, Status};
+
+    let Some(segments) = text_search_criteria(terms) else {
+        return Ok(Vec::new());
+    };
+    // Driven by hand rather than through `Session::uid_search`, for two
+    // reasons: async-imap cannot send literals, and its search treats a
+    // connection the server has closed as an empty result. Here every segment
+    // waits for its continuation request, and only the tagged completion ends
+    // the command, so a dead session is an error the caller can retry on a new
+    // connection, and a live one is fully drained and stays usable.
+    let mut pending = segments.iter().skip(1);
+    let id = session
+        .run_command(format!("UID SEARCH {}", segments[0]))
+        .await?;
+    let mut uids: Vec<u32> = Vec::new();
+    loop {
+        let Some(resp) = session.read_response().await? else {
+            return Err(SessionError::Other(
+                "connection closed during UID SEARCH".into(),
+            ));
+        };
+        match resp.parsed() {
+            Response::Continue(_) => match pending.next() {
+                Some(segment) => session.run_command_untagged(segment).await?,
+                None => {
+                    return Err(SessionError::Other(
+                        "unexpected continuation request during UID SEARCH".into(),
+                    ))
+                }
+            },
+            Response::MailboxData(MailboxDatum::Search(ids)) => uids.extend(ids),
+            Response::Done { tag, status, .. } if *tag == id => {
+                if !matches!(status, Status::Ok) {
+                    return Err(SessionError::Other(format!(
+                        "UID SEARCH rejected by the server ({status:?})"
+                    )));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    uids.sort_unstable_by(|a, b| b.cmp(a));
+    uids.dedup();
+    Ok(uids)
+}
+
 /// Fetch the Gmail `X-GM-MSGID` extension for a uid set, returning
 /// `(uid, gmail_message_id_hex)`. The hex form is exactly the Gmail API
 /// message id. Issued as a raw command because async-imap's typed `Fetch`
@@ -667,7 +775,7 @@ pub async fn append_to_sent(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_xoauth2_sasl, uid_set};
+    use super::{build_xoauth2_sasl, text_search_criteria, uid_set};
 
     #[test]
     fn xoauth2_sasl_payload_is_not_preencoded() {
@@ -680,5 +788,45 @@ mod tests {
         assert_eq!(uid_set(&[]), "");
         assert_eq!(uid_set(&[5]), "5");
         assert_eq!(uid_set(&[3, 1, 2, 7, 7, 10, 11]), "1:3,7,10:11");
+    }
+
+    #[test]
+    fn text_search_criteria_quotes_terms_and_blocks_injection() {
+        let criteria = |raw: &[&str]| {
+            text_search_criteria(&raw.iter().map(|t| t.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            criteria(&["invoice", "may 2024"]),
+            Some(vec![r#"TEXT "invoice" TEXT "may 2024""#.to_string()])
+        );
+        // Quotes/backslashes are escaped, CR/LF cannot start a new command.
+        assert_eq!(
+            criteria(&["a\"b\\c", "x\r\nA1 LOGOUT"]),
+            Some(vec![r#"TEXT "a\"b\\c" TEXT "xA1 LOGOUT""#.to_string()])
+        );
+        assert_eq!(criteria(&["\r\n", " "]), None);
+    }
+
+    #[test]
+    fn text_search_criteria_sends_non_ascii_terms_as_literals() {
+        let criteria = |raw: &[&str]| {
+            text_search_criteria(&raw.iter().map(|t| t.to_string()).collect::<Vec<_>>())
+        };
+        // The announced size is the UTF-8 byte length, not the char count.
+        assert_eq!(
+            criteria(&["büro"]),
+            Some(vec![
+                "CHARSET UTF-8 TEXT {5}".to_string(),
+                "büro".to_string()
+            ])
+        );
+        assert_eq!(
+            criteria(&["für", "may", "größe"]),
+            Some(vec![
+                "CHARSET UTF-8 TEXT {4}".to_string(),
+                r#"für TEXT "may" TEXT {7}"#.to_string(),
+                "größe".to_string(),
+            ])
+        );
     }
 }

@@ -239,6 +239,14 @@ impl MailProvider for GmailImapProvider {
         self.imap.search_flags(folder).await
     }
 
+    async fn search_text(
+        &mut self,
+        folder: &str,
+        terms: &[String],
+    ) -> Result<Option<Vec<u32>>, ProviderError> {
+        self.imap.search_text(folder, terms).await
+    }
+
     async fn fetch_headers(
         &mut self,
         folder: &str,

@@ -177,6 +177,18 @@ pub trait MailProvider: Send {
         Ok(None)
     }
 
+    /// Server-side full-text search of one folder: uids of the messages whose
+    /// headers or body contain every term, newest first (IMAP: `UID SEARCH
+    /// TEXT`). This reaches bodies that were never downloaded in `lazy` body
+    /// mode. `None` means the backend has no such search.
+    async fn search_text(
+        &mut self,
+        _folder: &str,
+        _terms: &[String],
+    ) -> Result<Option<Vec<u32>>, ProviderError> {
+        Ok(None)
+    }
+
     /// Envelope + raw header block per message (lazy sync).
     async fn fetch_headers(
         &mut self,

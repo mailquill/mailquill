@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Search, Filter, Check, X } from 'lucide-react'
+import { useIsFetching } from '@tanstack/react-query'
+import { Search, Filter, Check, X, Loader2 } from 'lucide-react'
 import { cn } from '@/shared/lib/utils'
 import { Input } from '@/shared/components/ui/input'
 import { Select } from '@/shared/components/ui/select'
@@ -80,7 +81,7 @@ function buildParams(searchText: string, f: SearchFilter): URLSearchParams {
 }
 
 /**
- * Top-bar search box with a structured filter dropdown (sender, recipient, subject, words to include or exclude, date range, attachments, unread). Submitting navigates to the search page with the query and filters in the URL; clearing returns to the view the user came from.
+ * Top-bar search box with a structured filter dropdown (sender, recipient, subject, words to include or exclude, date range, attachments, unread). Submitting navigates to the search page with the query and filters in the URL, and the search icon turns into a spinner while that search is running; clearing returns to the view the user came from.
  * @returns The search input with its filter menu.
  */
 export function MailSearch() {
@@ -93,6 +94,9 @@ export function MailSearch() {
   const [filter, setFilter] = useState<SearchFilter>(EMPTY_FILTER)
   const [open, setOpen] = useState(false)
   const menuRef = useClickOutside<HTMLDivElement>(() => setOpen(false), open)
+  // Local and server-side search both count: the box shows a spinner until
+  // every part of the running search has answered.
+  const searching = useIsFetching({ queryKey: ['search'] }) + useIsFetching({ queryKey: ['search-remote'] }) > 0
 
   // Remember the view we came from so clearing search returns there.
   const lastViewRef = useRef('/mail/unified')
@@ -142,7 +146,14 @@ export function MailSearch() {
           runSearch()
         }}
       >
-        <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" aria-hidden="true" />
+        {searching ? (
+          <Loader2
+            className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground motion-safe:animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+        ) : (
+          <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" aria-hidden="true" />
+        )}
         <Input
           ref={inputRef}
           id="mail-search"

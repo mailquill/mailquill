@@ -634,7 +634,10 @@ async fn idle_session_loop(
         return Ok(());
     }
 
-    let mut session = crate::session::connect_imap(
+    // Silence is what an idle INBOX looks like, so this connection's stream
+    // only gives up after a whole wait plus the usual margin. The commands
+    // around the wait are bounded individually.
+    let mut session = crate::session::connect_imap_with_stall_timeout(
         &config.host,
         config.port,
         &config.username,
@@ -642,9 +645,14 @@ async fn idle_session_loop(
         config.oauth_access_token.as_deref(),
         &config.auth_scheme,
         config.trusted_cert_der.as_deref(),
+        max_wait + crate::session::COMMAND_STALL_TIMEOUT,
     )
     .await?;
-    crate::session::select_folder(&mut session, "INBOX").await?;
+    crate::session::within_stall_timeout(
+        "SELECT",
+        crate::session::select_folder(&mut session, "INBOX"),
+    )
+    .await??;
     info!("idle: account={account_id} watching INBOX");
 
     // Reconnecting after a drop — poll once to pick up mail that arrived while

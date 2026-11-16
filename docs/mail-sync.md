@@ -29,6 +29,25 @@ manual refreshes) collapse into that single cycle.
 `sync_account` under a 30-minute ceiling (a hung connection must not block
 the task forever; every chunk commits, so the next cycle resumes).
 
+IMAP has no timeouts of its own, so the session adds them
+(`session.rs`):
+
+- opening a session (TCP connect, TLS handshake, greeting, login) fails
+  after `CONNECT_TIMEOUT` (30 s);
+- every stream is a `TimedStream`: a read or write that makes no progress
+  for `COMMAND_STALL_TIMEOUT` (120 s) fails with `TimedOut`. This bounds
+  silence, not duration, so a large fetch that keeps delivering is never cut
+  off;
+- the socket has TCP keepalive (first probe after 60 s of silence), so a
+  peer that vanished is noticed even while nothing is being read;
+- the IDLE connection's stream tolerates silence for a whole wait, and the
+  commands around the wait (`SELECT`, `IDLE`, `DONE`) are bounded by
+  `COMMAND_STALL_TIMEOUT` each. `DONE` is thereby the liveness check after
+  every wait.
+
+A timeout is an ordinary error: the cycle ends as `error` and the next one
+opens a new connection; the IDLE task reconnects with backoff.
+
 `sync_account`:
 
 - pushes pending flag changes and pending moves/expunges first (see below),

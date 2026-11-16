@@ -3,12 +3,154 @@ use base64::Engine;
 use futures::TryStreamExt;
 use mailquill_core::header::decode_header_words;
 use rustls::pki_types::ServerName;
+use std::future::Future;
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
-/// An authenticated IMAP session over implicit TLS.
-pub type ImapSession = Session<TlsStream<TcpStream>>;
+/// An authenticated IMAP session over implicit TLS, failing instead of
+/// waiting forever when the server falls silent.
+pub type ImapSession = Session<TimedStream<TlsStream<TcpStream>>>;
+
+/// Ceiling for opening a session: TCP connect, TLS handshake, the server
+/// greeting and the login together.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a session may wait for the next bytes of a response, or for the
+/// server to accept bytes of a command. This bounds silence, not the duration
+/// of a command: a large fetch that keeps delivering data is never cut off.
+pub const COMMAND_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A stream that turns a stalled read or write into an
+/// [`io::ErrorKind::TimedOut`] error.
+///
+/// IMAP has no timeouts of its own, and a connection whose peer vanished
+/// without closing it (NAT entry dropped, server hung) never becomes readable
+/// again: the read would wait until the caller gives up, which for a sync
+/// cycle is 30 minutes and for the IDLE connection never.
+///
+/// The read clock starts when a read first has to wait and stops when data
+/// arrives. Writing restarts it, so each command gets a full window for its
+/// response even if an earlier, abandoned read left the clock running.
+pub struct TimedStream<S> {
+    inner: S,
+    stall_timeout: Duration,
+    read_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    write_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<S> TimedStream<S> {
+    /// Wrap `inner`; a read or write that makes no progress for
+    /// `stall_timeout` fails.
+    pub fn new(inner: S, stall_timeout: Duration) -> Self {
+        Self {
+            inner,
+            stall_timeout,
+            read_deadline: None,
+            write_deadline: None,
+        }
+    }
+}
+
+impl<S> std::fmt::Debug for TimedStream<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimedStream")
+            .field("stall_timeout", &self.stall_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Poll `deadline`, arming it first if it is not running. `Ready` means the
+/// operation it guards has stalled for the whole timeout.
+fn poll_stall(
+    deadline: &mut Option<Pin<Box<tokio::time::Sleep>>>,
+    timeout: Duration,
+    direction: &str,
+    cx: &mut Context<'_>,
+) -> Poll<io::Error> {
+    let sleep = deadline.get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
+    match sleep.as_mut().poll(cx) {
+        Poll::Ready(()) => {
+            *deadline = None;
+            Poll::Ready(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "IMAP connection stalled: no {direction} progress for {} s",
+                    timeout.as_secs()
+                ),
+            ))
+        }
+        Poll::Pending => Poll::Pending,
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for TimedStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(result) => {
+                this.read_deadline = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => {
+                poll_stall(&mut this.read_deadline, this.stall_timeout, "read", cx).map(Err)
+            }
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> TimedStream<S> {
+    fn guard_write<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        result: Poll<io::Result<T>>,
+    ) -> Poll<io::Result<T>> {
+        match result {
+            Poll::Ready(result) => {
+                self.write_deadline = None;
+                // A command is going out: its response gets a fresh window.
+                self.read_deadline = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => {
+                poll_stall(&mut self.write_deadline, self.stall_timeout, "write", cx).map(Err)
+            }
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for TimedStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, buf);
+        this.guard_write(cx, result)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_flush(cx);
+        this.guard_write(cx, result)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_shutdown(cx);
+        this.guard_write(cx, result)
+    }
+}
 
 /// One selectable folder (or label) as reported by the provider.
 #[derive(Debug)]
@@ -110,6 +252,9 @@ pub fn decode_trusted_cert(b64: Option<&str>) -> Option<Vec<u8>> {
 /// accepted in the account wizard): the connection is pinned to exactly that
 /// certificate, mirroring Thunderbird's security exceptions. `None` keeps
 /// strict WebPKI verification against the bundled Mozilla roots.
+///
+/// Opening the session is bounded by [`CONNECT_TIMEOUT`], every later read
+/// and write by [`COMMAND_STALL_TIMEOUT`].
 pub async fn connect_imap(
     host: &str,
     port: u16,
@@ -119,6 +264,76 @@ pub async fn connect_imap(
     auth_scheme: &str,
     trusted_cert_der: Option<&[u8]>,
 ) -> Result<ImapSession, SessionError> {
+    connect_imap_with_stall_timeout(
+        host,
+        port,
+        username,
+        password,
+        oauth_token,
+        auth_scheme,
+        trusted_cert_der,
+        COMMAND_STALL_TIMEOUT,
+    )
+    .await
+}
+
+/// [`connect_imap`] with a chosen stall timeout. The IDLE connection needs
+/// one longer than its wait: silence is what an idle mailbox looks like.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_imap_with_stall_timeout(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    oauth_token: Option<&str>,
+    auth_scheme: &str,
+    trusted_cert_der: Option<&[u8]>,
+    stall_timeout: Duration,
+) -> Result<ImapSession, SessionError> {
+    let open = open_session(
+        host,
+        port,
+        username,
+        password,
+        oauth_token,
+        auth_scheme,
+        trusted_cert_der,
+        stall_timeout,
+    );
+    match tokio::time::timeout(CONNECT_TIMEOUT, open).await {
+        Ok(result) => result,
+        Err(_) => Err(SessionError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "connecting to {host}:{port} took longer than {} s",
+                CONNECT_TIMEOUT.as_secs()
+            ),
+        ))),
+    }
+}
+
+/// Have the kernel probe a silent connection, so that a peer that vanished
+/// without closing it is noticed within about two minutes even while nothing
+/// is being read (between sync cycles, during IDLE). Best effort: a platform
+/// that refuses the option still has the stall timeout.
+fn enable_keepalive(stream: &TcpStream) {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(20));
+    let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_session(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    oauth_token: Option<&str>,
+    auth_scheme: &str,
+    trusted_cert_der: Option<&[u8]>,
+    stall_timeout: Duration,
+) -> Result<ImapSession, SessionError> {
     let config = match trusted_cert_der {
         Some(der) => mailquill_core::tls::pinned_client_config(der.to_vec()),
         None => mailquill_core::tls::webpki_client_config(),
@@ -127,11 +342,12 @@ pub async fn connect_imap(
 
     let addr = format!("{host}:{port}");
     let stream = TcpStream::connect(&addr).await?;
+    enable_keepalive(&stream);
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|e| SessionError::Tls(format!("invalid server name: {e}")))?;
     let tls_stream = tls.connect(server_name, stream).await?;
 
-    let mut client = async_imap::Client::new(tls_stream);
+    let mut client = async_imap::Client::new(TimedStream::new(tls_stream, stall_timeout));
     // consume server greeting
     let _ = client.read_response().await;
 
@@ -166,14 +382,38 @@ pub async fn idle_once(
     use async_imap::extensions::idle::IdleResponse;
 
     let mut handle = session.idle();
-    handle.init().await?;
+    within_stall_timeout("IDLE", handle.init()).await??;
     let activity = {
         // `wait` borrows `handle`; `_interrupt` stays alive until the borrow ends.
         let (wait, _interrupt) = handle.wait_with_timeout(max_wait);
         matches!(wait.await?, IdleResponse::NewData(_))
     };
-    let session = handle.done().await?;
+    // Leaving IDLE is the liveness check of this connection: a server that
+    // went away during the wait never answers DONE.
+    let session = within_stall_timeout("DONE", handle.done()).await??;
     Ok((session, activity))
+}
+
+/// Bound one command on the IDLE connection by [`COMMAND_STALL_TIMEOUT`].
+///
+/// That connection's stream tolerates silence for a whole IDLE wait (see
+/// [`connect_imap_with_stall_timeout`]), which is far too long for the
+/// commands around the wait.
+pub async fn within_stall_timeout<T>(
+    command: &str,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, SessionError> {
+    tokio::time::timeout(COMMAND_STALL_TIMEOUT, future)
+        .await
+        .map_err(|_| {
+            SessionError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "IMAP server did not answer {command} within {} s",
+                    COMMAND_STALL_TIMEOUT.as_secs()
+                ),
+            ))
+        })
 }
 
 /// Build the raw XOAUTH2 SASL payload. `async-imap` base64-encodes the
@@ -893,7 +1133,76 @@ pub async fn append_to_sent(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_xoauth2_sasl, text_search_criteria, uid_set};
+    use super::{build_xoauth2_sasl, text_search_criteria, uid_set, TimedStream};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const STALL: Duration = Duration::from_millis(80);
+
+    #[tokio::test]
+    async fn a_read_that_gets_no_data_times_out_instead_of_waiting_forever() {
+        let (ours, _theirs) = tokio::io::duplex(64);
+        let mut stream = TimedStream::new(ours, STALL);
+
+        let started = std::time::Instant::now();
+        let error = stream.read(&mut [0u8; 8]).await.unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= STALL);
+    }
+
+    #[tokio::test]
+    async fn data_that_keeps_arriving_is_never_cut_off() {
+        let (ours, mut theirs) = tokio::io::duplex(64);
+        let mut stream = TimedStream::new(ours, STALL);
+        // Five bytes, each well inside the timeout, together well beyond it.
+        tokio::spawn(async move {
+            for byte in b"hello" {
+                tokio::time::sleep(STALL / 2).await;
+                theirs.write_all(&[*byte]).await.unwrap();
+            }
+        });
+
+        let mut received = [0u8; 5];
+        stream.read_exact(&mut received).await.unwrap();
+
+        assert_eq!(&received, b"hello");
+    }
+
+    #[tokio::test]
+    async fn a_command_gets_a_full_window_after_an_abandoned_read() {
+        let (ours, mut theirs) = tokio::io::duplex(64);
+        let mut stream = TimedStream::new(ours, STALL);
+
+        // A read is started and dropped (as an IDLE wait is when it ends);
+        // its clock keeps running past the timeout.
+        let _ = tokio::time::timeout(STALL / 4, stream.read(&mut [0u8; 8])).await;
+        tokio::time::sleep(STALL * 2).await;
+
+        // The next command and its prompt answer must not hit that old clock.
+        stream.write_all(b"a NOOP\r\n").await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(STALL / 2).await;
+            theirs.write_all(b"ok").await.unwrap();
+            // Keep the peer open until the reader is done.
+            tokio::time::sleep(STALL * 4).await;
+        });
+        let mut received = [0u8; 2];
+        stream.read_exact(&mut received).await.unwrap();
+
+        assert_eq!(&received, b"ok");
+    }
+
+    #[tokio::test]
+    async fn a_write_the_peer_never_drains_times_out() {
+        // One byte of buffer and a peer that reads nothing.
+        let (ours, _theirs) = tokio::io::duplex(1);
+        let mut stream = TimedStream::new(ours, STALL);
+
+        let error = stream.write_all(b"a long command").await.unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn xoauth2_sasl_payload_is_not_preencoded() {

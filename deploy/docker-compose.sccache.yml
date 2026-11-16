@@ -1,0 +1,39 @@
+# Optional overlay for local image builds: a compiler cache that survives
+# whatever the Docker builder evicts.
+#
+# The image build uses sccache. By default its cache is a BuildKit cache
+# mount, which the builder's garbage collection removes after 48 hours, or
+# after every build when disk space is short. This overlay stores the cache in
+# a named volume instead, served over WebDAV on localhost, and points the
+# build at it.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.sccache.yml up -d sccache
+#   docker compose -f docker-compose.yml -f docker-compose.sccache.yml build
+#
+# The cache only grows; `docker volume rm mailquill-sccache` (with the
+# service stopped) empties it.
+services:
+  sccache:
+    image: rclone/rclone:1
+    command: ["serve", "webdav", "/data", "--addr", ":8080"]
+    ports:
+      # Loopback only: the cache accepts unauthenticated writes.
+      - "127.0.0.1:8437:8080"
+    volumes:
+      - sccache:/data
+    restart: unless-stopped
+
+  app:
+    build:
+      # The build reaches the cache service through the host's loopback.
+      network: host
+      secrets:
+        - sccache_env
+
+secrets:
+  sccache_env:
+    file: ./sccache.local.env
+
+volumes:
+  sccache:
+    name: mailquill-sccache

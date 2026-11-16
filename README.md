@@ -124,6 +124,17 @@ To update, rebuild from the current checkout and restart:
 git pull && docker compose build && docker compose up -d
 ```
 
+The Rust build uses [sccache](https://github.com/mozilla/sccache), so a crate
+that was compiled once is fetched instead of compiled again. By default its
+cache lives in the Docker builder, which discards it after two days, or after
+every build when disk space is short. If your rebuilds keep compiling every
+dependency, add the overlay that keeps the cache in a named volume instead:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sccache.yml up -d sccache
+docker compose -f docker-compose.yml -f docker-compose.sccache.yml build
+```
+
 No local toolchain is needed — Bun and the Rust cross-toolchain live inside
 the build stages. The first build takes a while (release-compiles the whole
 workspace); later builds reuse Docker layer caching.

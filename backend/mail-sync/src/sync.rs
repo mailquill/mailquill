@@ -1100,7 +1100,7 @@ async fn persist_message_metadata_chunk(
         .bind(&msg.to_addrs)
         .bind(&msg.cc_addrs)
         .bind(msg.date.as_deref())
-        .bind(&msg.internal_date)
+        .bind(utc_internal_date(&msg.internal_date))
         .bind(msg.is_seen as i64)
         .bind(msg.is_flagged as i64)
         .bind(msg.is_deleted as i64)
@@ -1828,16 +1828,46 @@ async fn abandon_message_op(
     .await;
 }
 
+/// The form `messages.internal_date` is stored in: UTC, whole seconds, a fixed
+/// `+00:00` suffix. The column is sorted and paged as text, so every row must
+/// share one offset and one shape; servers report the time in their own zone.
+/// A value that is not RFC 3339 is kept as it is.
+fn utc_internal_date(raw: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(date) => date
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%S+00:00")
+            .to_string(),
+        Err(_) => raw.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         changed_message_flags, default_folder_sync_enabled, folder_sync_priority,
         load_sync_task_context, notify_allowed_for_folder_type, oauth_reauthentication_error,
-        persist_message_metadata_chunk, PendingFlags, ProviderError, ProviderKind, SyncTaskContext,
+        persist_message_metadata_chunk, utc_internal_date, PendingFlags, ProviderError, ProviderKind, SyncTaskContext,
     };
     use crate::session::FetchedMessage;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::collections::HashMap;
+
+    #[test]
+    fn internal_dates_are_stored_in_one_sortable_utc_form() {
+        // 19:53 CET reported by a UTC server and 19:34 CET reported by a CET
+        // server: as text the raw values sort the wrong way round.
+        let later = utc_internal_date("2026-11-16T18:53:00+00:00");
+        let earlier = utc_internal_date("2026-11-16T19:34:00+01:00");
+        assert_eq!(later, "2026-11-16T18:53:00+00:00");
+        assert_eq!(earlier, "2026-11-16T18:34:00+00:00");
+        assert!(later > earlier);
+        assert_eq!(
+            utc_internal_date("2026-07-18T15:00:00.662959125Z"),
+            "2026-07-18T15:00:00+00:00"
+        );
+        assert_eq!(utc_internal_date("not a date"), "not a date");
+    }
 
     #[test]
     fn notify_allowed_excludes_spam_trash_sent_drafts() {

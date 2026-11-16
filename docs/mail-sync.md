@@ -37,14 +37,18 @@ the task forever; every chunk commits, so the next cycle resumes).
   default `sync_enabled`), and drops folders the server no longer lists
   unless they still hold local messages;
 - runs a cheap status pre-pass over the enabled folders to get a stable
-  progress denominator (`total`), publishes `synced / total`;
+  progress denominator (`total`), publishes `synced / total`. On an IMAP
+  server with CONDSTORE this is one `STATUS` per folder, and its answer is
+  the folder's snapshot for this cycle (see "Skipping unchanged folders");
 - syncs enabled folders in priority order (INBOX, Drafts, Sent, Archive,
   custom, Spam, Trash).
 
 `sync_folder` for one folder:
 
+- returns at once, without a single command, when the folder's snapshot
+  equals the one stored at its last complete sync;
 - SELECTs the folder; a changed UIDVALIDITY purges and re-syncs it;
-- reconciles flags of already stored messages (`reconcile_flags`);
+- reconciles flags of already stored messages (`reconcile_folder_flags`);
 - asks for the highest UID and backfills new UIDs in chunks (500 for IMAP,
   200 for the Gmail API), headers only in `lazy` body mode, full messages in
   `full` mode;
@@ -52,11 +56,42 @@ the task forever; every chunk commits, so the next cycle resumes).
   blocked for long, re-applies pending local flags on the rewritten rows,
   updates `folders.last_uid` and the unread counter, and publishes progress;
 - sends new-message notifications for mail that arrived after the initial
-  backfill and is not in Spam, Trash, Sent or Drafts.
+  backfill and is not in Spam, Trash, Sent or Drafts;
+- stores the cycle's snapshot with the folder once all of the above
+  succeeded.
 
 Threading (`assign_thread_id`) attaches a message to an existing conversation
 when its In-Reply-To or References name a stored Message-ID. Only the IDs a
 chunk actually refers to are looked up (`referenced_threads`).
+
+### Skipping unchanged folders
+
+A server that advertises CONDSTORE (RFC 7162) keeps a modification sequence
+per mailbox. `folder_snapshot` reads UIDVALIDITY, UIDNEXT, MESSAGES and
+HIGHESTMODSEQ with one `STATUS`, and `sync_folder` compares that snapshot
+with `folders.uidvalidity` / `synced_uidnext` / `synced_exists` /
+`synced_modseq`:
+
+- equal: no message arrived (UIDNEXT), none was expunged (MESSAGES) and no
+  flag changed (HIGHESTMODSEQ). The folder is skipped.
+- different, but `nothing_expunged_between` holds (the message count grew by
+  exactly the number of UIDs handed out): the flags come from `UID FETCH
+  1:<last_uid> (UID FLAGS) (CHANGEDSINCE <synced_modseq>)`, which lists only
+  the messages that changed.
+- anything else, including a first sync and a rejected `CHANGEDSINCE`: the
+  whole-folder reconciliation below, which also finds expunged messages.
+
+The snapshot is taken before the folder is synced, so a change that arrives
+during the sync makes the next snapshot differ. It is not stored while the
+folder has rows in `pending_flag_ops`: the reconciliation kept the local
+value for those messages, and the folder must be read again. `STATUS` for
+the mailbox the session has selected is preceded by a `NOOP`, because a
+server answers it from the session's own, possibly stale view.
+
+Servers without CONDSTORE, mailboxes that report `HIGHESTMODSEQ 0`, and the
+API providers have no snapshot and take the whole-folder path every cycle.
+The first connection of each account logs `imap capabilities: account=…
+condstore=… qresync=…`. QRESYNC is not used.
 
 ### Flag reconciliation
 

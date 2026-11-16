@@ -331,6 +331,124 @@ pub async fn search_flags(
     Ok(out)
 }
 
+/// State of a mailbox as one `STATUS` reports it, on a server that tracks
+/// changes (CONDSTORE, RFC 7162). Two equal snapshots of a mailbox mean that
+/// nothing in it changed in between: a new message raises `uid_next`, an
+/// expunge lowers `exists`, and any flag change raises `highest_modseq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderSnapshot {
+    /// UIDVALIDITY: the generation the uids belong to.
+    pub uidvalidity: u32,
+    /// Number of messages in the mailbox.
+    pub exists: u32,
+    /// The uid the next arriving message will get.
+    pub uid_next: u32,
+    /// Highest modification sequence of any message in the mailbox.
+    pub highest_modseq: u64,
+}
+
+/// Whether the server advertises CONDSTORE (and QRESYNC, which implies it).
+/// Asked after login: servers commonly list these only once authenticated.
+pub async fn change_tracking_capabilities(
+    session: &mut ImapSession,
+) -> Result<(bool, bool), SessionError> {
+    let capabilities = session.capabilities().await?;
+    let qresync = capabilities.has_str("QRESYNC");
+    Ok((capabilities.has_str("CONDSTORE") || qresync, qresync))
+}
+
+/// Snapshot of a mailbox from a single `STATUS`, without selecting it.
+///
+/// `None` when the answer is incomplete: the mailbox keeps no modification
+/// sequences (`HIGHESTMODSEQ 0`, RFC 7162 section 3.1.2.2), the server left an
+/// item out, or the connection ended before the answer. The caller then takes
+/// the path that needs no change tracking.
+pub async fn folder_snapshot(
+    session: &mut ImapSession,
+    folder: &str,
+) -> Result<Option<FolderSnapshot>, SessionError> {
+    let status = session
+        .status(folder, "(MESSAGES UIDNEXT UIDVALIDITY HIGHESTMODSEQ)")
+        .await?;
+    Ok(
+        match (status.uid_validity, status.uid_next, status.highest_modseq) {
+            (Some(uidvalidity), Some(uid_next), Some(highest_modseq)) if highest_modseq > 0 => {
+                Some(FolderSnapshot {
+                    uidvalidity,
+                    exists: status.exists,
+                    uid_next,
+                    highest_modseq,
+                })
+            }
+            _ => None,
+        },
+    )
+}
+
+/// Flags of the messages in the selected mailbox, up to `up_to_uid`, that
+/// changed after modification sequence `modseq`: `UID FETCH … (CHANGEDSINCE)`,
+/// as `(uid, is_seen, is_flagged, is_deleted)`.
+///
+/// The answer lists changed messages only. It says nothing about expunged
+/// ones, so the caller must know by other means that none were removed.
+///
+/// Driven by hand: async-imap's fetch stream ends silently both when the
+/// server rejects the command and when the connection is gone, and either
+/// would read as "nothing changed" here.
+pub async fn fetch_flags_changed_since(
+    session: &mut ImapSession,
+    up_to_uid: u32,
+    modseq: u64,
+) -> Result<Vec<(u32, bool, bool, bool)>, SessionError> {
+    use async_imap::imap_proto::{AttributeValue, Response, Status};
+
+    let id = session
+        .run_command(format!(
+            "UID FETCH 1:{up_to_uid} (UID FLAGS) (CHANGEDSINCE {modseq})"
+        ))
+        .await?;
+    let mut out = Vec::new();
+    loop {
+        let Some(resp) = session.read_response().await? else {
+            return Err(SessionError::Other(
+                "connection closed during UID FETCH CHANGEDSINCE".into(),
+            ));
+        };
+        match resp.parsed() {
+            Response::Fetch(_, attrs) => {
+                let mut uid = None;
+                let mut flags = None;
+                for attr in attrs {
+                    match attr {
+                        AttributeValue::Uid(value) => uid = Some(*value),
+                        AttributeValue::Flags(values) => {
+                            let has = |name: &str| values.iter().any(|f| f.eq_ignore_ascii_case(name));
+                            flags = Some((has("\\Seen"), has("\\Flagged"), has("\\Deleted")));
+                        }
+                        _ => {}
+                    }
+                }
+                // A FETCH without FLAGS is unrelated unsolicited data.
+                if let (Some(uid), Some((seen, flagged, deleted))) = (uid, flags) {
+                    if uid <= up_to_uid {
+                        out.push((uid, seen, flagged, deleted));
+                    }
+                }
+            }
+            Response::Done { tag, status, .. } if *tag == id => {
+                if !matches!(status, Status::Ok) {
+                    return Err(SessionError::Other(format!(
+                        "UID FETCH CHANGEDSINCE rejected by the server ({status:?})"
+                    )));
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// Build the criteria of a server-side full-text `UID SEARCH`: one `TEXT` key
 /// per term (implicitly ANDed), which covers headers and body. Returns `None`
 /// when no term has searchable content.

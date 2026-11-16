@@ -27,7 +27,7 @@ pub use idmap::IdMap;
 pub use imap::ImapProvider;
 pub use outlook::OutlookProvider;
 
-use crate::session::{FetchedMessage, FolderInfo, SessionError};
+use crate::session::{FetchedMessage, FolderInfo, FolderSnapshot, SessionError};
 use async_trait::async_trait;
 
 /// Failure of a [`MailProvider`] operation, whatever the backend.
@@ -173,6 +173,30 @@ pub trait MailProvider: Send {
     async fn search_flags(
         &mut self,
         _folder: &str,
+    ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+        Ok(None)
+    }
+
+    /// Cheap change-tracking snapshot of a folder (IMAP with CONDSTORE: one
+    /// `STATUS`, no `SELECT`). Two equal snapshots mean nothing in the folder
+    /// changed in between, so the sync can skip it. `None` when the backend or
+    /// the server cannot tell.
+    async fn folder_snapshot(
+        &mut self,
+        _folder: &str,
+    ) -> Result<Option<FolderSnapshot>, ProviderError> {
+        Ok(None)
+    }
+
+    /// Flags `(uid, seen, flagged, deleted)` of the messages up to `up_to_uid`
+    /// that changed after `modseq`, the `highest_modseq` of an earlier
+    /// [`Self::folder_snapshot`]. Expunged messages are not reported. `None`
+    /// when the backend has no such query.
+    async fn fetch_flags_changed_since(
+        &mut self,
+        _folder: &str,
+        _up_to_uid: u32,
+        _modseq: u64,
     ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
         Ok(None)
     }

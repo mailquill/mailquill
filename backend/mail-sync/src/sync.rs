@@ -5,6 +5,8 @@ use std::{
 use tokio::{sync::mpsc, time};
 use tracing::{error, info, warn, Instrument};
 
+use crate::session::FolderSnapshot;
+
 use crate::{
     manager::{NewMessageNotification, SyncAppState, SyncCommand},
     mime::{compute_snippet, parse_mime},
@@ -368,8 +370,26 @@ async fn sync_account(
     // Progress total: sum of server-reported message counts across synced
     // folders. A cheap status pre-pass gives a stable denominator before the
     // backfill starts inserting rows.
+    //
+    // On a server that tracks changes (CONDSTORE) the pre-pass is a STATUS per
+    // folder rather than a SELECT, and its snapshot later tells `sync_folder`
+    // whether the folder changed at all since it was last synced.
     let mut total: i64 = 0;
+    let mut snapshots: HashMap<&str, FolderSnapshot> = HashMap::new();
     for folder in &synced_folders {
+        match provider.folder_snapshot(&folder.full_path).await {
+            Ok(Some(snapshot)) => {
+                total += i64::from(snapshot.exists);
+                snapshots.insert(folder.full_path.as_str(), snapshot);
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                if let Some(error) = oauth_reauthentication_error(provider_kind, &error) {
+                    return Err(error.into());
+                }
+            }
+        }
         match provider.folder_status(&folder.full_path).await {
             Ok(status) => total += status.exists as i64,
             Err(error) => {
@@ -401,6 +421,7 @@ async fn sync_account(
             &body_sync_mode,
             provider_kind,
             total,
+            snapshots.get(folder.full_path.as_str()).copied(),
             provider.as_mut(),
             &db,
             app,
@@ -668,21 +689,52 @@ async fn sync_folder(
     body_sync_mode: &str,
     provider_kind: ProviderKind,
     total: i64,
+    snapshot: Option<FolderSnapshot>,
     provider: &mut dyn MailProvider,
     db: &sqlx::SqlitePool,
     app: &Arc<dyn SyncAppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Get stored folder info
-    let folder_row: Option<(String, Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
-        "SELECT id, uidvalidity, last_uid, folder_type FROM folders WHERE account_id = ? AND full_path = ?",
+    #[allow(clippy::type_complexity)]
+    let folder_row: Option<(
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT id, uidvalidity, last_uid, folder_type, synced_modseq, synced_uidnext, synced_exists FROM folders WHERE account_id = ? AND full_path = ?",
     )
     .bind(account_id)
     .bind(folder_path)
     .fetch_optional(db)
     .await?;
 
-    let (folder_id, stored_uidvalidity, last_uid, folder_type) =
-        folder_row.ok_or("folder not found")?;
+    let (
+        folder_id,
+        stored_uidvalidity,
+        last_uid,
+        folder_type,
+        synced_modseq,
+        synced_uidnext,
+        synced_exists,
+    ) = folder_row.ok_or("folder not found")?;
+
+    // The server state this folder was last synced at, if it was ever synced
+    // completely on a server that tracks changes.
+    let synced_snapshot = stored_snapshot(
+        stored_uidvalidity,
+        synced_modseq,
+        synced_uidnext,
+        synced_exists,
+    );
+    // Same state as then: no new mail, no expunge, no flag change. Nothing to
+    // fetch and nothing to reconcile, so the folder is not even selected.
+    if snapshot.is_some() && snapshot == synced_snapshot {
+        return Ok(());
+    }
 
     let notify_allowed = notify_allowed_for_folder_type(folder_type.as_deref());
 
@@ -699,7 +751,9 @@ async fn sync_folder(
                 .bind(&folder_id)
                 .execute(db)
                 .await?;
-            sqlx::query("UPDATE folders SET uidvalidity = ?, last_uid = NULL WHERE id = ?")
+            sqlx::query(
+                "UPDATE folders SET uidvalidity = ?, last_uid = NULL, synced_modseq = NULL, synced_uidnext = NULL, synced_exists = NULL WHERE id = ?",
+            )
                 .bind(server_uidvalidity as i64)
                 .bind(&folder_id)
                 .execute(db)
@@ -735,11 +789,13 @@ async fn sync_folder(
     // Header backfill below only fetches NEW uids, so server-side flag changes on
     // existing messages (e.g. read on another device) would otherwise never sync.
     if prev_last_uid > 0 {
-        reconcile_flags(
+        reconcile_folder_flags(
             account_id,
             &folder_id,
             folder_path,
             prev_last_uid,
+            synced_snapshot,
+            snapshot,
             provider,
             db,
         )
@@ -752,6 +808,7 @@ async fn sync_folder(
         _ => {
             // No new messages; flags already reconciled — refresh unread and finish.
             update_unread_count(&folder_id, db).await?;
+            store_synced_snapshot(account_id, &folder_id, folder_path, snapshot, db).await?;
             return Ok(());
         }
     };
@@ -971,6 +1028,117 @@ async fn sync_folder(
         chunk_start = chunk_end + 1;
     }
 
+    store_synced_snapshot(account_id, &folder_id, folder_path, snapshot, db).await?;
+    Ok(())
+}
+
+/// Reconcile the flags of a folder's already-synced messages with the server,
+/// by the cheapest query that is still complete.
+///
+/// With a snapshot from the last complete sync (`then`) and proof that nothing
+/// was expunged since, only the flags that changed are fetched. In every other
+/// case the whole folder is compared, which also finds the expunged messages.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_folder_flags(
+    account_id: &str,
+    folder_id: &str,
+    folder_path: &str,
+    up_to_uid: u32,
+    then: Option<FolderSnapshot>,
+    now: Option<FolderSnapshot>,
+    provider: &mut dyn MailProvider,
+    db: &sqlx::SqlitePool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let changed_since = match (then, now) {
+        (Some(then), Some(now)) if nothing_expunged_between(&then, &now) => {
+            Some(then.highest_modseq)
+        }
+        _ => None,
+    };
+    if let Some(modseq) = changed_since {
+        match provider
+            .fetch_flags_changed_since(folder_path, up_to_uid, modseq)
+            .await
+        {
+            Ok(Some(flags)) => {
+                return apply_changed_flags(account_id, folder_id, folder_path, flags, db).await;
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                "changed-flags fetch failed: account={account_id} folder={folder_path} err={error}; comparing the whole folder"
+            ),
+        }
+    }
+    reconcile_flags(account_id, folder_id, folder_path, up_to_uid, provider, db).await
+}
+
+/// The snapshot stored with a folder, when all of its parts are present.
+fn stored_snapshot(
+    uidvalidity: Option<i64>,
+    modseq: Option<i64>,
+    uidnext: Option<i64>,
+    exists: Option<i64>,
+) -> Option<FolderSnapshot> {
+    Some(FolderSnapshot {
+        uidvalidity: u32::try_from(uidvalidity?).ok()?,
+        exists: u32::try_from(exists?).ok()?,
+        uid_next: u32::try_from(uidnext?).ok()?,
+        highest_modseq: u64::try_from(modseq?).ok()?,
+    })
+}
+
+/// Whether the two snapshots of one folder prove that no message was expunged
+/// between them.
+///
+/// Every arriving message takes at least one uid, so at most
+/// `now.uid_next - then.uid_next` messages arrived. If the message count grew
+/// by exactly that number, all of them are still there and none of the older
+/// ones is missing. Any other difference may hide an expunge.
+fn nothing_expunged_between(then: &FolderSnapshot, now: &FolderSnapshot) -> bool {
+    then.uidvalidity == now.uidvalidity
+        && now.uid_next >= then.uid_next
+        && i64::from(now.exists) - i64::from(then.exists)
+            == i64::from(now.uid_next - then.uid_next)
+}
+
+/// Record the server state a folder has just been synced at, so the next
+/// cycle can skip the folder while that state holds.
+///
+/// `snapshot` was taken before the sync started: a change that arrived while
+/// it ran makes the next snapshot differ and is picked up then. Nothing is
+/// stored while a local flag change still waits for its push. The
+/// reconciliation kept the local value for that message, and if the push is
+/// later given up, the server's value must be read again.
+async fn store_synced_snapshot(
+    account_id: &str,
+    folder_id: &str,
+    folder_path: &str,
+    snapshot: Option<FolderSnapshot>,
+    db: &sqlx::SqlitePool,
+) -> Result<(), sqlx::Error> {
+    let Some(snapshot) = snapshot else {
+        return Ok(());
+    };
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pending_flag_ops WHERE account_id = ? AND folder_path = ?",
+    )
+    .bind(account_id)
+    .bind(folder_path)
+    .fetch_one(db)
+    .await?;
+    if pending > 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE folders SET synced_modseq = ?, synced_uidnext = ?, synced_exists = ? WHERE id = ? AND uidvalidity = ?",
+    )
+    .bind(i64::try_from(snapshot.highest_modseq).unwrap_or(i64::MAX))
+    .bind(i64::from(snapshot.uid_next))
+    .bind(i64::from(snapshot.exists))
+    .bind(folder_id)
+    .bind(i64::from(snapshot.uidvalidity))
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -1480,6 +1648,59 @@ async fn apply_flag_reconciliation(
     .collect();
     let expunged = expunged_uids(&server_flags, &stored_flags);
     let changed_flags = changed_message_flags(server_flags, &stored_flags, &pending);
+    write_flag_changes(folder_id, changed_flags, expunged, db).await
+}
+
+/// Copy the server's flags onto the stored rows of the messages a
+/// `CHANGEDSINCE` fetch returned. Unlike [`apply_flag_reconciliation`] this
+/// reads only those rows and hides nothing: the answer does not cover the
+/// messages that did not change.
+async fn apply_changed_flags(
+    account_id: &str,
+    folder_id: &str,
+    folder_path: &str,
+    server_flags: Vec<(u32, bool, bool, bool)>,
+    db: &sqlx::SqlitePool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (Some(lowest), Some(highest)) = (
+        server_flags.iter().map(|(uid, ..)| *uid).min(),
+        server_flags.iter().map(|(uid, ..)| *uid).max(),
+    ) else {
+        return Ok(());
+    };
+    // Read after the server fetch, for the reason given in
+    // `apply_flag_reconciliation`.
+    let pending = pending_flags_by_uid(account_id, folder_path, lowest..=highest, db).await;
+    let mut stored_flags: HashMap<i64, (bool, bool, bool)> =
+        HashMap::with_capacity(server_flags.len());
+    // Keep each IN list comfortably under SQLite's bound-parameter limit.
+    for batch in server_flags.chunks(500) {
+        let placeholders = vec!["?"; batch.len()].join(",");
+        let sql = format!(
+            "SELECT uid, is_read, is_flagged, is_deleted FROM messages WHERE folder_id = ? AND uid IN ({placeholders})"
+        );
+        let mut query =
+            sqlx::query_as::<_, (i64, bool, bool, bool)>(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(folder_id);
+        for (uid, ..) in batch {
+            query = query.bind(i64::from(*uid));
+        }
+        for (uid, seen, flagged, deleted) in query.fetch_all(db).await? {
+            stored_flags.insert(uid, (seen, flagged, deleted));
+        }
+    }
+    let changed_flags = changed_message_flags(server_flags, &stored_flags, &pending);
+    write_flag_changes(folder_id, changed_flags, Vec::new(), db).await
+}
+
+/// Write reconciled flags and hide expunged uids of one folder in a single
+/// transaction.
+async fn write_flag_changes(
+    folder_id: &str,
+    changed_flags: Vec<(u32, bool, bool, bool)>,
+    expunged: Vec<i64>,
+    db: &sqlx::SqlitePool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if changed_flags.is_empty() && expunged.is_empty() {
         return Ok(());
     }
@@ -2227,9 +2448,13 @@ mod reconciliation_tests {
                  id TEXT NOT NULL PRIMARY KEY,
                  account_id TEXT NOT NULL,
                  full_path TEXT NOT NULL,
-                 folder_type TEXT NOT NULL DEFAULT 'CUSTOM'
+                 folder_type TEXT NOT NULL DEFAULT 'CUSTOM',
+                 uidvalidity INTEGER,
+                 synced_modseq INTEGER,
+                 synced_uidnext INTEGER,
+                 synced_exists INTEGER
              );
-             INSERT INTO folders VALUES ('f1', 'acc', 'INBOX', 'INBOX'), ('ft', 'acc', 'Papierkorb', 'TRASH'), ('fa', 'acc', 'Archiv', 'ARCHIVE');",
+             INSERT INTO folders (id, account_id, full_path, folder_type, uidvalidity) VALUES ('f1', 'acc', 'INBOX', 'INBOX', 7), ('ft', 'acc', 'Papierkorb', 'TRASH', 7), ('fa', 'acc', 'Archiv', 'ARCHIVE', 7);",
         )
         .execute(&db)
         .await
@@ -2245,6 +2470,12 @@ mod reconciliation_tests {
         calls: Vec<(String, String, Vec<u32>, Option<String>)>,
         fail_batches: bool,
         fail_uids: Vec<u32>,
+        /// Answer of `search_flags` (the whole folder), when set.
+        folder_flags: Option<Vec<(u32, bool, bool, bool)>>,
+        /// Answer of `fetch_flags_changed_since`, when set.
+        changed_flags: Option<Vec<(u32, bool, bool, bool)>>,
+        /// The flag queries that were asked, in order.
+        flag_queries: Vec<String>,
     }
 
     fn unused<T>() -> Result<T, ProviderError> {
@@ -2264,6 +2495,19 @@ mod reconciliation_tests {
         }
         async fn fetch_flags(&mut self, _: &str, _: &str) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError> {
             unused()
+        }
+        async fn search_flags(&mut self, _: &str) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+            self.flag_queries.push("whole folder".into());
+            Ok(self.folder_flags.clone())
+        }
+        async fn fetch_flags_changed_since(
+            &mut self,
+            _: &str,
+            up_to_uid: u32,
+            modseq: u64,
+        ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+            self.flag_queries.push(format!("changed since {modseq} up to {up_to_uid}"));
+            Ok(self.changed_flags.clone())
         }
         async fn fetch_headers(&mut self, _: &str, _: &str) -> Result<Vec<FetchedMessage>, ProviderError> {
             unused()
@@ -2408,6 +2652,209 @@ mod reconciliation_tests {
             .unwrap()
     }
 
+    fn snapshot(exists: u32, uid_next: u32, highest_modseq: u64) -> FolderSnapshot {
+        FolderSnapshot {
+            uidvalidity: 7,
+            exists,
+            uid_next,
+            highest_modseq,
+        }
+    }
+
+    #[test]
+    fn an_expunge_between_two_snapshots_is_never_ruled_out_wrongly() {
+        let then = snapshot(100, 500, 40);
+        assert!(nothing_expunged_between(&then, &snapshot(100, 500, 41)), "flags only");
+        assert!(nothing_expunged_between(&then, &snapshot(103, 503, 44)), "three arrivals");
+        assert!(!nothing_expunged_between(&then, &snapshot(99, 500, 40)), "one expunged");
+        assert!(
+            !nothing_expunged_between(&then, &snapshot(100, 501, 42)),
+            "one arrived, one expunged: same count"
+        );
+        assert!(
+            !nothing_expunged_between(&then, &snapshot(101, 503, 42)),
+            "uids were used up by messages that are gone again"
+        );
+        let other_generation = FolderSnapshot {
+            uidvalidity: 8,
+            ..snapshot(100, 500, 41)
+        };
+        assert!(!nothing_expunged_between(&then, &other_generation));
+    }
+
+    #[test]
+    fn a_stored_snapshot_needs_all_of_its_parts() {
+        assert_eq!(stored_snapshot(Some(7), Some(40), Some(500), Some(100)), Some(snapshot(100, 500, 40)));
+        assert_eq!(stored_snapshot(Some(7), None, Some(500), Some(100)), None);
+        assert_eq!(stored_snapshot(None, Some(40), Some(500), Some(100)), None);
+    }
+
+    async fn three_inbox_messages(db: &sqlx::SqlitePool) {
+        sqlx::raw_sql(
+            "INSERT INTO messages (account_id, folder_id, uid, is_read, is_flagged, is_deleted) VALUES
+                 ('acc', 'f1', 1, 0, 0, 0),
+                 ('acc', 'f1', 2, 0, 0, 0),
+                 ('acc', 'f1', 3, 0, 0, 0);",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_changed_flags_are_fetched_when_nothing_was_expunged() {
+        let db = db().await;
+        three_inbox_messages(&db).await;
+        let mut provider = RecordingProvider {
+            // uid 2 was read elsewhere; uid 9 is not stored locally.
+            changed_flags: Some(vec![(2, true, false, false), (9, true, true, false)]),
+            ..Default::default()
+        };
+
+        reconcile_folder_flags(
+            "acc",
+            "f1",
+            "INBOX",
+            3,
+            Some(snapshot(3, 4, 40)),
+            Some(snapshot(3, 4, 41)),
+            &mut provider,
+            &db,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(provider.flag_queries, vec!["changed since 40 up to 3"]);
+        assert_eq!(flags(&db, 2).await, (true, false, false));
+        assert_eq!(
+            flags(&db, 1).await,
+            (false, false, false),
+            "a message the answer does not list is unchanged, not expunged"
+        );
+        assert_eq!(flags(&db, 3).await, (false, false, false));
+    }
+
+    #[tokio::test]
+    async fn a_possible_expunge_compares_the_whole_folder() {
+        let db = db().await;
+        three_inbox_messages(&db).await;
+        let mut provider = RecordingProvider {
+            folder_flags: Some(vec![(1, false, false, false), (3, true, false, false)]),
+            changed_flags: Some(vec![(3, true, false, false)]),
+            ..Default::default()
+        };
+
+        reconcile_folder_flags(
+            "acc",
+            "f1",
+            "INBOX",
+            3,
+            Some(snapshot(3, 4, 40)),
+            Some(snapshot(2, 4, 41)),
+            &mut provider,
+            &db,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(provider.flag_queries, vec!["whole folder"]);
+        assert_eq!(flags(&db, 2).await, (false, false, true), "uid 2 is gone from the server");
+        assert_eq!(flags(&db, 3).await, (true, false, false));
+    }
+
+    #[tokio::test]
+    async fn without_a_stored_snapshot_or_server_support_the_whole_folder_is_compared() {
+        let db = db().await;
+        three_inbox_messages(&db).await;
+        let all = vec![(1, false, false, false), (2, false, false, false), (3, false, false, false)];
+
+        // Never synced with a snapshot before.
+        let mut provider = RecordingProvider {
+            folder_flags: Some(all.clone()),
+            changed_flags: Some(Vec::new()),
+            ..Default::default()
+        };
+        reconcile_folder_flags("acc", "f1", "INBOX", 3, None, Some(snapshot(3, 4, 41)), &mut provider, &db)
+            .await
+            .unwrap();
+        assert_eq!(provider.flag_queries, vec!["whole folder"]);
+
+        // The backend has no changed-since query after all.
+        let mut provider = RecordingProvider {
+            folder_flags: Some(all),
+            ..Default::default()
+        };
+        reconcile_folder_flags(
+            "acc",
+            "f1",
+            "INBOX",
+            3,
+            Some(snapshot(3, 4, 40)),
+            Some(snapshot(3, 4, 41)),
+            &mut provider,
+            &db,
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.flag_queries, vec!["changed since 40 up to 3", "whole folder"]);
+    }
+
+    #[tokio::test]
+    async fn a_changed_flag_with_a_pending_local_push_keeps_the_local_value() {
+        let db = db().await;
+        three_inbox_messages(&db).await;
+        sqlx::raw_sql(
+            "UPDATE messages SET is_read = 1 WHERE folder_id = 'f1' AND uid = 2;
+             INSERT INTO pending_flag_ops (account_id, folder_path, uid, flag, value) VALUES ('acc', 'INBOX', 2, 'seen', 1);",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        apply_changed_flags("acc", "f1", "INBOX", vec![(2, false, true, false)], &db)
+            .await
+            .unwrap();
+
+        assert_eq!(flags(&db, 2).await, (true, true, false), "read stays, flagged is taken from the server");
+    }
+
+    async fn synced_state(db: &sqlx::SqlitePool) -> (Option<i64>, Option<i64>, Option<i64>) {
+        sqlx::query_as("SELECT synced_modseq, synced_uidnext, synced_exists FROM folders WHERE id = 'f1'")
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_synced_snapshot_is_stored_unless_a_flag_push_is_pending() {
+        let db = db().await;
+        sqlx::query("INSERT INTO pending_flag_ops (account_id, folder_path, uid, flag, value) VALUES ('acc', 'INBOX', 2, 'seen', 1)")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        store_synced_snapshot("acc", "f1", "INBOX", Some(snapshot(3, 4, 41)), &db)
+            .await
+            .unwrap();
+        assert_eq!(synced_state(&db).await, (None, None, None), "the folder must be read again next cycle");
+
+        sqlx::query("DELETE FROM pending_flag_ops").execute(&db).await.unwrap();
+        store_synced_snapshot("acc", "f1", "INBOX", Some(snapshot(3, 4, 41)), &db)
+            .await
+            .unwrap();
+        assert_eq!(synced_state(&db).await, (Some(41), Some(4), Some(3)));
+
+        // A snapshot of another UIDVALIDITY than the folder's is not stored.
+        let other_generation = FolderSnapshot {
+            uidvalidity: 8,
+            ..snapshot(9, 9, 99)
+        };
+        store_synced_snapshot("acc", "f1", "INBOX", Some(other_generation), &db)
+            .await
+            .unwrap();
+        assert_eq!(synced_state(&db).await, (Some(41), Some(4), Some(3)));
+    }
+
     #[tokio::test]
     async fn whole_folder_reconciliation_applies_server_flags_keeps_pending_and_hides_expunged() {
         let db = db().await;
@@ -2487,5 +2934,252 @@ mod reconciliation_tests {
         let db = db().await;
         let chunk = vec![FetchedMessage::default()];
         assert!(referenced_threads("acc", &chunk, &db).await.unwrap().is_empty());
+    }
+}
+
+/// One folder through several sync cycles against a scripted server, on the
+/// real mail schema: which cycles talk to the server, and how much.
+#[cfg(test)]
+mod folder_cycle_tests {
+    use super::*;
+    use crate::manager::SyncManager;
+    use crate::session::{FetchedMessage, FolderInfo};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    struct NoBlobs;
+
+    #[async_trait::async_trait]
+    impl mailquill_core::blob::BlobStore for NoBlobs {
+        async fn put(&self, _: &str, _: bytes::Bytes) -> mailquill_core::blob::Result<()> {
+            Ok(())
+        }
+        async fn get(&self, _: &str) -> mailquill_core::blob::Result<bytes::Bytes> {
+            Ok(bytes::Bytes::new())
+        }
+        async fn delete(&self, _: &str) -> mailquill_core::blob::Result<()> {
+            Ok(())
+        }
+        async fn exists(&self, _: &str) -> mailquill_core::blob::Result<bool> {
+            Ok(false)
+        }
+    }
+
+    struct App {
+        db: sqlx::SqlitePool,
+        manager: Arc<SyncManager>,
+    }
+
+    #[async_trait::async_trait]
+    impl SyncAppState for App {
+        async fn user_db(&self, _: &str) -> Result<sqlx::SqlitePool, String> {
+            Ok(self.db.clone())
+        }
+        fn blob_store(&self) -> Arc<dyn mailquill_core::blob::BlobStore> {
+            Arc::new(NoBlobs)
+        }
+        fn credential_key(&self) -> Arc<mailquill_core::crypto::CredentialKey> {
+            Arc::new(mailquill_core::crypto::CredentialKey([0; 32]))
+        }
+        fn sync_manager(&self) -> Arc<SyncManager> {
+            self.manager.clone()
+        }
+    }
+
+    /// A mailbox held in memory: `(uid, seen)` per message, plus the commands
+    /// the sync issued against it.
+    #[derive(Default)]
+    struct Server {
+        messages: Vec<(u32, bool)>,
+        changed_since: Vec<(u32, bool, bool, bool)>,
+        commands: Vec<String>,
+    }
+
+    fn unused<T>() -> Result<T, ProviderError> {
+        Err(ProviderError::Other("unused in test".into()))
+    }
+
+    #[async_trait::async_trait]
+    impl MailProvider for Server {
+        async fn list_folders(&mut self) -> Result<Vec<FolderInfo>, ProviderError> {
+            unused()
+        }
+        async fn folder_status(&mut self, _: &str) -> Result<provider::FolderStatus, ProviderError> {
+            self.commands.push("select".into());
+            Ok(provider::FolderStatus {
+                uidvalidity: 7,
+                exists: self.messages.len() as u32,
+            })
+        }
+        async fn highest_uid(&mut self, _: &str) -> Result<Option<u32>, ProviderError> {
+            self.commands.push("highest uid".into());
+            Ok(self.messages.iter().map(|(uid, _)| *uid).max())
+        }
+        async fn fetch_flags(&mut self, _: &str, _: &str) -> Result<Vec<(u32, bool, bool, bool)>, ProviderError> {
+            unused()
+        }
+        async fn search_flags(&mut self, _: &str) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+            self.commands.push("all flags".into());
+            Ok(Some(
+                self.messages
+                    .iter()
+                    .map(|(uid, seen)| (*uid, *seen, false, false))
+                    .collect(),
+            ))
+        }
+        async fn fetch_flags_changed_since(
+            &mut self,
+            _: &str,
+            _: u32,
+            modseq: u64,
+        ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+            self.commands.push(format!("flags changed since {modseq}"));
+            Ok(Some(self.changed_since.clone()))
+        }
+        async fn fetch_headers(&mut self, _: &str, uid_set: &str) -> Result<Vec<FetchedMessage>, ProviderError> {
+            self.commands.push(format!("headers {uid_set}"));
+            let (start, end) = uid_set.split_once(':').unwrap();
+            let range = start.parse::<u32>().unwrap()..=end.parse::<u32>().unwrap();
+            Ok(self
+                .messages
+                .iter()
+                .filter(|(uid, _)| range.contains(uid))
+                .map(|(uid, seen)| FetchedMessage {
+                    uid: *uid,
+                    subject: format!("message {uid}"),
+                    from_addr: "sender@example.test".to_owned(),
+                    internal_date: "2026-11-16T18:53:00+00:00".to_owned(),
+                    is_seen: *seen,
+                    ..FetchedMessage::default()
+                })
+                .collect())
+        }
+        async fn fetch_full(&mut self, _: &str, _: &str) -> Result<Vec<FetchedMessage>, ProviderError> {
+            unused()
+        }
+        async fn fetch_raw(&mut self, _: &str, _: u32) -> Result<Vec<u8>, ProviderError> {
+            unused()
+        }
+        async fn set_flag(&mut self, _: &str, _: u32, _: &str, _: bool) -> Result<(), ProviderError> {
+            unused()
+        }
+        async fn move_message(&mut self, _: &str, _: u32, _: &str) -> Result<(), ProviderError> {
+            unused()
+        }
+        async fn delete_permanently(&mut self, _: &str, _: u32) -> Result<(), ProviderError> {
+            unused()
+        }
+        async fn append_sent(&mut self, _: &[u8]) -> Result<(), ProviderError> {
+            unused()
+        }
+        async fn close(&mut self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn snapshot(exists: u32, uid_next: u32, highest_modseq: u64) -> Option<FolderSnapshot> {
+        Some(FolderSnapshot {
+            uidvalidity: 7,
+            exists,
+            uid_next,
+            highest_modseq,
+        })
+    }
+
+    /// Run one cycle of the INBOX and return the commands it issued.
+    async fn cycle(
+        server: &mut Server,
+        snapshot: Option<FolderSnapshot>,
+        app: &Arc<dyn SyncAppState>,
+        db: &sqlx::SqlitePool,
+    ) -> Vec<String> {
+        server.commands.clear();
+        sync_folder(
+            "acc",
+            "user",
+            "INBOX",
+            "lazy",
+            ProviderKind::Imap,
+            0,
+            snapshot,
+            server,
+            db,
+            app,
+        )
+        .await
+        .unwrap();
+        server.commands.clone()
+    }
+
+    async fn live_uids_unread(db: &sqlx::SqlitePool) -> Vec<(i64, bool)> {
+        sqlx::query_as(
+            "SELECT uid, is_read = 0 FROM messages WHERE is_deleted = 0 ORDER BY uid",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_folder_costs_nothing_and_a_changed_one_only_its_changes() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::migrations::run_mail_migrations(&db).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO email_accounts
+                 (id, display_name, primary_email, imap_host, imap_port, imap_auth_scheme,
+                  smtp_host, smtp_port, smtp_auth_scheme, credentials_encrypted)
+                 VALUES ('acc', 'Account', 'a@example.test', 'imap', 993, 'plain', 'smtp', 465, 'plain', X'00');
+             INSERT INTO folders (id, account_id, name, full_path, folder_type) VALUES ('f1', 'acc', 'INBOX', 'INBOX', 'INBOX');",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let app: Arc<dyn SyncAppState> = Arc::new(App {
+            db: db.clone(),
+            manager: Arc::new(SyncManager::new()),
+        });
+        let mut server = Server {
+            messages: vec![(1, false), (2, false), (3, false)],
+            ..Server::default()
+        };
+
+        // First sync: everything is new.
+        let commands = cycle(&mut server, snapshot(3, 4, 10), &app, &db).await;
+        assert_eq!(commands, vec!["select", "highest uid", "headers 1:3"]);
+        assert_eq!(live_uids_unread(&db).await, vec![(1, true), (2, true), (3, true)]);
+
+        // Same snapshot: the server is not asked anything.
+        let commands = cycle(&mut server, snapshot(3, 4, 10), &app, &db).await;
+        assert!(commands.is_empty(), "unexpected commands: {commands:?}");
+
+        // A flag changed elsewhere: only the changed flags are fetched.
+        server.messages[1].1 = true;
+        server.changed_since = vec![(2, true, false, false)];
+        let commands = cycle(&mut server, snapshot(3, 4, 11), &app, &db).await;
+        assert_eq!(commands, vec!["select", "flags changed since 10", "highest uid"]);
+        assert_eq!(live_uids_unread(&db).await, vec![(1, true), (2, false), (3, true)]);
+
+        // New mail and nothing else: changed flags since the last snapshot,
+        // then the new uid.
+        server.messages.push((4, false));
+        server.changed_since = Vec::new();
+        let commands = cycle(&mut server, snapshot(4, 5, 12), &app, &db).await;
+        assert_eq!(
+            commands,
+            vec!["select", "flags changed since 11", "highest uid", "headers 4:4"]
+        );
+
+        // A message was expunged: the whole folder is compared again.
+        server.messages.remove(0);
+        let commands = cycle(&mut server, snapshot(3, 5, 12), &app, &db).await;
+        assert_eq!(commands, vec!["select", "all flags", "highest uid"]);
+        assert_eq!(live_uids_unread(&db).await, vec![(2, false), (3, true), (4, true)]);
+
+        // Without a snapshot (no CONDSTORE) every cycle compares the folder.
+        let commands = cycle(&mut server, None, &app, &db).await;
+        assert_eq!(commands, vec!["select", "all flags", "highest uid"]);
     }
 }

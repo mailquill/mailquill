@@ -27,7 +27,7 @@ use super::http::Rest;
 use super::idmap::IdMap;
 use super::imap::ImapProvider;
 use super::{FolderStatus, MailProvider, ProviderConfig, ProviderError};
-use crate::session::{self, FetchedMessage, FolderInfo};
+use crate::session::{self, FetchedMessage, FolderInfo, FolderSnapshot};
 
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 
@@ -237,6 +237,24 @@ impl MailProvider for GmailImapProvider {
         folder: &str,
     ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
         self.imap.search_flags(folder).await
+    }
+
+    async fn folder_snapshot(
+        &mut self,
+        folder: &str,
+    ) -> Result<Option<FolderSnapshot>, ProviderError> {
+        self.imap.folder_snapshot(folder).await
+    }
+
+    async fn fetch_flags_changed_since(
+        &mut self,
+        folder: &str,
+        up_to_uid: u32,
+        modseq: u64,
+    ) -> Result<Option<Vec<(u32, bool, bool, bool)>>, ProviderError> {
+        self.imap
+            .fetch_flags_changed_since(folder, up_to_uid, modseq)
+            .await
     }
 
     async fn search_text(

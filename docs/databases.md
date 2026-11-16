@@ -57,7 +57,7 @@ on next use. Migrations:
 |----------------|---------|
 | `email_accounts` | IMAP/SMTP accounts (encrypted credentials live here) |
 | `account_aliases` | send-from aliases per account |
-| `folders` | synced IMAP folders, their sync settings, and the trigger-maintained `unread_count` / `live_message_count` the list totals and sidebar badges read |
+| `folders` | synced IMAP folders, their sync settings, the trigger-maintained `unread_count` / `live_message_count` the list totals and sidebar badges read, and the server snapshot of the last complete sync (`synced_modseq`, `synced_uidnext`, `synced_exists`; see [mail-sync.md](mail-sync.md)) |
 | `messages` | message metadata (headers, flags, thread keys). `internal_date` is always UTC in the form `2026-11-16T18:53:00+00:00`: the lists sort and page on it as text, so a row with another offset would sort out of place |
 | `pending_flag_ops` | outbox of read/flagged changes not yet confirmed by the server; protects them from being reverted by the next flag reconciliation (see [mail-sync.md](mail-sync.md)) |
 | `local_drafts` | recipient and attachment JSON of drafts composed locally (the draft itself is a `messages` row with `is_local_draft = 1`) |

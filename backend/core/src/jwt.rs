@@ -44,10 +44,14 @@ impl JwtKey {
     }
 
     /// Build a key from raw secret bytes. Used by [`Self::from_env`] and directly in tests.
+    ///
+    /// Panics if the secret is empty: an empty HMAC key would let anyone forge
+    /// tokens, so startup must fail instead.
     pub fn from_secret(secret: &[u8]) -> Self {
+        const EMPTY: &str = "JWT_SECRET must not be empty";
         Self {
-            encoding: EncodingKey::from_secret(secret),
-            decoding: DecodingKey::from_secret(secret),
+            encoding: EncodingKey::from_secret(secret).expect(EMPTY),
+            decoding: DecodingKey::from_secret(secret).expect(EMPTY),
         }
     }
 
@@ -83,6 +87,12 @@ mod tests {
         let key = JwtKey::from_secret(b"test-secret");
         let token = key.issue_access_token("user-1").expect("encode");
         assert_eq!(key.validate(&token).expect("decode"), "user-1");
+    }
+
+    #[test]
+    #[should_panic(expected = "JWT_SECRET must not be empty")]
+    fn from_secret_rejects_empty_secret() {
+        JwtKey::from_secret(b"");
     }
 
     #[test]

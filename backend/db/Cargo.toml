@@ -7,7 +7,7 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 sqlx = { workspace = true, features = ["postgres", "any", "macros", "migrate", "uuid", "chrono"] }
 # Not imported in code — pins the bundled (statically linked) SQLite build.
-libsqlite3-sys = { version = "0.37", features = ["bundled"] }
+libsqlite3-sys = { version = "0.40", features = ["bundled"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

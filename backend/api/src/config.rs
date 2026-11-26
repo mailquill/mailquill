@@ -2,10 +2,11 @@
 //! `mailquill.yaml` and environment variables (see [`Settings::load`]).
 
 use figment::{
-    providers::{Env, Format, Toml, Yaml},
+    providers::{Env, Format, Toml},
     Figment,
 };
 use serde::Deserialize;
+use serde_saphyr::figment::Yaml;
 
 /// Application settings. Required keys panic at startup when missing; the
 /// rest fall back to the defaults documented on each field.
@@ -107,7 +108,19 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{Settings, Yaml};
+    use figment::{providers::Format, Figment};
+
+    #[test]
+    fn example_yaml_config_loads() {
+        let settings: Settings = Figment::new()
+            .merge(Yaml::string(include_str!("../../../mailquill.example.yaml")))
+            .extract()
+            .unwrap();
+
+        assert_eq!(settings.server_port, 8080);
+        assert_eq!(settings.jwt_secret, "replace_me_long_random_string");
+    }
 
     #[test]
     fn remote_image_proxy_is_enabled_by_default() {

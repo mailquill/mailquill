@@ -37,7 +37,10 @@ strsim = "0.11"
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 urlencoding = { workspace = true }
-figment = { version = "0.10", features = ["toml", "yaml", "env"] }
+figment = { version = "0.10", features = ["toml", "env"] }
+# YAML config files. figment's own `yaml` feature pulls in the deprecated
+# serde_yaml and the unmaintained unsafe-libyaml (RUSTSEC-2024-0449).
+serde-saphyr = { version = "2.2", default-features = false, features = ["figment"] }
 web-push-native = "0.5"
 p256 = "0.14"
 clap = { version = "4", features = ["derive"] }

@@ -100,7 +100,7 @@ RUN --mount=type=secret,id=sccache_env \
     cp "target/$RUST_TARGET/release/mailquill" /mailquill
 
 # Stage 5: Runtime image
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata
 
 RUN addgroup -S mailquill && \

@@ -49,6 +49,9 @@
    accent is orange (#EA580C). The sidebar stays navy in both themes for a
    constant brand/identity surface. */
 :root {
+  /* Tells the browser which palette to paint native UI in (select popups,
+     date pickers, autofill); without it they stay light under `.dark`. */
+  color-scheme: light;
   --radius: 0.5rem;
 
   --background: #f8fafc; /* mq-bg */
@@ -95,6 +98,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: #0b1220; /* mq-bg */
   --foreground: #eaf0f8; /* mq-text */
   --card: #141c2b; /* mq-surface */

@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # Stage 1: Build frontend
-FROM oven/bun:1-alpine AS frontend-builder
+# Pinned, not `1-alpine`: a floating tag cached before Bun 1.4 cannot read the
+# lockfile format bun.lock is written in. Keep in step with the bun-version in
+# .github/workflows/frontend-audit.yml.
+FROM oven/bun:1.4.5-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/bun.lock ./
 RUN bun install --frozen-lockfile

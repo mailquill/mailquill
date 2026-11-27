@@ -43,7 +43,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
-          # Keep in step with the version that wrote frontend/bun.lock.
+          # Keep in step with the version that wrote frontend/bun.lock and
+          # with the oven/bun image in deploy/Dockerfile.
           bun-version: '1.4.5'
       - name: Install from lockfile
         run: bun install --frozen-lockfile
